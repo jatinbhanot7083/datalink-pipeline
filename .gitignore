@@ -42,7 +42,8 @@ dags/__pycache__/
 *.key
 *.p12
 *.pfx
-**/secrets/**
+# Note: datalink/adapters/secrets/ contains the SecretProvider adapter code,
+# not actual secrets. Don't glob-exclude "secrets/" — use specific file patterns above.
 
 # --- IDE / editor ---
 .idea/
