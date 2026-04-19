@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -79,4 +79,6 @@ def configure_logging(level: str = "INFO", fmt: LogFormat | str = LogFormat.CONS
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
-    return structlog.get_logger(name)
+    # structlog.get_logger is typed loosely (returns Any in some resolutions);
+    # we've configured it to produce BoundLogger via make_filtering_bound_logger.
+    return cast(structlog.stdlib.BoundLogger, structlog.get_logger(name))
