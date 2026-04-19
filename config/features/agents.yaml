@@ -1,0 +1,14 @@
+# CrewAI agent layer — the other "plug-in / plug-out" toggle.
+# Phase 5 ships the 6-agent baseline (Pre-Val: Profiler/Author/Reviewer;
+# Post-Val: RootCause/Remediation/Reporting). The 4 extras from UM-Gold-v2
+# (Registry Manager, Risk Scorer, Notification, Trend Analytics) land in Phase 5.5
+# and will add their own enabled flags here.
+
+features:
+  agents:
+    enabled: true
+    pre_validation_crew:
+      enabled: true
+    post_validation_crew:
+      enabled: true
+    max_tokens_per_run: 100000

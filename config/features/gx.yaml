@@ -1,0 +1,14 @@
+# Great Expectations quality layer — the "plug-in / plug-out" toggle.
+# Setting features.gx.enabled: false MUST leave the pipeline runnable end-to-end.
+# Proven by tests/plugout/test_plugout_gx_agents.py (Phase 5).
+
+features:
+  gx:
+    enabled: true
+    checkpoints:
+      bronze_structural:
+        fail_threshold_pct: 5.0
+      silver_clinical:
+        fail_threshold_pct: 5.0
+      gold_business:
+        fail_threshold_pct: 5.0

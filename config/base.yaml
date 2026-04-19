@@ -1,0 +1,15 @@
+# Cross-environment defaults. Anything shared between local/dev/stage/prod goes here.
+# Environment-specific overrides live in config/environments/{env}.yaml.
+# Feature toggles live in config/features/*.yaml (loaded last, before env vars).
+
+project_name: datalink-pipeline
+
+processing:
+  # Threshold at which ingestion switches from Pandas to PySpark.
+  # Above EITHER bound, PySpark is used.
+  pandas_to_spark_rows_threshold: 500000
+  pandas_to_spark_bytes_threshold: 524288000  # 500 MB
+
+logging:
+  level: INFO
+  format: console

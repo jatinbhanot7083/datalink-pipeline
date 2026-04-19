@@ -1,0 +1,27 @@
+# Stage: full prod-parity, isolated from prod. Used for UAT and pre-release validation.
+
+env: stage
+orchestrator: airflow_kind
+
+adapters:
+  sftp:
+    type: azure_sftp
+  object_store:
+    type: adls
+  warehouse:
+    type: snowflake
+  operational_dbs:
+    sqlserver:
+      type: sqlserver
+      host: stage-sqlserver.internal.datalink
+      port: 1433
+      user: datalink_stage_svc
+      database: datalink_um_stage
+  notifier:
+    type: teams
+  llm:
+    type: anthropic
+    model: claude-sonnet-4-6
+    max_tokens: 8192
+  secrets:
+    type: keyvault

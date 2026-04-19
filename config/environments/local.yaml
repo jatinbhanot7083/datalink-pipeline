@@ -1,0 +1,53 @@
+# Local environment: Windows 11 + WSL2 + Docker Desktop.
+# Selected by DL_ENV=local (the default).
+
+env: local
+orchestrator: local_sequential
+
+adapters:
+  sftp:
+    type: atmoz
+    host: localhost
+    port: 2222
+    user: datalink
+    password: datalink_local_only
+    remote_base_dir: /drop
+
+  object_store:
+    type: azurite
+    endpoint: http://localhost:10000/devstoreaccount1
+    account: devstoreaccount1
+    account_key: Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
+    container: datalink-raw
+
+  warehouse:
+    type: duckdb
+    path: ./warehouse.duckdb
+
+  operational_dbs:
+    sqlserver:
+      type: sqlserver
+      host: localhost
+      port: 1433
+      user: sa
+      password: DataLink_LocalOnly_2026!
+      database: datalink_um
+    postgres:
+      type: postgres
+      host: localhost
+      port: 5432
+      user: datalink
+      password: datalink_local_only
+      database: datalink_um
+
+  notifier:
+    type: file
+    path: ./logs/notifications.jsonl
+
+  llm:
+    type: stub
+    model: claude-haiku-4-5-20251001
+    max_tokens: 4096
+
+  secrets:
+    type: env

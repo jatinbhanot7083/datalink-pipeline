@@ -1,0 +1,9 @@
+# Dual-warehouse bulk-push router.
+# Controls which operational DBs receive the Gold bulk push.
+# Must be a subset of keys in adapters.operational_dbs for the selected env.
+
+features:
+  warehouse_router:
+    targets:
+      - sqlserver
+      - postgres

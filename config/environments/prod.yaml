@@ -1,0 +1,41 @@
+# Production. Every external endpoint is real. No stubs, no file-based notifiers.
+# All secrets from Azure Key Vault. Dual-warehouse push is enabled by default.
+
+env: prod
+orchestrator: airflow_kind
+
+adapters:
+  sftp:
+    type: azure_sftp
+
+  object_store:
+    type: adls
+
+  warehouse:
+    type: snowflake
+
+  operational_dbs:
+    sqlserver:
+      type: sqlserver
+      host: prod-um-sqlserver.internal.datalink
+      port: 1433
+      user: datalink_prod_svc
+      database: datalink_um
+    # PostgreSQL activation is gated by features.warehouse_router.targets in prod.yaml-features
+    postgres:
+      type: postgres
+      host: prod-um-postgres.internal.datalink
+      port: 5432
+      user: datalink_prod_svc
+      database: datalink_um
+
+  notifier:
+    type: teams
+
+  llm:
+    type: anthropic
+    model: claude-opus-4-7
+    max_tokens: 8192
+
+  secrets:
+    type: keyvault

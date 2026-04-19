@@ -1,0 +1,39 @@
+# Dev environment: cloud-hosted but non-prod. Actual endpoints come from env vars.
+# No secrets in this file — they live in Azure Key Vault (selected via secrets.type).
+
+env: dev
+orchestrator: airflow_kind
+
+adapters:
+  sftp:
+    type: azure_sftp
+    # host/user/key-path loaded from env vars at runtime
+
+  object_store:
+    type: adls
+    # endpoint / account / account_key from AZURE_STORAGE_* env vars
+
+  warehouse:
+    type: snowflake
+    # account/user/password/warehouse/role/database from env vars
+
+  operational_dbs:
+    sqlserver:
+      type: sqlserver
+      host: dev-sqlserver.internal.datalink
+      port: 1433
+      user: datalink_dev_svc
+      database: datalink_um_dev
+
+  notifier:
+    type: teams
+    # webhook_url from TEAMS_WEBHOOK_URL env var
+
+  llm:
+    type: anthropic
+    model: claude-haiku-4-5-20251001
+    max_tokens: 4096
+
+  secrets:
+    type: keyvault
+    # keyvault_url from AZURE_KEYVAULT_URL env var
