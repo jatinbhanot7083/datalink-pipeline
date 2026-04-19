@@ -1,0 +1,77 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+.venv/
+venv/
+env/
+
+# --- uv ---
+# uv.lock IS committed; cache is not
+.uv-cache/
+
+# --- dbt ---
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/profiles/*.local.yml
+
+# --- DuckDB (local warehouse state) ---
+*.duckdb
+*.duckdb.wal
+warehouse.duckdb*
+
+# --- Great Expectations artifacts ---
+gx/uncommitted/
+gx/.ge_store_backend_id
+
+# --- Airflow local state ---
+airflow.db
+airflow-webserver.pid
+logs/
+dags/__pycache__/
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+**/secrets/**
+
+# --- IDE / editor ---
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# --- Docker / volumes ---
+.docker-data/
+docker-compose.override.yml
+
+# --- Test artifacts ---
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+
+# --- Build ---
+build/
+dist/
+*.egg
+
+# --- OS / misc ---
+.test_write.txt
+
+# --- Sample data that is too big to commit ---
+data/sample/large/
