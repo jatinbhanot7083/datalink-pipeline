@@ -61,9 +61,7 @@ def test_local_env_loads_and_validates(config_root: Path, clean_dl_env: None) ->
 
 @pytest.mark.unit
 @pytest.mark.parametrize("env", ["dev", "stage", "prod"])
-def test_non_local_envs_load_and_validate(
-    config_root: Path, clean_dl_env: None, env: str
-) -> None:
+def test_non_local_envs_load_and_validate(config_root: Path, clean_dl_env: None, env: str) -> None:
     settings = load_settings(config_root=config_root, env=env)
     assert settings.env.value == env
     # non-local envs always use anthropic LLM + keyvault secrets
@@ -106,6 +104,8 @@ def test_missing_env_file_raises(tmp_path: Path, clean_dl_env: None) -> None:
 @pytest.mark.unit
 def test_settings_is_frozen(config_root: Path, clean_dl_env: None) -> None:
     """Settings must be immutable — mutations after load would surprise callers."""
+    from pydantic import ValidationError
+
     settings = load_settings(config_root=config_root, env="local")
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         settings.project_name = "mutated"  # type: ignore[misc]

@@ -27,13 +27,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: object) -> None:  # quieter default logs
         sys.stderr.write("[access] " + (fmt % args) + "\n")
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         if self.path == "/health":
             self._ok("ok")
             return
         self._not_found()
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         if self.path != "/notify":
             self._not_found()
             return

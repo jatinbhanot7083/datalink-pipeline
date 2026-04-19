@@ -7,25 +7,25 @@ here, it doesn't exist.
 
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
-class EnvName(str, Enum):
+class EnvName(StrEnum):
     LOCAL = "local"
     DEV = "dev"
     STAGE = "stage"
     PROD = "prod"
 
 
-class OrchestratorName(str, Enum):
+class OrchestratorName(StrEnum):
     LOCAL_SEQUENTIAL = "local_sequential"
     AIRFLOW_KIND = "airflow_kind"
 
 
-class LogFormat(str, Enum):
+class LogFormat(StrEnum):
     JSON = "json"
     CONSOLE = "console"
 

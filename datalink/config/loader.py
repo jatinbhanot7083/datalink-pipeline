@@ -53,11 +53,7 @@ def _deep_merge(base: dict[str, Any], override: Mapping[str, Any]) -> dict[str, 
     """Recursively merge `override` into `base`. `override` wins on conflicts."""
     result = deepcopy(base)
     for key, val in override.items():
-        if (
-            key in result
-            and isinstance(result[key], dict)
-            and isinstance(val, Mapping)
-        ):
+        if key in result and isinstance(result[key], dict) and isinstance(val, Mapping):
             result[key] = _deep_merge(result[key], val)
         else:
             result[key] = deepcopy(val) if not isinstance(val, Mapping) else dict(val)
@@ -100,15 +96,16 @@ def _env_overrides(prefix: str = "DL_") -> dict[str, Any]:
     for key, raw in os.environ.items():
         if not key.startswith(prefix):
             continue
-        path = key[len(prefix):].lower().split("__")
+        path = key[len(prefix) :].lower().split("__")
         if not path or not path[0]:
             continue
         cursor = result
         for part in path[:-1]:
+            # If a shallower DL_FOO=scalar was set first, setdefault returns
+            # that scalar and the next iteration will raise — letting config
+            # fail loudly at load time is the right behavior (better than
+            # silently dropping the conflicting var).
             cursor = cursor.setdefault(part, {})
-            if not isinstance(cursor, dict):
-                # conflicting shape — skip this var
-                cursor = {}
         cursor[path[-1]] = _coerce(raw)
     return result
 

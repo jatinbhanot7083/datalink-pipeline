@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
-
 # ============================================================================
 # Domain value objects — shared across adapters.
 # ============================================================================

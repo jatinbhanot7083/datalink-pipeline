@@ -49,7 +49,7 @@ DL_FEATURES__GX__ENABLED=false DL_FEATURES__AGENTS__ENABLED=false make demo
 ```
 
 PHI never leaves Snowflake. The `datalink.phi.PhiRedactionLayer` raises
-`PhiBoundaryViolation` on any agent → LLM call that contains row-level data.
+`PhiBoundaryViolationError` on any agent → LLM call that contains row-level data.
 This is enforced in code, not docs — see [tests/unit/test_phi_guard.py](tests/unit/test_phi_guard.py).
 
 ---

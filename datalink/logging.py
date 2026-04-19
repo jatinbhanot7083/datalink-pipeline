@@ -38,9 +38,7 @@ _PHI_VALUE_KEYS: frozenset[str] = frozenset(
 )
 
 
-def _phi_scrub(
-    _logger: Any, _method_name: str, event_dict: dict[str, Any]
-) -> dict[str, Any]:
+def _phi_scrub(_logger: Any, _method_name: str, event_dict: dict[str, Any]) -> dict[str, Any]:
     for key in list(event_dict.keys()):
         if key.lower() in _PHI_VALUE_KEYS:
             event_dict[key] = "[REDACTED:phi]"
@@ -81,4 +79,4 @@ def configure_logging(level: str = "INFO", fmt: LogFormat | str = LogFormat.CONS
 
 
 def get_logger(name: str | None = None) -> structlog.stdlib.BoundLogger:
-    return structlog.get_logger(name)  # type: ignore[no-any-return]
+    return structlog.get_logger(name)

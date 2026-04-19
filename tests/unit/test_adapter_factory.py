@@ -5,8 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from datalink.adapters.factory import AdapterConfigError, AdapterSet, build_adapters
+from datalink.adapters.factory import AdapterSet, build_adapters
 from datalink.adapters.llm.stub import StubLlm
 from datalink.adapters.notifier.file import FileNotifier
 from datalink.adapters.operational_db.postgres import PostgresOperationalDb
@@ -78,6 +79,7 @@ def test_file_notifier_writes_jsonl(tmp_notifications_dir: Path) -> None:
     lines = path.read_text(encoding="utf-8").splitlines()
     assert len(lines) == 2
     import json
+
     first = json.loads(lines[0])
     assert first["title"] == "hello"
     assert first["metadata"] == {"k": 1}
@@ -110,11 +112,9 @@ def test_env_secrets_round_trip(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.unit
-def test_factory_raises_on_unknown_adapter_type(
-    config_root: Path, clean_dl_env: None
-) -> None:
+def test_factory_raises_on_unknown_adapter_type(config_root: Path, clean_dl_env: None) -> None:
     """Editing config to an unknown type is caught at validation or build time."""
     from datalink.config.models import NotifierConfig
 
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         NotifierConfig(type="nonexistent")  # type: ignore[arg-type]

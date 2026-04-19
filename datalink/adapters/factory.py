@@ -171,8 +171,7 @@ def build_adapters(settings: Settings) -> AdapterSet:
         object_store=_build_object_store(a.object_store),
         warehouse=_build_warehouse(a.warehouse),
         operational_dbs={
-            name: _build_operational_db(name, cfg)
-            for name, cfg in a.operational_dbs.items()
+            name: _build_operational_db(name, cfg) for name, cfg in a.operational_dbs.items()
         },
         notifier=_build_notifier(a.notifier),
         secrets=_build_secrets(a.secrets),

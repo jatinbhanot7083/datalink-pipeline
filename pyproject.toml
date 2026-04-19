@@ -110,7 +110,8 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["N802"]  # pytest funcs may not follow snake_case
+"tests/**" = ["N802"]                  # pytest funcs may not follow snake_case
+"docker/webhook-stub/**" = ["N802"]    # http.server requires do_GET / do_POST names
 
 # ------------------------------------------------------------
 # mypy

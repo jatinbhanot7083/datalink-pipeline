@@ -293,7 +293,7 @@ A single `PhiRedactionLayer` class wraps all agent → LLM calls. It accepts onl
 - Row counts, batch IDs, timestamps
 - GX expectation suite JSON (no data values)
 
-Any call that tries to pass a row-level payload raises `PhiBoundaryViolation`. A pytest fixture verifies this boundary on every build.
+Any call that tries to pass a row-level payload raises `PhiBoundaryViolationError`. A pytest fixture verifies this boundary on every build.
 
 ---
 

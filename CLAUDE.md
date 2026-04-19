@@ -53,7 +53,7 @@ Phase 1 installs only the lean runtime deps + dev tools. Phase-N-only libs (duck
 - Every external system behind a Python `Protocol` in `datalink/adapters/protocols.py`.
 - Config selects concrete adapter per env via `datalink/adapters/factory.py` (one `build_adapters(settings) → AdapterSet`).
 - GX + CrewAI must be **provably removable**: `DL_FEATURES__GX__ENABLED=false` + `DL_FEATURES__AGENTS__ENABLED=false` → pipeline runs E2E unchanged. Proven by `tests/plugout/` (Phase 5).
-- **PHI guardrail enforced in code**, not docs. `datalink.phi.PhiRedactionLayer.assert_clean(payload)` raises `PhiBoundaryViolation` on anything shaped like a row or containing PHI-keyed fields. Enforced on every agent → LLM boundary.
+- **PHI guardrail enforced in code**, not docs. `datalink.phi.PhiRedactionLayer.assert_clean(payload)` raises `PhiBoundaryViolationError` on anything shaped like a row or containing PHI-keyed fields. Enforced on every agent → LLM boundary.
 - Agents suggest, never auto-execute.
 - No hardcoded paths, credentials, endpoints, or env-specific logic in pipeline code — everything through `datalink.config.load_settings()`.
 

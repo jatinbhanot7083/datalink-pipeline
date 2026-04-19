@@ -7,7 +7,7 @@ import pytest
 from datalink.phi.guard import (
     MAX_FREETEXT_LEN,
     MAX_LIST_LEN,
-    PhiBoundaryViolation,
+    PhiBoundaryViolationError,
     PhiRedactionLayer,
 )
 
@@ -32,7 +32,7 @@ def test_allows_pure_metadata_payload(phi: PhiRedactionLayer) -> None:
 
 @pytest.mark.unit
 def test_rejects_unknown_top_level_key(phi: PhiRedactionLayer) -> None:
-    with pytest.raises(PhiBoundaryViolation) as exc:
+    with pytest.raises(PhiBoundaryViolationError) as exc:
         phi.assert_clean({"raw_data": [1, 2, 3]})
     assert "not in SAFE_FIELDS" in str(exc.value)
 
@@ -43,14 +43,14 @@ def test_rejects_unknown_top_level_key(phi: PhiRedactionLayer) -> None:
     ["ssn", "member_name", "patient_name", "dob", "street", "mrn", "medical_record_number"],
 )
 def test_rejects_nested_phi_keys(phi: PhiRedactionLayer, phi_key: str) -> None:
-    with pytest.raises(PhiBoundaryViolation):
+    with pytest.raises(PhiBoundaryViolationError):
         phi.assert_clean({"profile": {phi_key: "anything"}})
 
 
 @pytest.mark.unit
 def test_rejects_oversize_list(phi: PhiRedactionLayer) -> None:
     payload = {"top_values": list(range(MAX_LIST_LEN + 1))}
-    with pytest.raises(PhiBoundaryViolation) as exc:
+    with pytest.raises(PhiBoundaryViolationError) as exc:
         phi.assert_clean(payload)
     assert "row-like" in str(exc.value)
 
@@ -58,7 +58,7 @@ def test_rejects_oversize_list(phi: PhiRedactionLayer) -> None:
 @pytest.mark.unit
 def test_rejects_oversize_freetext(phi: PhiRedactionLayer) -> None:
     payload = {"context": "a" * (MAX_FREETEXT_LEN + 1)}
-    with pytest.raises(PhiBoundaryViolation) as exc:
+    with pytest.raises(PhiBoundaryViolationError) as exc:
         phi.assert_clean(payload)
     assert "clinical note leak" in str(exc.value)
 

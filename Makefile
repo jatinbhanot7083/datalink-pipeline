@@ -6,6 +6,10 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 .ONESHELL:
+# With ONESHELL, a whole recipe runs in one shell — without -e, an earlier
+# failing command silently continues. -e = abort on first non-zero; -c =
+# read from command string; -u would blow up on make's $$$VAR idiom so skip.
+.SHELLFLAGS := -ec
 
 # Colors (disabled when stdout isn't a TTY)
 BOLD := $(shell tput bold 2>/dev/null)

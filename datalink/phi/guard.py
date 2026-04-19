@@ -43,8 +43,8 @@ SAFE_FIELDS: frozenset[str] = frozenset(
         "mean",
         "stddev",
         "percentiles",
-        "profile",          # nested dict of per-column aggregates
-        "top_values",       # aggregated most-frequent values — see _is_pii_value guard below
+        "profile",  # nested dict of per-column aggregates
+        "top_values",  # aggregated most-frequent values — see _is_pii_value guard below
         # Validation artifacts (no data values)
         "expectation_type",
         "expectations",
@@ -110,7 +110,7 @@ MAX_LIST_LEN = 50
 MAX_FREETEXT_LEN = 4_000
 
 
-class PhiBoundaryViolation(Exception):
+class PhiBoundaryViolationError(Exception):
     """Raised when a payload bound for an LLM looks like it contains PHI."""
 
 
@@ -121,7 +121,7 @@ class InspectionReport:
 
     def raise_if_violated(self) -> None:
         if not self.ok:
-            raise PhiBoundaryViolation("; ".join(self.violations))
+            raise PhiBoundaryViolationError("; ".join(self.violations))
 
 
 class PhiRedactionLayer:
@@ -160,7 +160,7 @@ class PhiRedactionLayer:
                     violations.append(f"{subpath}: key matches PHI substring")
                     continue
                 violations.extend(self._inspect_value(subpath, v))
-        elif isinstance(value, (list, tuple)):
+        elif isinstance(value, list | tuple):
             # Iterable[non-str] must be short and contain primitives / flat dicts
             seq = list(value)
             if len(seq) > MAX_LIST_LEN:
@@ -194,10 +194,6 @@ class PhiRedactionLayer:
         out: list[dict[str, Any]] = []
         for item in items:
             out.append(
-                {
-                    k: v
-                    for k, v in item.items()
-                    if not PhiRedactionLayer._looks_like_phi_key(str(k))
-                }
+                {k: v for k, v in item.items() if not PhiRedactionLayer._looks_like_phi_key(str(k))}
             )
         return out
