@@ -1,0 +1,24 @@
+# Single-node kind cluster for DataLink local Airflow.
+# Exposes the Airflow webserver NodePort on host :8080.
+# Opt-in path — requires kind + kubectl + helm installed on the host.
+# Default orchestrator (local_sequential) does NOT use this cluster.
+
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: datalink-local
+nodes:
+  - role: control-plane
+    image: kindest/node:v1.30.0
+    extraPortMappings:
+      - containerPort: 30808         # NodePort for airflow-webserver
+        hostPort: 8080
+        protocol: TCP
+      - containerPort: 30900         # webhook-stub (if exposed from cluster)
+        hostPort: 9001
+        protocol: TCP
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            node-labels: "ingress-ready=true"

@@ -1,0 +1,58 @@
+# Minimal Airflow Helm values for local kind deployment.
+# Uses KubernetesExecutor so each task runs in its own pod — matches AKS prod.
+# Opt-in path: `make up-airflow` invokes `helm upgrade --install`.
+#
+# NOT a prod config. Passwords here are well-known local-dev placeholders.
+
+executor: KubernetesExecutor
+
+# Don't build + load custom images by default — use official image.
+images:
+  airflow:
+    repository: apache/airflow
+    tag: "2.9.3"
+    pullPolicy: IfNotPresent
+
+# Fernet key: regenerate per-environment. Fixed value here ONLY because
+# this cluster is explicitly local and torn down frequently.
+fernetKey: "9QzK8V8dX6n6lZXvvWjL6Sc9U1w8b5p5I2Fq4Q9N3rA="
+
+# The metadata DB ships in-cluster (Postgres) for local. Prod uses managed Postgres.
+postgresql:
+  enabled: true
+  auth:
+    enablePostgresUser: true
+    postgresPassword: "airflow_local_only"
+
+redis:
+  enabled: false   # KubernetesExecutor does not need Redis
+
+webserver:
+  defaultUser:
+    enabled: true
+    username: admin
+    password: admin_local_only
+    email: datalink-local@example.invalid
+  service:
+    type: NodePort
+    ports:
+      - name: airflow-ui
+        port: 8080
+        targetPort: 8080
+        nodePort: 30808
+
+scheduler:
+  replicas: 1
+
+workers:
+  persistence:
+    enabled: false
+
+# DAGs are mounted from a local git checkout in the host's filesystem via a
+# hostPath volume. For now, point at /opt/airflow/dags (populated at runtime
+# by `make dag-sync`). Phase 2 fleshes this out.
+dags:
+  persistence:
+    enabled: false
+  gitSync:
+    enabled: false   # we use hostPath + manual sync in local dev

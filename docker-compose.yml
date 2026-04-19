@@ -1,0 +1,106 @@
+name: datalink-local
+
+# All services are bound to localhost only. No external interfaces.
+# Credentials are the well-known local-dev defaults — see .env.example.
+
+services:
+  # --- SFTP landing zone for Claims / Membership EDI files --------------
+  sftp:
+    image: atmoz/sftp:alpine
+    container_name: datalink-sftp
+    ports:
+      - "127.0.0.1:2222:22"
+    # user:password:uid:gid:chroot-target
+    command: "datalink:datalink_local_only:1001:::drop"
+    volumes:
+      - sftp_data:/home/datalink/drop
+    healthcheck:
+      test: ["CMD", "sh", "-c", "pgrep sshd || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # --- ADLS Gen2 emulator (Blob API) ------------------------------------
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:3.31.0
+    container_name: datalink-azurite
+    command: >
+      azurite
+        --blobHost 0.0.0.0
+        --queueHost 0.0.0.0
+        --tableHost 0.0.0.0
+        --skipApiVersionCheck
+        --location /data
+    ports:
+      - "127.0.0.1:10000:10000"   # Blob
+      - "127.0.0.1:10001:10001"   # Queue
+      - "127.0.0.1:10002:10002"   # Table
+    volumes:
+      - azurite_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z localhost 10000 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # --- Operational DB #1 — current prod target --------------------------
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: datalink-sqlserver
+    environment:
+      ACCEPT_EULA: "Y"
+      MSSQL_SA_PASSWORD: "DataLink_LocalOnly_2026!"
+      MSSQL_PID: "Developer"
+    ports:
+      - "127.0.0.1:1433:1433"
+    volumes:
+      - sqlserver_data:/var/opt/mssql
+    healthcheck:
+      # /opt/mssql-tools18/bin/sqlcmd is bundled in the 2022 image
+      test:
+        - "CMD-SHELL"
+        - "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\" -No -b || exit 1"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # --- Operational DB #2 — future prod target ---------------------------
+  postgres:
+    image: postgres:16
+    container_name: datalink-postgres
+    environment:
+      POSTGRES_USER: datalink
+      POSTGRES_PASSWORD: datalink_local_only
+      POSTGRES_DB: datalink_um
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "datalink", "-d", "datalink_um"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # --- Webhook stub — local Teams replacement ---------------------------
+  webhook-stub:
+    build:
+      context: ./docker/webhook-stub
+    container_name: datalink-webhook-stub
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - webhook_logs:/app/logs
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  sftp_data:
+  azurite_data:
+  sqlserver_data:
+  postgres_data:
+  webhook_logs:

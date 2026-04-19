@@ -1,0 +1,14 @@
+# Minimal .dockerignore for build contexts under docker/.
+# Individual service builds (docker/webhook-stub/) have tiny contexts anyway.
+
+.git/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.duckdb
+logs/
+data/sample/large/
+node_modules/
