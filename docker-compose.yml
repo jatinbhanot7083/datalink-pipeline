@@ -23,10 +23,11 @@ services:
     container_name: datalink-sftp
     ports:
       - "127.0.0.1:2222:22"
-    # user:password:uid:gid:chroot-target
-    command: "datalink:datalink_local_only:1001:::drop"
-    volumes:
-      - sftp_data:/home/datalink/drop
+    # atmoz/sftp command format: user:password[:e][:uid:gid[:dir1,dir2,...]]
+    # The dir list is chown'd to user:gid at startup.
+    # NOTE: don't mount a volume at /home/datalink/drop — atmoz cannot chown
+    # a pre-existing mount point. Dev data is ephemeral across `make down`.
+    command: "datalink:datalink_local_only:1001:100:drop"
     healthcheck:
       test: ["CMD", "sh", "-c", "pgrep sshd || exit 1"]
       interval: 5s
@@ -118,7 +119,6 @@ services:
       retries: 5
 
 volumes:
-  sftp_data:
   azurite_data:
   sqlserver_data:
   postgres_data:

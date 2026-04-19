@@ -50,7 +50,7 @@ def test_local_env_loads_and_validates(config_root: Path, clean_dl_env: None) ->
     assert settings.orchestrator is OrchestratorName.LOCAL_SEQUENTIAL
     assert settings.adapters.warehouse.type == "duckdb"
     assert settings.adapters.sftp.type == "atmoz"
-    assert settings.adapters.object_store.type == "azurite"
+    assert settings.adapters.object_store.type == "localfs"
     assert "sqlserver" in settings.adapters.operational_dbs
     assert "postgres" in settings.adapters.operational_dbs
     assert settings.adapters.llm.type == "stub"

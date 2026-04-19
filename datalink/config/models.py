@@ -49,8 +49,10 @@ class SftpConfig(BaseModel):
 
 class ObjectStoreConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    type: Literal["azurite", "adls", "stub"] = "azurite"
-    endpoint: str = "http://localhost:10000/devstoreaccount1"
+    # localfs — filesystem-backed, offline. Azurite — Azure Blob emulator.
+    # adls    — production Azure Data Lake Storage Gen2.
+    type: Literal["localfs", "azurite", "adls", "stub"] = "localfs"
+    endpoint: str = "file:///tmp/datalink-localfs"
     account: str = "devstoreaccount1"
     account_key: str | None = None
     container: str = "datalink-raw"

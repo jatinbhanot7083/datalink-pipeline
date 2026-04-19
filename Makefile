@@ -178,12 +178,37 @@ verify-phase-1-services: ## Phase 1 services — requires `make up` to have run
 # =============================================================================
 
 .PHONY: demo
-demo: ## Run the full E2E demo (populated in Phase 2+)
-	@echo "demo target lands in Phase 2 — Bronze ingestion"
+demo: ## Bronze E2E demo — upload 3 sample CSVs via SFTP → LocalFs → DuckDB MERGE
+	uv run python scripts/smoke_bronze.py
 
 .PHONY: demo-reset
-demo-reset: ## Wipe warehouse + re-seed sample data (Phase 2+)
-	@echo "demo-reset target lands in Phase 2"
+demo-reset: ## Wipe warehouse.duckdb + localfs object store + re-seed sample CSVs
+	rm -f warehouse.duckdb warehouse.duckdb.wal
+	rm -rf /tmp/datalink-localfs
+	rm -rf data/sample
+	uv run python scripts/seed_sample_data.py
+
+.PHONY: verify-phase-2
+verify-phase-2: verify-phase-2-code verify-phase-2-demo ## Phase 2: code + full E2E demo
+	@echo "$(BOLD)verify-phase-2 PASS$(RST)"
+
+.PHONY: verify-phase-2-code
+verify-phase-2-code: ## Phase 2 code checks — no Docker required
+	@echo "--- phase-2 structural tests ---"
+	uv run pytest -m phase -q
+	@echo "--- phase-2 unit tests ---"
+	uv run pytest -m unit -q
+	@echo "--- phase-2 lint ---"
+	uv run ruff check .
+	@echo "--- phase-2 type check ---"
+	uv run mypy datalink
+	@echo "OK: phase-2 code checks"
+
+.PHONY: verify-phase-2-demo
+verify-phase-2-demo: ## Phase 2 E2E demo — requires `make up` first
+	@echo "--- phase-2 E2E (SFTP → LocalFs → DuckDB, idempotent MERGE) ---"
+	uv run python scripts/smoke_bronze.py
+	@echo "OK: phase-2 E2E green"
 
 # =============================================================================
 # Airflow-on-kind — opt-in path (requires kind + helm + kubectl installed)

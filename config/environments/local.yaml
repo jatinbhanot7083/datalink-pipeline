@@ -14,10 +14,12 @@ adapters:
     remote_base_dir: /drop
 
   object_store:
-    type: azurite
-    endpoint: http://localhost:10000/devstoreaccount1
-    account: devstoreaccount1
-    account_key: Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==
+    # localfs: fully offline, no external deps. Prod uses ADLS Gen2 via the
+    # same Protocol — config-only switch (see environments/prod.yaml).
+    # To use the Azurite emulator instead: set type=azurite and fill
+    # endpoint/account_key (see .env.example for the well-known dev key).
+    type: localfs
+    endpoint: file:///tmp/datalink-localfs
     container: datalink-raw
 
   warehouse:

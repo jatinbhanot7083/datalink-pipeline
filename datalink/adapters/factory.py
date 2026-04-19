@@ -21,6 +21,7 @@ from datalink.adapters.notifier.smtp import SmtpNotifier
 from datalink.adapters.notifier.teams import TeamsNotifier
 from datalink.adapters.object_store.adls import AdlsObjectStore
 from datalink.adapters.object_store.azurite import AzuriteObjectStore
+from datalink.adapters.object_store.localfs import LocalFsObjectStore
 from datalink.adapters.operational_db.postgres import PostgresOperationalDb
 from datalink.adapters.operational_db.sqlserver import SqlServerOperationalDb
 from datalink.adapters.protocols import (
@@ -91,12 +92,14 @@ def _build_sftp(cfg: SftpConfig) -> SftpSource:
 
 def _build_object_store(cfg: ObjectStoreConfig) -> ObjectStore:
     match cfg.type:
+        case "localfs":
+            return LocalFsObjectStore(cfg)
         case "azurite":
             return AzuriteObjectStore(cfg)
         case "adls":
             return AdlsObjectStore(cfg)
         case "stub":
-            return AzuriteObjectStore(cfg)
+            return LocalFsObjectStore(cfg)
         case _ as bad:
             raise AdapterConfigError(f"Unknown object_store type: {bad!r}")
 
