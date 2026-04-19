@@ -73,9 +73,15 @@ _install-hooks:
 # =============================================================================
 
 .PHONY: up
-up: ## Start docker-compose services (sftp, azurite, sqlserver, postgres, webhook-stub)
+up: ## Start Hub-hosted services (sftp, postgres, webhook-stub). Skips MCR by default.
 	docker compose up -d --wait
-	@echo "$(BOLD)services up$(RST)"
+	@echo "$(BOLD)services up$(RST)  (default profile — Hub only)"
+	@docker compose ps
+
+.PHONY: up-mcr
+up-mcr: ## Start full stack including azurite + sqlserver (needs MCR pulls to work)
+	docker compose --profile mcr up -d --wait
+	@echo "$(BOLD)services up$(RST)  (full stack — Hub + MCR profile)"
 	@docker compose ps
 
 .PHONY: down
@@ -151,15 +157,21 @@ verify-phase-1-code: ## Phase 1 code checks — no Docker required
 	@echo "OK: phase-1 code checks"
 
 .PHONY: verify-phase-1-services
-verify-phase-1-services: ## Phase 1 services — require docker compose up first
-	@echo "--- phase-1 service health ---"
+verify-phase-1-services: ## Phase 1 services — requires `make up` to have run
+	@echo "--- phase-1 service health (default profile: Hub-only) ---"
 	@docker compose ps --format 'table {{.Service}}\t{{.Status}}'
-	@for svc in sftp azurite sqlserver postgres webhook-stub; do \
+	@for svc in sftp postgres webhook-stub; do \
 	  status=$$(docker compose ps --format '{{.Service}}={{.Status}}' | grep "^$$svc=" | cut -d= -f2); \
 	  echo "  $$svc: $$status"; \
-	  case "$$status" in *healthy*|*Up*) : ;; *) echo "FAIL: $$svc not healthy"; exit 1 ;; esac; \
+	  case "$$status" in \
+	    *unhealthy*)  echo "FAIL: $$svc is unhealthy"; exit 1 ;; \
+	    *healthy*)    : ;; \
+	    *)            echo "FAIL: $$svc not healthy — status: $$status"; exit 1 ;; \
+	  esac; \
 	done
-	@echo "OK: all services healthy"
+	@echo "OK: default-profile services healthy"
+	@echo "  (azurite + sqlserver are in the 'mcr' compose profile — off by default;"
+	@echo "   bring up with 'make up-mcr' once MCR pulls work on your machine.)"
 
 # =============================================================================
 # Demo (Phase 2+ will flesh this out)

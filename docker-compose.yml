@@ -2,6 +2,19 @@ name: datalink-local
 
 # All services are bound to localhost only. No external interfaces.
 # Credentials are the well-known local-dev defaults — see .env.example.
+#
+# Profiles:
+#   (default — no profile)  sftp, postgres, webhook-stub. All pulled from
+#                           Docker Hub; works everywhere.
+#   mcr                     azurite + sqlserver. Pulled from
+#                           mcr.microsoft.com, which is blocked by Docker
+#                           Desktop 4.51.0's built-in HTTP proxy on some
+#                           setups (see docs/operations_runbook.md §"MCR
+#                           pull fails"). Used by Phase 2+ when ingestion
+#                           and the UM schema push actually run.
+#
+# `make up`          → default profile (Hub only)
+# `make up-mcr`      → default + mcr profile (full stack)
 
 services:
   # --- SFTP landing zone for Claims / Membership EDI files --------------
@@ -21,9 +34,11 @@ services:
       retries: 5
 
   # --- ADLS Gen2 emulator (Blob API) ------------------------------------
+  # In the `mcr` profile — off by default until Phase 2 needs it.
   azurite:
     image: mcr.microsoft.com/azure-storage/azurite:3.31.0
     container_name: datalink-azurite
+    profiles: ["mcr"]
     command: >
       azurite
         --blobHost 0.0.0.0
@@ -44,9 +59,11 @@ services:
       retries: 5
 
   # --- Operational DB #1 — current prod target --------------------------
+  # In the `mcr` profile — off by default until Phase 4 pushes to it.
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: datalink-sqlserver
+    profiles: ["mcr"]
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: "DataLink_LocalOnly_2026!"
@@ -93,7 +110,9 @@ services:
     volumes:
       - webhook_logs:/app/logs
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:9000/health"]
+      # Use 127.0.0.1 — alpine resolves "localhost" to ::1 first, and our
+      # Python HTTP server binds IPv4 only, so localhost would get ECONNREFUSED.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9000/health"]
       interval: 5s
       timeout: 3s
       retries: 5
