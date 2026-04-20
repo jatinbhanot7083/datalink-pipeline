@@ -103,7 +103,31 @@ make help                # list all targets
 
 ## 9. Current Phase
 
-**Phase 3 — Silver Data Vault 2.0.** `make verify-phase-3` PASS (dbt run = 10 models green, dbt test = 60 tests green). Awaiting Jatin's review before Phase 4 (Gold UM + dual-warehouse router).
+**Phase 4 — Gold UM Operational + Dual-Warehouse Router.** `make verify-phase-4` PASS — code (43 phase + 43 unit tests, ruff + mypy clean), dbt (Silver + Gold green), router (fan-out to two Postgres targets + idempotency + config-flip all green). Awaiting Jatin's review before Phase 5 (GX + CrewAI plug-in layer).
+
+### Phase 4 deliverables (on `phase-4-gold-router`)
+
+- **5 Gold UM transactional dbt models** (`dbt/models/gold/um_operational/`): `gold_patient_auth`, `gold_auth_decision`, `gold_auth_code`, `gold_auth_diagnoses`, `gold_auth_provider`. Derived from Silver Hub/Sat/Link joins. ~4,070 PatientAuths from the 10k sample claims (the 40% with `prior_auth_ref`). Materialized as `table` in a `gold_um` schema.
+- **3 Lu\* seeds**: `lu_auth_status`, `lu_decision_status`, `lu_auth_type` (5 rows each, dbt seeds from CSV).
+- **Dual-warehouse router** (`datalink/pipeline/router/`):
+  - `schema.py` — central `GoldUmTable` map of all 8 UM tables + dialect-aware `postgres_ddl()` and `sqlserver_ddl()` generators (SQL Server uses `[UM].[PascalCase]`, TIMESTAMP→DATETIME2, BOOLEAN→BIT).
+  - `bulk_push.py` — `push_gold_um_to_operational(adapters, settings)` fans out to every target in `features.warehouse_router.targets`. Bootstraps target schema on first call.
+- **Real operational-DB adapters** (replaces Phase 1 stubs):
+  - `PostgresOperationalDb` — psycopg 3, `INSERT … ON CONFLICT … DO UPDATE` for idempotent upsert. Safe rollback on error so one failure doesn't stick a connection in aborted state.
+  - `SqlServerOperationalDb` — pyodbc, `MERGE INTO` + `fast_executemany`. pyodbc import is method-deferred so the adapter is instantiable on machines without libODBC.
+- **Second Postgres in docker-compose** (`postgres_replica` on host port `:5433`): second target for the router fan-out demo, because Docker Desktop 4.51.0 blocks the SQL Server MCR pull. Primary `postgres` moved to `:5434` (Jatin's Windows has a native Postgres on `:5432`). Prod stays `[sqlserver, postgres]` — the replica service and port shifts disappear there.
+- **Config**: `local.yaml` registers 3 `operational_dbs` (`sqlserver`, `postgres`, `postgres_replica`). Default `features.warehouse_router.targets = [postgres, postgres_replica]` (SQL Server excluded locally; flip to `[sqlserver, postgres]` for prod — config only, no code change).
+- **Makefile targets**: `make gold-run`, `gold-test`, `push-to-ops`, `verify-phase-4{,-code,-dbt,-router}`.
+- **Tests**: `tests/phase/test_phase_4.py` — 20 new tests covering Gold model layout, seed presence, router schema, DDL generators (PG + SQL Server), mocked fan-out, skip-unregistered-target, config-flip.
+- **`scripts/smoke_router.py`**: full end-to-end — reset targets, push, verify counts match across both, re-run for idempotency, flip config and verify replica untouched.
+
+### Phase 4 scope calls
+
+1. **5 of 20+ UM tables**, not all. Medallion/UM-Gold-v2 lists `PatientAuth`, `AuthDecision`, `AuthCode`, `AuthDiagnoses`, `AuthProvider`, `AuthService`, `AuthServiceDecision`, `InpatientAuth`, `OutpatientAuth`, `PharmacyAuth`, `AuthTatTracking`, `AuthActivity`, `AuthNote`, `AuthDocument`, plus 55+ `Lu*` lookups. Phase 4 ships a representative 5 + 3 that exercises the full pipeline + router. Remaining UM tables go in Phase 4.5 (format is identical — add rows to `GOLD_UM_TABLES` + a dbt model).
+2. **Two Postgres targets instead of SQL Server + Postgres**, locally only, to demo the router without depending on the MCR-blocked SQL Server image. Adapter code for SQL Server is real and tested via unit tests + mocked fan-out; it becomes active when `make up-mcr` succeeds.
+3. **Integer surrogate keys via `ROW_NUMBER()`** — deterministic within a `dbt run --full-refresh`. Prod may want `SEQUENCE`/`IDENTITY` — easy migration.
+
+### Phase 3 deliverables (on `phase-3-silver-dv2`)
 
 ### Phase 3 deliverables (on `phase-3-silver-dv2`)
 

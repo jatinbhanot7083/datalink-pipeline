@@ -1,0 +1,6 @@
+lu_auth_status_id,name,description
+1,OPEN,Auth is open and in workflow
+2,CLOSED,Auth closed with a final decision
+3,CANCELLED,Auth cancelled before decision
+4,VOID,Auth voided (administrative)
+5,PENDED,Auth pended awaiting additional info

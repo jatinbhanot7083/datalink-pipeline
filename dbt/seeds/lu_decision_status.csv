@@ -1,0 +1,6 @@
+lu_decision_status_id,name,description
+1,APPROVED,Auth approved
+2,DENIED,Auth denied
+3,PENDED,Decision pending (awaiting info / review)
+4,WITHDRAWN,Request withdrawn by requestor
+5,VOIDED,Decision voided

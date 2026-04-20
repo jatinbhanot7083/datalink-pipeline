@@ -22,7 +22,7 @@ clean-targets:
 models:
   datalink:
     silver:
-      +schema: silver             # DuckDB/Snowflake schema name
+      +schema: silver
       +materialized: incremental
       +incremental_strategy: append
       +on_schema_change: sync_all_columns
@@ -32,6 +32,16 @@ models:
         +tags: ["silver", "sat"]
       links:
         +tags: ["silver", "link"]
+    gold:
+      +schema: gold_um
+      +materialized: table
+      um_operational:
+        +tags: ["gold", "um_operational"]
+
+seeds:
+  datalink:
+    +schema: gold_um
+    +quote_columns: false
 
 # Run tests with severity-based behavior. A failing `unique` test on a
 # hub_hk is a build-breaking bug; we default to error.

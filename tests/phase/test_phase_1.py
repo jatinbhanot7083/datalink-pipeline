@@ -60,7 +60,8 @@ def test_all_environment_configs_load() -> None:
 def test_local_adapters_construct_without_network() -> None:
     settings = load_settings(env="local")
     adapters = build_adapters(settings)
-    assert set(adapters.operational_dbs.keys()) == {"sqlserver", "postgres"}
+    # postgres_replica added in Phase 4 for router-fanout demo.
+    assert set(adapters.operational_dbs.keys()) == {"sqlserver", "postgres", "postgres_replica"}
 
 
 @pytest.mark.phase

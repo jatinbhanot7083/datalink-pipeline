@@ -56,7 +56,10 @@ def test_local_env_loads_and_validates(config_root: Path, clean_dl_env: None) ->
     assert settings.adapters.llm.type == "stub"
     assert settings.features.gx.enabled is True
     assert settings.features.agents.enabled is True
-    assert settings.features.warehouse_router.targets == ["sqlserver", "postgres"]
+    # Phase 4: local default targets are the two postgres instances because
+    # SQL Server MCR pull is blocked on Docker Desktop 4.51.0. Prod config
+    # uses [sqlserver, postgres] (see environments/prod.yaml).
+    assert settings.features.warehouse_router.targets == ["postgres", "postgres_replica"]
 
 
 @pytest.mark.unit

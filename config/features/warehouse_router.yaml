@@ -1,9 +1,17 @@
 # Dual-warehouse bulk-push router.
 # Controls which operational DBs receive the Gold bulk push.
-# Must be a subset of keys in adapters.operational_dbs for the selected env.
+# Each entry must be a key in adapters.operational_dbs for the selected env.
+#
+# Local default: two Postgres instances (primary on :5434, replica on :5433)
+# because Docker Desktop 4.51.0 blocks the SQL Server image pull on some
+# setups. To include SQL Server once it's reachable: add 'sqlserver' here.
+#
+# Prod default: [sqlserver, postgres] — SQL Server is the current target,
+# Postgres is the future target. Switching prod to PG-only is a one-line
+# config flip here — no code change.
 
 features:
   warehouse_router:
     targets:
-      - sqlserver
       - postgres
+      - postgres_replica

@@ -27,6 +27,10 @@ adapters:
     path: ./warehouse.duckdb
 
   operational_dbs:
+    # Current prod target. Local host-port :1433 maps to the SQL Server
+    # container when `make up-mcr` succeeds; Docker Desktop 4.51.0 blocks
+    # the MCR pull on some setups, so this target is effectively disabled
+    # in local default (not listed in features.warehouse_router.targets).
     sqlserver:
       type: sqlserver
       host: localhost
@@ -34,13 +38,25 @@ adapters:
       user: sa
       password: DataLink_LocalOnly_2026!
       database: datalink_um
+    # Future prod target. Host port :5434 because some machines have a
+    # Windows-native Postgres squatting on :5432 (see docker-compose.yml).
     postgres:
       type: postgres
       host: localhost
-      port: 5432
+      port: 5434
       user: datalink
       password: datalink_local_only
       database: datalink_um
+    # Second Postgres on :5433 used only locally to demo the router
+    # fanning out to multiple targets. Prod has [sqlserver, postgres]; this
+    # entry goes away there.
+    postgres_replica:
+      type: postgres
+      host: localhost
+      port: 5433
+      user: datalink
+      password: datalink_local_only
+      database: datalink_um_replica
 
   notifier:
     type: file

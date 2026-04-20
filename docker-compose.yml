@@ -84,6 +84,9 @@ services:
       start_period: 30s
 
   # --- Operational DB #2 — future prod target ---------------------------
+  # Host port :5434 (not :5432) because some dev machines have a
+  # Windows-native Postgres squatting on :5432 (observed on Jatin's
+  # XPS8940: PID 7540). :5434 is free on the machines we care about.
   postgres:
     image: postgres:16
     container_name: datalink-postgres
@@ -92,11 +95,31 @@ services:
       POSTGRES_PASSWORD: datalink_local_only
       POSTGRES_DB: datalink_um
     ports:
-      - "127.0.0.1:5432:5432"
+      - "127.0.0.1:5434:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "datalink", "-d", "datalink_um"]
+
+  # --- Operational DB #3 — second Postgres used to demo router fan-out --
+  # Prod has SQL Server + PostgreSQL as two distinct targets. SQL Server
+  # is blocked locally by Docker Desktop 4.51.0's built-in proxy. We run a
+  # second Postgres on :5433 so the router's "fan out to N targets" and
+  # "config-flip restricts targets" invariants can be tested end-to-end.
+  # Remove this service for prod; targets will be [sqlserver, postgres].
+  postgres_replica:
+    image: postgres:16
+    container_name: datalink-postgres-replica
+    environment:
+      POSTGRES_USER: datalink
+      POSTGRES_PASSWORD: datalink_local_only
+      POSTGRES_DB: datalink_um_replica
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - postgres_replica_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "datalink", "-d", "datalink_um_replica"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -122,4 +145,5 @@ volumes:
   azurite_data:
   sqlserver_data:
   postgres_data:
+  postgres_replica_data:
   webhook_logs:

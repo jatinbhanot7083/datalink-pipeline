@@ -1,0 +1,6 @@
+lu_auth_type_id,name,description
+1,INPATIENT,Hospital admission / inpatient stay
+2,OUTPATIENT,Office visit / outpatient procedure
+3,PHARMACY,Drug / medication authorization
+4,EMERGENCY,Emergency / urgent care
+5,BEHAVIORAL_HEALTH,Behavioral health / psychiatric

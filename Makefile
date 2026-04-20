@@ -240,6 +240,54 @@ verify-phase-3-dbt: ## Phase 3 dbt verify — dbt run + dbt test (requires Bronz
 	uv run dbt test --project-dir dbt --profiles-dir dbt
 	@echo "OK: Silver DV 2.0 built + tested"
 
+# ---------------------------------------------------------------------
+# Phase 4 — Gold UM + dual-warehouse router
+# ---------------------------------------------------------------------
+
+.PHONY: gold-run
+gold-run: ## dbt seed + dbt run — build Lu* + 5 Gold UM models from Silver
+	uv run dbt seed --project-dir dbt --profiles-dir dbt
+	uv run dbt run --project-dir dbt --profiles-dir dbt --select gold
+
+.PHONY: gold-test
+gold-test: ## dbt test on Gold only
+	uv run dbt test --project-dir dbt --profiles-dir dbt --select gold
+
+.PHONY: push-to-ops
+push-to-ops: ## Push Gold UM tables to every target in features.warehouse_router.targets
+	uv run python scripts/smoke_router.py
+
+.PHONY: verify-phase-4
+verify-phase-4: verify-phase-4-code verify-phase-4-dbt verify-phase-4-router ## Phase 4: code + gold dbt + router end-to-end
+	@echo "$(BOLD)verify-phase-4 PASS$(RST)"
+
+.PHONY: verify-phase-4-code
+verify-phase-4-code: ## Phase 4 code checks — no services required
+	@echo "--- phase-4 structural tests ---"
+	uv run pytest -m phase -q
+	@echo "--- phase-4 unit tests ---"
+	uv run pytest -m unit -q
+	@echo "--- phase-4 lint ---"
+	uv run ruff check .
+	@echo "--- phase-4 type check ---"
+	uv run mypy datalink
+	@echo "OK: phase-4 code checks"
+
+.PHONY: verify-phase-4-dbt
+verify-phase-4-dbt: ## Phase 4 dbt verify — Gold models + tests (Silver+Bronze must exist)
+	@echo "--- phase-4 Gold (dbt seed + run) ---"
+	uv run dbt seed --project-dir dbt --profiles-dir dbt
+	uv run dbt run --project-dir dbt --profiles-dir dbt
+	@echo "--- phase-4 Gold tests ---"
+	uv run dbt test --project-dir dbt --profiles-dir dbt
+	@echo "OK: Gold UM built + tested"
+
+.PHONY: verify-phase-4-router
+verify-phase-4-router: ## Phase 4 router verify — push Gold to both Postgres targets
+	@echo "--- phase-4 dual-warehouse router ---"
+	uv run python scripts/smoke_router.py
+	@echo "OK: router fan-out + idempotency + config-flip green"
+
 .PHONY: verify-phase-2-demo
 verify-phase-2-demo: ## Phase 2 E2E demo — requires `make up` first
 	@echo "--- phase-2 E2E (SFTP → LocalFs → DuckDB, idempotent MERGE) ---"
