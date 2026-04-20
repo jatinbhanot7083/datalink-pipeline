@@ -10,7 +10,7 @@ What this proves:
      is transitioned to PAUSED mid-run.
   3. Restoring the state to RUNNING via RESUMING allows a re-run to proceed.
 
-Called by `make verify-phase55-local`.
+Called by `make verify-phase-5.5-local`.
 """
 
 from __future__ import annotations
