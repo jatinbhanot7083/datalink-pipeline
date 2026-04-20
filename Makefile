@@ -330,6 +330,71 @@ verify-phase-2-demo: ## Phase 2 E2E demo — requires `make up` first
 	uv run python scripts/smoke_bronze.py
 	@echo "OK: phase-2 E2E green"
 
+# ---------------------------------------------------------------------
+# Phase 5.5 — orchestration (local_sequential + Airflow DAGs)
+# ---------------------------------------------------------------------
+
+.PHONY: local-seq-list
+local-seq-list: ## List available pipelines + their task graphs
+	uv run python -m datalink.orchestration.local_sequential list
+
+.PHONY: local-seq-run
+local-seq-run: ## Run one pipeline via the local_sequential runner (PIPELINE=bronze_ingest|silver_transform|gold_um_push)
+	uv run python -m datalink.orchestration.local_sequential run --pipeline $(or $(PIPELINE),bronze_ingest)
+
+.PHONY: setup-airflow-venv
+setup-airflow-venv: ## Build a dedicated .venv-airflow venv (Airflow 2.9 conflicts with main venv)
+	uv venv .venv-airflow --python 3.11
+	uv pip install --python .venv-airflow/bin/python \
+	  "apache-airflow>=2.9,<2.10" \
+	  "pydantic>=2.7,<3.0" "pydantic-settings>=2.3,<3.0" "pyyaml>=6.0,<7.0" \
+	  "structlog>=24.1,<25.0" "click>=8.1,<9.0" "python-dotenv>=1.0,<2.0"
+	uv pip install --python .venv-airflow/bin/python -e . --no-deps
+	@echo "$(BOLD).venv-airflow ready$(RST) — now try: make dag-parse"
+
+.PHONY: dag-parse
+dag-parse: ## Load every DAG under dags/ via airflow.DagBag, fail on any import error (needs: .venv-airflow)
+	@test -x .venv-airflow/bin/python || { \
+	  echo "FAIL: .venv-airflow not found. Create with:"; \
+	  echo "  uv venv .venv-airflow --python 3.11"; \
+	  echo "  uv pip install --python .venv-airflow/bin/python 'apache-airflow>=2.9,<2.10' pydantic pydantic-settings pyyaml structlog click python-dotenv"; \
+	  echo "  uv pip install --python .venv-airflow/bin/python -e . --no-deps"; \
+	  exit 1; \
+	}
+	.venv-airflow/bin/python -c "import sys; from airflow.models import DagBag; \
+	  b=DagBag(dag_folder='dags', include_examples=False, safe_mode=False); \
+	  print('loaded:', sorted(b.dag_ids)); \
+	  [print('IMPORT ERROR', p, ':', e) for p,e in b.import_errors.items()]; \
+	  sys.exit(1 if b.import_errors or len(b.dag_ids) != 3 else 0)"
+
+.PHONY: verify-phase-5.5
+verify-phase-5.5: verify-phase-5.5-code verify-phase-5.5-local ## Phase 5.5: code + local_sequential smoke (airflow opt-in)
+	@echo "$(BOLD)verify-phase-5.5 PASS$(RST)"
+
+.PHONY: verify-phase-5.5-code
+verify-phase-5.5-code: ## Phase 5.5 code checks — no warehouse state required
+	@echo "--- phase-5.5 structural tests ---"
+	uv run pytest -m phase -q
+	@echo "--- phase-5.5 unit tests ---"
+	uv run pytest -m unit -q
+	@echo "--- phase-5.5 lint ---"
+	uv run ruff check .
+	@echo "--- phase-5.5 type check ---"
+	uv run mypy datalink
+	@echo "OK: phase-5.5 code checks"
+
+.PHONY: verify-phase-5.5-local
+verify-phase-5.5-local: ## Phase 5.5 local_sequential smoke — all 3 pipelines + sensor short-circuit
+	@echo "--- phase-5.5 local_sequential smoke ---"
+	uv run python scripts/smoke_orchestration.py
+	@echo "OK: phase-5.5 local_sequential smoke green"
+
+.PHONY: verify-phase-5.5-airflow
+verify-phase-5.5-airflow: ## Phase 5.5 Airflow DAG-parse verify (requires --extra orchestration)
+	@echo "--- phase-5.5 Airflow DAG parse ---"
+	$(MAKE) dag-parse
+	@echo "OK: phase-5.5 Airflow DAG parse green"
+
 # =============================================================================
 # Airflow-on-kind — opt-in path (requires kind + helm + kubectl installed)
 # =============================================================================

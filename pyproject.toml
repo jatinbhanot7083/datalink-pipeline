@@ -62,7 +62,19 @@ spark = [
     "pyspark>=3.5,<4.0",
 ]
 
-# Aggregated "everything" group
+# Phase 5.5: orchestration — Airflow DAGs (opt-in).
+# WARNING: apache-airflow 2.9.x pins sqlalchemy<2.0, which collides with the
+# `operational` extra (sqlalchemy>=2.0 for psycopg 3 + pyodbc). Do NOT install
+# this extra in the main dev venv. Create a dedicated venv for Airflow work:
+#     uv venv .venv-airflow --python 3.11
+#     uv pip install -e ".[orchestration]" --python .venv-airflow/bin/python
+# The `local_sequential` orchestrator — the DEFAULT — is pure stdlib, no extra.
+orchestration = [
+    "apache-airflow>=2.9,<2.10",
+]
+
+# Aggregated "everything" group. Deliberately excludes `orchestration` due to
+# the sqlalchemy conflict documented above.
 all = [
     "datalink-pipeline[ingest,silver,operational,prod-adapters,quality,agents,spark]",
 ]
@@ -84,6 +96,29 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["datalink"]
+
+# ------------------------------------------------------------
+# uv — conflicting extras
+# ------------------------------------------------------------
+# apache-airflow 2.9.x requires sqlalchemy<2.0; our `operational` extra
+# (psycopg 3 + pyodbc) requires sqlalchemy>=2.0. These cannot coexist in
+# one lockfile. Declaring them conflicting tells uv to resolve each set
+# independently — sync one or the other, never both in the same venv.
+[tool.uv]
+conflicts = [
+    [
+        { extra = "operational" },
+        { extra = "orchestration" },
+    ],
+    [
+        { extra = "prod-adapters" },
+        { extra = "orchestration" },
+    ],
+    [
+        { extra = "all" },
+        { extra = "orchestration" },
+    ],
+]
 
 # ------------------------------------------------------------
 # ruff
@@ -128,6 +163,7 @@ module = [
     "crewai.*", "paramiko.*", "pyodbc.*", "psycopg.*", "snowflake.*", "dbt.*",
     "pandas.*", "pandas",
     "great_expectations.*",
+    "airflow.*", "airflow",
 ]
 ignore_missing_imports = true
 
