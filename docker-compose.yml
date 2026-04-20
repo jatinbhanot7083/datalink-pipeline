@@ -34,6 +34,7 @@ services:
 
   # --- SFTP landing zone for Claims / Membership EDI files --------------
   sftp:
+    restart: unless-stopped
     image: atmoz/sftp:alpine
     container_name: datalink-sftp
     networks: [datalink]
@@ -52,6 +53,7 @@ services:
 
   # --- ADLS Gen2 emulator (Blob API) ------------------------------------
   azurite:
+    restart: unless-stopped
     image: mcr.microsoft.com/azure-storage/azurite:3.31.0
     container_name: datalink-azurite
     networks: [datalink]
@@ -84,6 +86,7 @@ services:
 
   # --- Operational DB #1 — SQL Server 2022 (prod target) ---------------
   sqlserver:
+    restart: unless-stopped
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: datalink-sqlserver
     networks: [datalink]
@@ -125,13 +128,20 @@ services:
         /opt/mssql-tools/bin/sqlcmd \
           -S sqlserver -U sa -P "DataLink_LocalOnly_2026!" \
           -C -b -i /init/init.sql
-    restart: "no"
+    # Retry up to 10 times on failure — covers the SQL Server startup race
+    # where the container's healthcheck passes (master is up) but the
+    # newly-created DataLinkUM database hasn't finished attaching yet
+    # ("Database 5 cannot be autostarted during server shutdown or startup").
+    # The init script itself is idempotent (IF NOT EXISTS guards), so
+    # re-running is safe. Once it succeeds, restart:on-failure stops retrying.
+    restart: on-failure:10
 
   # --- Operational DB #2 — Postgres (primary router target) ------------
   # Host port :5434 (not :5432) because some dev machines have a
   # Windows-native Postgres squatting on :5432 (observed on Jatin's
   # XPS8940: PID 7540). :5434 is free on the machines we care about.
   postgres:
+    restart: unless-stopped
     image: postgres:16
     container_name: datalink-postgres
     networks: [datalink]
@@ -153,6 +163,7 @@ services:
   # Shows "config flip restricts targets". In prod this service is
   # removed; router targets become [sqlserver, postgres].
   postgres_replica:
+    restart: unless-stopped
     image: postgres:16
     container_name: datalink-postgres-replica
     networks: [datalink]
@@ -175,6 +186,7 @@ services:
   # =====================================================================
 
   webhook-stub:
+    restart: unless-stopped
     build:
       context: ./docker/webhook-stub
     container_name: datalink-webhook-stub
@@ -197,6 +209,7 @@ services:
 
   # --- Postgres-specific UI (richest for PG tuning / query explain) ----
   pgadmin:
+    restart: unless-stopped
     image: dpage/pgadmin4:8
     container_name: datalink-pgadmin
     networks: [datalink]
@@ -230,6 +243,7 @@ services:
   # Adminer speaks DuckDB via plugin, which ships in the image by default
   # on 4.8.1+. Exec demo lets you click a tab and see each zone.
   adminer:
+    restart: unless-stopped
     image: adminer:4.8.1
     container_name: datalink-adminer
     networks: [datalink]
@@ -248,6 +262,7 @@ services:
 
   # --- GX Data Docs (HTML reports per checkpoint run) ------------------
   nginx-gx-docs:
+    restart: unless-stopped
     image: nginx:1.27-alpine
     container_name: datalink-gx-docs
     networks: [datalink]
@@ -272,6 +287,7 @@ services:
 
   # --- OTLP receiver + fan-out to Prom/Loki/Tempo ----------------------
   otel-collector:
+    restart: unless-stopped
     image: otel/opentelemetry-collector-contrib:0.111.0
     container_name: datalink-otel
     networks: [datalink]
@@ -288,6 +304,7 @@ services:
     # extension at :13133 is reachable from Grafana for wiring verification.
 
   prometheus:
+    restart: unless-stopped
     image: prom/prometheus:v2.55.0
     container_name: datalink-prometheus
     networks: [datalink]
@@ -308,6 +325,7 @@ services:
       retries: 5
 
   loki:
+    restart: unless-stopped
     image: grafana/loki:3.2.0
     container_name: datalink-loki
     networks: [datalink]
@@ -325,6 +343,7 @@ services:
       start_period: 20s
 
   tempo:
+    restart: unless-stopped
     image: grafana/tempo:2.6.0
     container_name: datalink-tempo
     networks: [datalink]
@@ -342,6 +361,7 @@ services:
       start_period: 20s
 
   grafana:
+    restart: unless-stopped
     image: grafana/grafana:11.3.0
     container_name: datalink-grafana
     networks: [datalink]
