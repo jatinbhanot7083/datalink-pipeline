@@ -1,0 +1,27 @@
+# Prometheus config — scrapes OTEL collector + self.
+# The DataLink Python app exports metrics via OTLP to the collector;
+# Prometheus scrapes the collector's prometheus exporter (port 8889).
+
+global:
+  scrape_interval: 10s
+  scrape_timeout: 8s
+  evaluation_interval: 15s
+  external_labels:
+    env: local
+    stack: datalink
+
+scrape_configs:
+  # Prometheus scrapes itself — standard health check.
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # OTEL collector exposes app metrics here (it receives OTLP from the
+  # DataLink Python runtime and re-exposes in Prometheus format).
+  - job_name: otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
+        labels:
+          source: datalink_app
+
+  # Direct cadvisor would go here for container metrics (deferred).

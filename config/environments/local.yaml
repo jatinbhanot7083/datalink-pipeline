@@ -27,17 +27,17 @@ adapters:
     path: ./warehouse.duckdb
 
   operational_dbs:
-    # Current prod target. Local host-port :1433 maps to the SQL Server
-    # container when `make up-mcr` succeeds; Docker Desktop 4.51.0 blocks
-    # the MCR pull on some setups, so this target is effectively disabled
-    # in local default (not listed in features.warehouse_router.targets).
+    # Current prod target. Phase 5.7: MCR pulls work after moving to native
+    # Docker-in-WSL2, so SQL Server is live in the default compose stack.
+    # `sqlserver_init` container bootstraps the DataLinkUM DB + [UM] schema +
+    # `datalink` login with db_owner rights on first `make up`.
     sqlserver:
       type: sqlserver
       host: localhost
       port: 1433
-      user: sa
-      password: DataLink_LocalOnly_2026!
-      database: datalink_um
+      user: datalink
+      password: datalink_local_only
+      database: DataLinkUM
     # Future prod target. Host port :5434 because some machines have a
     # Windows-native Postgres squatting on :5432 (see docker-compose.yml).
     postgres:

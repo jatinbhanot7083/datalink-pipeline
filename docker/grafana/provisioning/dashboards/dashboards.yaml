@@ -1,0 +1,16 @@
+# Auto-load any dashboards placed under /var/lib/grafana/dashboards
+# inside the container. We bind-mount the repo's docker/grafana/dashboards/
+# directory there in docker-compose.yml. Chunk 5 adds the actual JSON.
+
+apiVersion: 1
+
+providers:
+  - name: DataLink
+    orgId: 1
+    folder: "DataLink"
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards

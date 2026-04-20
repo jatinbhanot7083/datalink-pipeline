@@ -1,0 +1,24 @@
+{
+  "Servers": {
+    "1": {
+      "Name": "DataLink Postgres (primary)",
+      "Group": "DataLink",
+      "Host": "postgres",
+      "Port": 5432,
+      "MaintenanceDB": "datalink_um",
+      "Username": "datalink",
+      "PassFile": "/pgpass",
+      "SSLMode": "prefer"
+    },
+    "2": {
+      "Name": "DataLink Postgres (replica / router demo)",
+      "Group": "DataLink",
+      "Host": "postgres_replica",
+      "Port": 5432,
+      "MaintenanceDB": "datalink_um_replica",
+      "Username": "datalink",
+      "PassFile": "/pgpass",
+      "SSLMode": "prefer"
+    }
+  }
+}

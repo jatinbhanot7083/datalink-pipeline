@@ -1,0 +1,73 @@
+# OpenTelemetry Collector — the single OTLP ingest point for the DataLink
+# Python app. Receives metrics + logs + traces, fans out:
+#   - metrics → Prometheus (via prometheus exporter on :8889)
+#   - logs    → Loki (via OTLP HTTP)
+#   - traces  → Tempo (via OTLP gRPC)
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    send_batch_size: 1024
+    timeout: 2s
+  # Add a couple of standard resource attrs so Grafana can slice by env/service.
+  resource:
+    attributes:
+      - key: deployment.environment
+        value: local
+        action: upsert
+      - key: service.namespace
+        value: datalink
+        action: upsert
+
+exporters:
+  # Prometheus scrapes the collector here to pull OTLP-received metrics.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # Loki (OTLP HTTP — Loki 3.x supports this natively)
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+    tls:
+      insecure: true
+
+  # Tempo (OTLP gRPC)
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+  # Debug stdout (useful for development; leave at basic verbosity)
+  debug:
+    verbosity: basic
+
+service:
+  telemetry:
+    logs:
+      level: warn
+  pipelines:
+    metrics:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [otlphttp/loki]
+    traces:
+      receivers: [otlp]
+      processors: [batch, resource]
+      exporters: [otlp/tempo]
+  extensions: [health_check]
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133

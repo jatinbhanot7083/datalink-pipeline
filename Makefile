@@ -73,16 +73,22 @@ _install-hooks:
 # =============================================================================
 
 .PHONY: up
-up: ## Start Hub-hosted services (sftp, postgres, webhook-stub). Skips MCR by default.
+up: ## Start the full Phase-5.7 stack (SFTP + 3 ops DBs + Azurite + SQLServer + pgAdmin + Adminer + nginx + OTEL/Prom/Loki/Tempo/Grafana)
 	docker compose up -d --wait
-	@echo "$(BOLD)services up$(RST)  (default profile — Hub only)"
-	@docker compose ps
+	@echo ""
+	@echo "$(BOLD)services up$(RST)"
+	@docker compose ps --format 'table {{.Service}}\t{{.Status}}'
+	@echo ""
+	@echo "$(BOLD)Browse:$(RST)"
+	@echo "  pgAdmin            → http://localhost:5050   (datalink@local.invalid / datalink_local_only)"
+	@echo "  Adminer            → http://localhost:8081   (system=PostgreSQL, server=postgres, user=datalink)"
+	@echo "  Grafana            → http://localhost:3000   (admin / admin_local_only)"
+	@echo "  Prometheus         → http://localhost:9090"
+	@echo "  GX Data Docs       → http://localhost:8090"
+	@echo "  OTEL health        → http://localhost:13133"
 
 .PHONY: up-mcr
-up-mcr: ## Start full stack including azurite + sqlserver (needs MCR pulls to work)
-	docker compose --profile mcr up -d --wait
-	@echo "$(BOLD)services up$(RST)  (full stack — Hub + MCR profile)"
-	@docker compose ps
+up-mcr: up ## Alias for `make up` (kept for backwards compat; mcr profile is folded into default now)
 
 .PHONY: down
 down: ## Stop and remove docker-compose services (keeps volumes)

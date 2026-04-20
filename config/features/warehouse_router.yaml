@@ -2,16 +2,18 @@
 # Controls which operational DBs receive the Gold bulk push.
 # Each entry must be a key in adapters.operational_dbs for the selected env.
 #
-# Local default: two Postgres instances (primary on :5434, replica on :5433)
-# because Docker Desktop 4.51.0 blocks the SQL Server image pull on some
-# setups. To include SQL Server once it's reachable: add 'sqlserver' here.
+# Phase 5.7 default: [sqlserver, postgres, postgres_replica] — SQL Server is
+# the real current-prod target, Postgres is the future target, and the second
+# Postgres exists only locally to demonstrate fan-out + config-flip. Prod
+# override: DL_FEATURES__WAREHOUSE_ROUTER__TARGETS=sqlserver,postgres
 #
-# Prod default: [sqlserver, postgres] — SQL Server is the current target,
-# Postgres is the future target. Switching prod to PG-only is a one-line
-# config flip here — no code change.
+# Pre-Phase-5.7 this list dropped sqlserver because Docker Desktop 4.51.0's
+# hub proxy blocked the MCR pull. Native Docker-in-WSL2 fixes that (see
+# docs/install.md §"Native Docker in WSL2").
 
 features:
   warehouse_router:
     targets:
+      - sqlserver
       - postgres
       - postgres_replica

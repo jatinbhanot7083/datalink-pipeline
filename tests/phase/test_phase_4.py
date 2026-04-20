@@ -230,8 +230,14 @@ def test_local_config_has_three_operational_dbs(clean_dl_env: None) -> None:
         "postgres",
         "postgres_replica",
     }
-    # Default targets exclude sqlserver (unreachable) and use both postgres.
-    assert settings.features.warehouse_router.targets == ["postgres", "postgres_replica"]
+    # Phase 5.7: MCR pulls work on native Docker-in-WSL2, so sqlserver is
+    # back in the default target list alongside both Postgres. Pre-Phase-5.7
+    # this list excluded sqlserver because Docker Desktop blocked the pull.
+    assert settings.features.warehouse_router.targets == [
+        "sqlserver",
+        "postgres",
+        "postgres_replica",
+    ]
 
 
 @pytest.mark.phase

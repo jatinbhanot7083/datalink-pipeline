@@ -1,0 +1,2 @@
+postgres:5432:*:datalink:datalink_local_only
+postgres_replica:5432:*:datalink:datalink_local_only

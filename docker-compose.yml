@@ -3,24 +3,40 @@ name: datalink-local
 # All services are bound to localhost only. No external interfaces.
 # Credentials are the well-known local-dev defaults — see .env.example.
 #
-# Profiles:
-#   (default — no profile)  sftp, postgres, webhook-stub. All pulled from
-#                           Docker Hub; works everywhere.
-#   mcr                     azurite + sqlserver. Pulled from
-#                           mcr.microsoft.com, which is blocked by Docker
-#                           Desktop 4.51.0's built-in HTTP proxy on some
-#                           setups (see docs/operations_runbook.md §"MCR
-#                           pull fails"). Used by Phase 2+ when ingestion
-#                           and the UM schema push actually run.
+# Profile matrix:
+#   (default — no profile)   Every service needed for the Phase 5.7 exec
+#                            demo — sftp, postgres ×2, webhook-stub,
+#                            azurite, sqlserver, pgadmin, adminer,
+#                            nginx-gx-docs, and the observability
+#                            stack (prometheus, loki, tempo, grafana,
+#                            otel-collector).
 #
-# `make up`          → default profile (Hub only)
-# `make up-mcr`      → default + mcr profile (full stack)
+#                            Azurite + SQL Server used to live under the
+#                            `mcr` profile because Docker Desktop 4.51.0's
+#                            hub proxy blocked mcr.microsoft.com pulls.
+#                            Post-Phase-5.7 we run native Docker-in-WSL2
+#                            (see docs/install.md §"Native Docker in WSL2")
+#                            which bypasses the proxy — so these pulls
+#                            work cleanly and are in the default stack now.
+#
+# `make up`   → full stack (everything healthy in ~90 s on a warm cache)
+# `make down` → stop + keep volumes
+# `make nuke` → stop + drop volumes (full reset)
+
+networks:
+  datalink:
+    driver: bridge
 
 services:
+  # =====================================================================
+  # BRONZE LAYER SOURCES
+  # =====================================================================
+
   # --- SFTP landing zone for Claims / Membership EDI files --------------
   sftp:
     image: atmoz/sftp:alpine
     container_name: datalink-sftp
+    networks: [datalink]
     ports:
       - "127.0.0.1:2222:22"
     # atmoz/sftp command format: user:password[:e][:uid:gid[:dir1,dir2,...]]
@@ -35,11 +51,10 @@ services:
       retries: 5
 
   # --- ADLS Gen2 emulator (Blob API) ------------------------------------
-  # In the `mcr` profile — off by default until Phase 2 needs it.
   azurite:
     image: mcr.microsoft.com/azure-storage/azurite:3.31.0
     container_name: datalink-azurite
-    profiles: ["mcr"]
+    networks: [datalink]
     command: >
       azurite
         --blobHost 0.0.0.0
@@ -54,17 +69,24 @@ services:
     volumes:
       - azurite_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "nc -z localhost 10000 || exit 1"]
+      # Azurite images don't ship nc; use /dev/tcp via bash-less sh.
+      # `node -e '...'` is always available because the Azurite image IS node.
+      test:
+        - "CMD-SHELL"
+        - "node -e \"require('net').connect(10000,'localhost').on('connect',()=>process.exit(0)).on('error',()=>process.exit(1))\""
       interval: 5s
       timeout: 3s
       retries: 5
 
-  # --- Operational DB #1 — current prod target --------------------------
-  # In the `mcr` profile — off by default until Phase 4 pushes to it.
+  # =====================================================================
+  # OPERATIONAL DATABASES (Gold push targets)
+  # =====================================================================
+
+  # --- Operational DB #1 — SQL Server 2022 (prod target) ---------------
   sqlserver:
     image: mcr.microsoft.com/mssql/server:2022-latest
     container_name: datalink-sqlserver
-    profiles: ["mcr"]
+    networks: [datalink]
     environment:
       ACCEPT_EULA: "Y"
       MSSQL_SA_PASSWORD: "DataLink_LocalOnly_2026!"
@@ -74,7 +96,8 @@ services:
     volumes:
       - sqlserver_data:/var/opt/mssql
     healthcheck:
-      # /opt/mssql-tools18/bin/sqlcmd is bundled in the 2022 image
+      # /opt/mssql-tools18/bin/sqlcmd is bundled in the 2022 image.
+      # -No disables strict TLS; -b returns exit-1 on SQL error.
       test:
         - "CMD-SHELL"
         - "/opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P \"$$MSSQL_SA_PASSWORD\" -Q \"SELECT 1\" -No -b || exit 1"
@@ -83,13 +106,35 @@ services:
       retries: 10
       start_period: 30s
 
-  # --- Operational DB #2 — future prod target ---------------------------
+  # --- SQL Server init job — creates DataLinkUM DB + [UM] schema -------
+  # Runs once after sqlserver is healthy, then exits. Idempotent —
+  # re-running `make up` is safe (all DDL uses IF NOT EXISTS).
+  sqlserver_init:
+    image: mcr.microsoft.com/mssql-tools
+    container_name: datalink-sqlserver-init
+    networks: [datalink]
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+    volumes:
+      - ./docker/sqlserver-init:/init:ro
+    entrypoint:
+      - /bin/bash
+      - -c
+      - |
+        /opt/mssql-tools/bin/sqlcmd \
+          -S sqlserver -U sa -P "DataLink_LocalOnly_2026!" \
+          -C -b -i /init/init.sql
+    restart: "no"
+
+  # --- Operational DB #2 — Postgres (primary router target) ------------
   # Host port :5434 (not :5432) because some dev machines have a
   # Windows-native Postgres squatting on :5432 (observed on Jatin's
   # XPS8940: PID 7540). :5434 is free on the machines we care about.
   postgres:
     image: postgres:16
     container_name: datalink-postgres
+    networks: [datalink]
     environment:
       POSTGRES_USER: datalink
       POSTGRES_PASSWORD: datalink_local_only
@@ -100,16 +145,17 @@ services:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "datalink", "-d", "datalink_um"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
-  # --- Operational DB #3 — second Postgres used to demo router fan-out --
-  # Prod has SQL Server + PostgreSQL as two distinct targets. SQL Server
-  # is blocked locally by Docker Desktop 4.51.0's built-in proxy. We run a
-  # second Postgres on :5433 so the router's "fan out to N targets" and
-  # "config-flip restricts targets" invariants can be tested end-to-end.
-  # Remove this service for prod; targets will be [sqlserver, postgres].
+  # --- Operational DB #3 — second Postgres used to demo router fan-out -
+  # Shows "config flip restricts targets". In prod this service is
+  # removed; router targets become [sqlserver, postgres].
   postgres_replica:
     image: postgres:16
     container_name: datalink-postgres-replica
+    networks: [datalink]
     environment:
       POSTGRES_USER: datalink
       POSTGRES_PASSWORD: datalink_local_only
@@ -124,11 +170,15 @@ services:
       timeout: 3s
       retries: 10
 
-  # --- Webhook stub — local Teams replacement ---------------------------
+  # =====================================================================
+  # NOTIFICATIONS
+  # =====================================================================
+
   webhook-stub:
     build:
       context: ./docker/webhook-stub
     container_name: datalink-webhook-stub
+    networks: [datalink]
     ports:
       - "127.0.0.1:9000:9000"
     volumes:
@@ -141,9 +191,193 @@ services:
       timeout: 3s
       retries: 5
 
+  # =====================================================================
+  # DEMO BROWSERS — the "click and see data" surface for execs + team
+  # =====================================================================
+
+  # --- Postgres-specific UI (richest for PG tuning / query explain) ----
+  pgadmin:
+    image: dpage/pgadmin4:8
+    container_name: datalink-pgadmin
+    networks: [datalink]
+    depends_on:
+      postgres:         { condition: service_healthy }
+      postgres_replica: { condition: service_healthy }
+    environment:
+      # pgAdmin's startup script validates the TLD against a public-suffix
+      # list and rejects .invalid AND .local. Using a real-looking domain
+      # (no email ever sent; this is the admin login alias only).
+      PGADMIN_DEFAULT_EMAIL: datalink@example.com
+      PGADMIN_DEFAULT_PASSWORD: datalink_local_only
+      PGADMIN_CONFIG_SERVER_MODE: "False"
+      PGADMIN_CONFIG_MASTER_PASSWORD_REQUIRED: "False"
+      PGADMIN_DISABLE_POSTFIX: "True"
+      PGADMIN_CONFIG_CHECK_EMAIL_DELIVERABILITY: "False"
+    ports:
+      - "127.0.0.1:5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+      - ./docker/pgadmin/servers.json:/pgadmin4/servers.json:ro
+      - ./docker/pgadmin/pgpass:/pgpass:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/misc/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  # --- One-client-for-all DBs (DuckDB/Postgres/SQL Server) --------------
+  # Adminer speaks DuckDB via plugin, which ships in the image by default
+  # on 4.8.1+. Exec demo lets you click a tab and see each zone.
+  adminer:
+    image: adminer:4.8.1
+    container_name: datalink-adminer
+    networks: [datalink]
+    ports:
+      - "127.0.0.1:8081:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+    healthcheck:
+      # adminer is PHP-only — no nc/wget/curl. Use PHP's built-in socket.
+      test:
+        - "CMD-SHELL"
+        - "php -r 'exit(@fsockopen(\"127.0.0.1\", 8080) ? 0 : 1);'"
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # --- GX Data Docs (HTML reports per checkpoint run) ------------------
+  nginx-gx-docs:
+    image: nginx:1.27-alpine
+    container_name: datalink-gx-docs
+    networks: [datalink]
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - ./docker/nginx-gx-docs/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./gx/uncommitted/data_docs/local_site:/usr/share/nginx/html:ro
+      # Fallback index.html, served when GX hasn't generated docs yet.
+      # GX's own index.html (once generated) sits at the root of
+      # data_docs/local_site/ and takes precedence.
+      - ./docker/nginx-gx-docs/fallback-index.html:/usr/share/nginx/fallback/index.html:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8090/ >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # =====================================================================
+  # OBSERVABILITY STACK — OTEL Collector + Prometheus + Loki + Tempo + Grafana
+  # =====================================================================
+
+  # --- OTLP receiver + fan-out to Prom/Loki/Tempo ----------------------
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.111.0
+    container_name: datalink-otel
+    networks: [datalink]
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./docker/otel-collector/otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"   # OTLP gRPC (Python SDK default)
+      - "127.0.0.1:4318:4318"   # OTLP HTTP
+      - "127.0.0.1:8889:8889"   # Prometheus exporter (scraped by prom)
+      - "127.0.0.1:13133:13133" # health check
+    # The otel-collector-contrib image is distroless — no shell, no wget.
+    # Docker's default "process alive" check suffices; health_check
+    # extension at :13133 is reachable from Grafana for wiring verification.
+
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: datalink-prometheus
+    networks: [datalink]
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=7d"
+      - "--web.enable-lifecycle"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "127.0.0.1:9090:9090"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  loki:
+    image: grafana/loki:3.2.0
+    container_name: datalink-loki
+    networks: [datalink]
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./docker/loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "127.0.0.1:3100:3100"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3100/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  tempo:
+    image: grafana/tempo:2.6.0
+    container_name: datalink-tempo
+    networks: [datalink]
+    command: ["-config.file=/etc/tempo.yaml"]
+    volumes:
+      - ./docker/tempo/tempo.yaml:/etc/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "127.0.0.1:3200:3200"   # HTTP API
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3200/ready >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: datalink-grafana
+    networks: [datalink]
+    depends_on:
+      prometheus: { condition: service_healthy }
+      loki:       { condition: service_healthy }
+      tempo:      { condition: service_healthy }
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin_local_only
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_INSTALL_PLUGINS: ""
+      GF_LOG_LEVEL: warn
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "127.0.0.1:3000:3000"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3000/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+      start_period: 20s
+
 volumes:
   azurite_data:
   sqlserver_data:
   postgres_data:
   postgres_replica_data:
   webhook_logs:
+  pgadmin_data:
+  prometheus_data:
+  loki_data:
+  tempo_data:
+  grafana_data:
