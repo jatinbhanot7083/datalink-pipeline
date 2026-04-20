@@ -55,6 +55,28 @@ services:
       timeout: 3s
       retries: 5
 
+  # --- SFTP drop-zone permissions bootstrap ----------------------------
+  # atmoz/sftp's auto-chown only fires reliably on volume FIRST creation.
+  # On WSL restarts + named-volume re-mounts the drop dir's perms can drift,
+  # blocking paramiko's sftp.put() with EACCES. This one-shot runs after
+  # sftp is healthy and normalises owner + mode every `docker compose up`.
+  sftp_init:
+    image: busybox:1.36
+    container_name: datalink-sftp-init
+    networks: [datalink]
+    depends_on:
+      sftp: { condition: service_healthy }
+    volumes:
+      - sftp_drop:/drop
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        chown -R 1001:100 /drop
+        chmod -R 775 /drop
+        echo "SFTP drop perms normalised: $$(ls -ld /drop)"
+    restart: "no"
+
   # --- File browser — drag-drop CSVs into the SFTP drop zone ------------
   # Shares the sftp_drop volume, so anything dropped here lands in exactly
   # the path Airflow's bronze_ingest DAG reads from. No SFTP CLI required.

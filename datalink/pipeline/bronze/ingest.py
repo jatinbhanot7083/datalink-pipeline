@@ -16,6 +16,7 @@ Flow per file:
 
 from __future__ import annotations
 
+import re
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -34,6 +35,17 @@ from datalink.pipeline.bronze.ddl_loader import (
 )
 
 _log = get_logger(__name__)
+
+
+def _sanitize_identifier(raw: str) -> str:
+    """Replace every non-[a-zA-Z0-9_] char with `_` for safe use in SQL identifiers.
+
+    Airflow run_ids contain `:`, `.`, and `+` (e.g. `manual__2026-04-20T11:38:38.071377+00:00`)
+    which DuckDB's parser rejects inside a bare table name. This maps them
+    all to `_`. Also lower-cases the result and trims any leading/trailing
+    underscores so the staging table name remains predictable.
+    """
+    return re.sub(r"[^A-Za-z0-9_]", "_", raw).lower().strip("_") or "unnamed"
 
 
 @dataclass(frozen=True)
@@ -198,7 +210,14 @@ def ingest_file(
         adapters.object_store.get(object_key, local_staged)
 
         # 4. Load to TEMP staging with audit cols computed.
-        staging_table = f"_stg_{source_type.lower()}_{batch_id.replace('-', '_').lower()}"
+        # Sanitize batch_id for use as part of a SQL identifier — strip
+        # every character that isn't ASCII alphanumeric or underscore.
+        # Airflow run_ids look like "manual__2026-04-20T11:38:38.071377+00:00"
+        # which contains `:` `.` `+` — DuckDB parser rejects those in
+        # identifiers. The raw batch_id still flows into the _batch_id
+        # audit column untouched, so the audit-trail link is preserved.
+        safe_batch = _sanitize_identifier(batch_id)
+        staging_table = f"_stg_{source_type.lower()}_{safe_batch}"
         rows_in_source = _load_to_staging(
             adapters.warehouse,
             local_staged,
