@@ -24,7 +24,7 @@ All three live at the repo root. Extraction script (stdlib only): `C:\tmp\docx_e
 
 **Local emulator stack (decided Phase 0):**
 - Snowflake → **DuckDB** via `dbt-duckdb` (with adapter shim for `EXTERNAL STAGE`).
-- ADLS Gen2 → **Azurite**.
+- ADLS Gen2 → **LocalFsObjectStore** by default (Phase 2 pivot). Azurite remains available (scripts + adapter) for the day MCR pulls work again.
 - sFTP → **atmoz/sftp** container.
 - SQL Server → **`mcr.microsoft.com/mssql/server:2022-latest`** container.
 - PostgreSQL → **`postgres:16`** container.
@@ -103,7 +103,27 @@ make help                # list all targets
 
 ## 9. Current Phase
 
-**Phase 1 — Scaffolding.** Awaiting Jatin's review.
+**Phase 2 — Bronze Ingestion.** `make verify-phase-2` PASS on WSL2 Ubuntu. Awaiting Jatin's review before Phase 3 (Silver DV2.0).
+
+### Phase 2 deliverables (on `phase-2-bronze-ingestion`, commit `39ab4b5`)
+
+- Real adapters: `AtmozSftpSource` (paramiko), `AzuriteObjectStore` (Azure Blob SDK), `LocalFsObjectStore` (new — default for local env), `DuckDBWarehouse` (real MERGE + COPY-from-stage).
+- `datalink/pipeline/bronze/`: `ingest.py` (SFTP → ObjectStore → MERGE with 4 audit cols), `ddl_loader.py`, `ddl/raw_*.sql`, `schemas.py`.
+- `scripts/seed_sample_data.py`: deterministic synthetic healthcare data (500 providers + 2,000 members + 10,000 claims, FK-consistent, Luhn-valid NPIs, `FICTIONAL_` names).
+- `scripts/smoke_bronze.py`: drives `make demo` and `make verify-phase-2-demo`. Proves idempotency (re-run rows_affected = 0).
+- Makefile: `make demo`, `demo-reset`, `verify-phase-2{,-code,-demo}`.
+- Tests: `tests/phase/test_phase_2.py` adds 12 phase + 5 unit; 49 tests total, all green.
+- `docker-compose.yml`: fix atmoz sftp chown (correct uid:gid:dirs) and drop the broken sftp_data volume.
+
+### Phase 2 pivot — local ObjectStore defaults to `localfs`, not Azurite
+
+Docker Desktop 4.51.0 injects an internal proxy at `http.docker.internal:3128` that blocks pulls from `mcr.microsoft.com` — Azurite + SQL Server can't be pulled. `LocalFsObjectStore` is a real filesystem-backed adapter that satisfies the same Protocol; prod still uses ADLS Gen2 via a different adapter. Plug-in contract and config-only-prod-promotion guarantees preserved.
+
+### Still deferred (Phase 3+ or on demand)
+
+- Airflow `bronze_ingest_dag` — local_sequential is the default per Jatin's #6 decision; DAG lands when we want a live Airflow UI demo.
+- `local_sequential` orchestrator CLI — smoke scripts cover the same path for now.
+- Real `SnowflakeWarehouse` — Phase 4 (prod path).
 
 ### Phase 1 deliverables (this branch)
 
