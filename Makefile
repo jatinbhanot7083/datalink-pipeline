@@ -182,11 +182,20 @@ demo: ## Bronze E2E demo — upload 3 sample CSVs via SFTP → LocalFs → DuckD
 	uv run python scripts/smoke_bronze.py
 
 .PHONY: demo-reset
-demo-reset: ## Wipe warehouse.duckdb + localfs object store + re-seed sample CSVs
+demo-reset: ## Wipe warehouse.duckdb + localfs object store + re-seed sample CSVs (10K small)
 	rm -f warehouse.duckdb warehouse.duckdb.wal
 	rm -rf /tmp/datalink-localfs
 	rm -rf data/sample
 	uv run python scripts/seed_sample_data.py
+
+.PHONY: demo-reset-exec
+demo-reset-exec: ## Wipe + seed Phase 5.7 executive-demo dataset (100K claims, 3 date-stamped daily batches)
+	rm -f warehouse.duckdb warehouse.duckdb.wal
+	rm -rf /tmp/datalink-localfs
+	rm -rf data/sample
+	uv run python scripts/seed_sample_data.py \
+	  --claims 100000 --members 20000 --providers 5000 \
+	  --batches 3 --end-date 2026-04-19
 
 .PHONY: verify-phase-2
 verify-phase-2: verify-phase-2-code verify-phase-2-demo ## Phase 2: code + full E2E demo

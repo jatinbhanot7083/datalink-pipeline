@@ -78,3 +78,11 @@ dist/
 
 # --- Sample data that is too big to commit ---
 data/sample/large/
+# Phase 5.7 executive-demo dataset is regenerated on demand via
+# `make demo-reset-exec` (100K claims across 3 date-stamped batches).
+# Keep the small committed claims_sample.csv / membership_sample.csv /
+# provider_sample.csv as the dev-loop baseline.
+data/sample/claims_[0-9]*.csv
+
+# Phase 5.7 demo evidence (Playwright screenshots from verify-phase-5.7)
+demo_evidence/

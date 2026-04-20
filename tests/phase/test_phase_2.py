@@ -63,6 +63,9 @@ def test_bronze_ddl_files_exist(source_type: str) -> None:
 @pytest.mark.parametrize(
     "filename, min_rows",
     [
+        # Phase 5.7 uplifted to the executive-demo dataset (100K/20K/5K).
+        # Tests assert a *minimum* rowcount so teams can regenerate at either
+        # the small (10K/2K/500) or large (100K/20K/5K) scale without breaking.
         ("provider_sample.csv", 500),
         ("membership_sample.csv", 2_000),
         ("claims_sample.csv", 10_000),
@@ -74,7 +77,7 @@ def test_sample_data_committed(filename: str, min_rows: int) -> None:
     assert f.exists(), f"Missing sample: {f}"
     with f.open(encoding="utf-8") as fh:
         row_count = sum(1 for _ in fh) - 1  # minus header
-    assert row_count == min_rows, f"{filename}: expected {min_rows} rows, got {row_count}"
+    assert row_count >= min_rows, f"{filename}: expected at least {min_rows} rows, got {row_count}"
 
 
 @pytest.mark.phase
@@ -170,16 +173,22 @@ def test_bronze_ingest_end_to_end_with_mock_sftp(tmp_path: Path) -> None:
     adapters.object_store = object_store
     adapters.warehouse = warehouse
 
-    # First pass — 500 providers loaded.
+    # Use whatever's actually in the committed sample — at Phase 2 scale that
+    # was 500; Phase 5.7 ships 5,000. Either way the test is "rows go in,
+    # idempotent on re-run" — not a specific count.
+    with src.open(encoding="utf-8") as fh:
+        expected_rows = sum(1 for _ in fh) - 1  # minus header
+
+    # First pass — all providers loaded.
     r1 = ingest_file(adapters, "PROVIDER", "/drop/provider_sample.csv")
-    assert r1.rows_in_source == 500
-    assert r1.rows_in_target_after == 500
-    assert r1.rows_affected == 500
+    assert r1.rows_in_source == expected_rows
+    assert r1.rows_in_target_after == expected_rows
+    assert r1.rows_affected == expected_rows
 
     # Second pass — idempotent, no new rows.
     r2 = ingest_file(adapters, "PROVIDER", "/drop/provider_sample.csv")
-    assert r2.rows_in_source == 500
-    assert r2.rows_in_target_after == 500  # unchanged
+    assert r2.rows_in_source == expected_rows
+    assert r2.rows_in_target_after == expected_rows  # unchanged
     assert r2.rows_affected == 0  # idempotency
 
     warehouse.close()

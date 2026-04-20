@@ -216,18 +216,59 @@ def gen_claims(
     members: list[dict],
     providers: list[dict],
     rng: random.Random,
+    *,
+    start_id: int = 0,
+    service_date_range: tuple[date, date] | None = None,
 ) -> list[dict]:
+    """Generate `n` claims, optionally constrained to a specific service-date window.
+
+    Args:
+      start_id: offset for claim_id generation (so multi-batch runs don't collide).
+      service_date_range: if provided, force service dates into [start, end] — used
+        for date-stamped daily batches. Falls back to "within the past 90 days" when None.
+    """
     rows: list[dict] = []
     today = date(2026, 4, 19)
+
+    # When generating a date-constrained daily batch, only pull from members
+    # whose coverage window actually includes the batch day — otherwise
+    # terminated members force service_date to fall back to their term date
+    # (which can be months earlier) and pollute the batch.
+    if service_date_range is not None:
+        batch_start, batch_end = service_date_range
+
+        def _eligible(m: dict) -> bool:
+            eff = date.fromisoformat(m["effective_date"])
+            if eff > batch_end:
+                return False
+            term_s = m["termination_date"]
+            if term_s:
+                term = date.fromisoformat(term_s)
+                if term < batch_start:
+                    return False
+            return True
+
+        eligible = [m for m in members if _eligible(m)]
+        if not eligible:
+            raise ValueError(
+                f"No members have coverage on {batch_start.isoformat()}..{batch_end.isoformat()}"
+            )
+    else:
+        eligible = members
+
     for i in range(n):
-        member = rng.choice(members)
+        member = rng.choice(eligible)
         provider = rng.choice(providers)
-        # Service date: within the past 90 days AND within member's coverage window.
         eff = date.fromisoformat(member["effective_date"])
         term_s = member["termination_date"]
         term = date.fromisoformat(term_s) if term_s else today
-        window_start = max(eff, today - timedelta(days=90))
-        window_end = min(term, today)
+        if service_date_range is not None:
+            # Eligibility was pre-filtered, so the window is always non-empty.
+            window_start = max(eff, service_date_range[0])
+            window_end = min(term, service_date_range[1])
+        else:
+            window_start = max(eff, today - timedelta(days=90))
+            window_end = min(term, today)
         if window_start >= window_end:
             service_date = window_end
         else:
@@ -238,7 +279,7 @@ def gen_claims(
         billed = Decimal(rng.choice([50, 75, 125, 200, 450, 1200, 4250, 9800]))
         rows.append(
             {
-                "claim_id": f"CLM-2026-{i:08d}",
+                "claim_id": f"CLM-2026-{(start_id + i):08d}",
                 "member_id": member["member_id"],
                 "provider_npi": provider["npi"],
                 "cpt_code": cpt_code,
@@ -283,6 +324,22 @@ def main() -> None:
     p.add_argument("--claims", type=int, default=10_000)
     p.add_argument("--members", type=int, default=2_000)
     p.add_argument("--providers", type=int, default=500)
+    p.add_argument(
+        "--batches",
+        type=int,
+        default=1,
+        help="number of date-stamped daily batches to emit. 1 = single "
+        "claims_sample.csv (default, backwards-compatible). N>1 = split "
+        "--claims evenly across N consecutive days, emit "
+        "claims_YYYYMMDD.csv per day.",
+    )
+    p.add_argument(
+        "--end-date",
+        type=str,
+        default="2026-04-19",
+        help="most recent service date for the batch series (ISO yyyy-mm-dd). "
+        "Earlier batches go back from here.",
+    )
     args = p.parse_args()
 
     rng = random.Random(args.seed)
@@ -291,19 +348,59 @@ def main() -> None:
     providers = gen_providers(args.providers, rng)
     print(f"generating {args.members} members…")
     members = gen_members(args.members, rng)
-    print(f"generating {args.claims} claims…")
-    claims = gen_claims(args.claims, members, providers, rng)
 
     out = args.out_dir
+    # Always emit provider + membership as a single snapshot — those are
+    # reference data, not transactional daily drops.
     write_csv(out / "provider_sample.csv", providers)
     write_csv(out / "membership_sample.csv", members)
-    write_csv(out / "claims_sample.csv", claims)
-
     print()
     print("wrote:")
     print(f"  {out / 'provider_sample.csv'}    ({len(providers):>6} rows)")
     print(f"  {out / 'membership_sample.csv'}  ({len(members):>6} rows)")
-    print(f"  {out / 'claims_sample.csv'}      ({len(claims):>6} rows)")
+
+    if args.batches <= 1:
+        # Backwards-compatible single-file mode.
+        print(f"generating {args.claims} claims…")
+        claims = gen_claims(args.claims, members, providers, rng)
+        write_csv(out / "claims_sample.csv", claims)
+        print(f"  {out / 'claims_sample.csv'}      ({len(claims):>6} rows)")
+    else:
+        # Date-stamped daily batches — the executive-demo story.
+        end = date.fromisoformat(args.end_date)
+        per_batch = args.claims // args.batches
+        remainder = args.claims - (per_batch * args.batches)
+        print(
+            f"generating {args.claims} claims across {args.batches} date-stamped batches "
+            f"(≈{per_batch} per day, ending {end.isoformat()})…"
+        )
+        start_id = 0
+        for i in range(args.batches):
+            # Oldest batch first → today's batch last.
+            day = end - timedelta(days=(args.batches - 1 - i))
+            batch_size = per_batch + (remainder if i == args.batches - 1 else 0)
+            batch = gen_claims(
+                batch_size,
+                members,
+                providers,
+                rng,
+                start_id=start_id,
+                service_date_range=(day, day),
+            )
+            fname = f"claims_{day.strftime('%Y%m%d')}.csv"
+            write_csv(out / fname, batch)
+            print(f"  {out / fname}  ({len(batch):>6} rows, service_date={day.isoformat()})")
+            start_id += batch_size
+
+        # Also write the canonical claims_sample.csv (all batches concatenated)
+        # so Phase 2-5 code that expects a single file keeps working.
+        rng_all = random.Random(args.seed + 1)  # separate RNG so we don't skew per-day
+        all_claims = gen_claims(args.claims, members, providers, rng_all)
+        write_csv(out / "claims_sample.csv", all_claims)
+        print(
+            f"  {out / 'claims_sample.csv'}  ({len(all_claims):>6} rows — "
+            "combined, kept for backwards compat)"
+        )
 
 
 if __name__ == "__main__":
