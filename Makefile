@@ -288,6 +288,42 @@ verify-phase-4-router: ## Phase 4 router verify — push Gold to both Postgres t
 	uv run python scripts/smoke_router.py
 	@echo "OK: router fan-out + idempotency + config-flip green"
 
+# ---------------------------------------------------------------------
+# Phase 5 — GX + CrewAI plug-in layer
+# ---------------------------------------------------------------------
+
+.PHONY: gx-demo
+gx-demo: ## Run the full Phase 5 demo — 6 agents + 3 GX checkpoints + PHI guard
+	uv run python scripts/demo_phase_5.py
+
+.PHONY: verify-phase-5
+verify-phase-5: verify-phase-5-code verify-phase-5-plugged-in verify-phase-5-plugged-out ## Phase 5: code + plugged-in demo + plug-out proof
+	@echo "$(BOLD)verify-phase-5 PASS$(RST)"
+
+.PHONY: verify-phase-5-code
+verify-phase-5-code: ## Phase 5 code checks — no warehouse state required
+	@echo "--- phase-5 structural tests ---"
+	uv run pytest -m phase -q
+	@echo "--- phase-5 unit tests ---"
+	uv run pytest -m unit -q
+	@echo "--- phase-5 lint ---"
+	uv run ruff check .
+	@echo "--- phase-5 type check ---"
+	uv run mypy datalink
+	@echo "OK: phase-5 code checks"
+
+.PHONY: verify-phase-5-plugged-in
+verify-phase-5-plugged-in: ## Phase 5 demo — all 6 agents + 3 GX suites + PHI boundary
+	@echo "--- phase-5 demo (features.gx=true, features.agents=true) ---"
+	uv run python scripts/demo_phase_5.py
+	@echo "OK: Phase 5 plugged-in demo green"
+
+.PHONY: verify-phase-5-plugged-out
+verify-phase-5-plugged-out: ## Phase 5 plug-out proof — GX + Agents disabled, pipeline unchanged
+	@echo "--- phase-5 plug-out (features.gx=false, features.agents=false) ---"
+	uv run python scripts/plugout_phase_5.py
+	@echo "OK: Phase 5 plug-out proof green"
+
 .PHONY: verify-phase-2-demo
 verify-phase-2-demo: ## Phase 2 E2E demo — requires `make up` first
 	@echo "--- phase-2 E2E (SFTP → LocalFs → DuckDB, idempotent MERGE) ---"

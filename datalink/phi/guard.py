@@ -62,6 +62,17 @@ SAFE_FIELDS: frozenset[str] = frozenset(
         # Prose instructions / task context (free-form, but validated-length)
         "instruction",
         "context",
+        # --- Phase 5 agent-layer extensions (pure counts / meta, no PHI) ----
+        "suite_status",  # DRAFT | REVIEW | APPROVED | ACTIVE
+        "expectation_count",  # int — number of expectations in a suite
+        "failure_count",  # int — number of failed expectations
+        "flagged_count",  # int — number of items flagged for human review
+        "recurrence_count",  # int — how often a failure has recurred
+        "severity",  # LOW | MEDIUM | HIGH | CRITICAL
+        "priority",  # same shape
+        "classification",  # DATA_QUALITY | CONFIG_ERROR | SCHEMA_CHANGE | VOLUME_ANOMALY
+        "recommendation",  # PROCEED | FIX_AND_RESUME | PARTIAL_LOAD | ABORT_AND_INVESTIGATE
+        "review_queue",  # list of flagged expectations (no row data)
     }
 )
 

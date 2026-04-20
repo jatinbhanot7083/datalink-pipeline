@@ -124,8 +124,19 @@ plugins = ["pydantic.mypy"]
 exclude = ["dbt/", "gx/uncommitted/", "build/", "dist/"]
 
 [[tool.mypy.overrides]]
-module = ["crewai.*", "paramiko.*", "pyodbc.*", "psycopg.*", "snowflake.*", "dbt.*"]
+module = [
+    "crewai.*", "paramiko.*", "pyodbc.*", "psycopg.*", "snowflake.*", "dbt.*",
+    "pandas.*", "pandas",
+    "great_expectations.*",
+]
 ignore_missing_imports = true
+
+# GX 1.x's great_expectations.expectations namespace does not re-export its
+# concrete classes via __all__. Our suites import them directly (they work at
+# runtime) — disable the attr-defined error specifically for the suite modules.
+[[tool.mypy.overrides]]
+module = ["datalink.quality.suites.*"]
+disable_error_code = ["attr-defined"]
 
 # ------------------------------------------------------------
 # pytest
@@ -143,4 +154,21 @@ markers = [
 filterwarnings = [
     "error",
     "ignore::DeprecationWarning:pydantic.*",
+    # GX 1.x still uses marshmallow.Number internally — upstream issue; our
+    # code doesn't depend on it. Silence so collection doesn't error out.
+    "ignore::marshmallow.warnings.ChangedInMarshmallow4Warning",
+    # GX emits a PerformanceWarning when validating pandas DataFrames that
+    # have object-typed columns containing mixed types — unavoidable with
+    # DuckDB VARCHAR values cast through psycopg/pandas.
+    "ignore::pandas.errors.PerformanceWarning",
+    # GX imports the deprecated sre_constants / sre_parse stdlib modules on
+    # py3.11 — transitively from fluent data connectors. Upstream fix in GX 1.17+.
+    "ignore:module 'sre_constants' is deprecated:DeprecationWarning",
+    "ignore:module 'sre_parse' is deprecated:DeprecationWarning",
+    # urllib3 / chromadb-adjacent deprecation noise from the crewai install.
+    "ignore::DeprecationWarning:chromadb.*",
+    "ignore::DeprecationWarning:pkg_resources.*",
+    # GX's ephemeral context finalizer raises during weakref cleanup —
+    # pytest captures it as an unraisable exception. Not our bug.
+    "ignore::pytest.PytestUnraisableExceptionWarning",
 ]
