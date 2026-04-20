@@ -1,5 +1,11 @@
-# Local environment: Windows 11 + WSL2 + Docker Desktop.
+# Local environment: Windows 11 + WSL2 + native Docker-in-WSL2.
 # Selected by DL_ENV=local (the default).
+#
+# IMPORTANT — host values are 127.0.0.1 (not `localhost`):
+# Ubuntu 24.04 in WSL2 resolves `localhost` to `::1` (IPv6), but Docker
+# publishes container ports on IPv4 only (`127.0.0.1:PORT->PORT/tcp`).
+# pyodbc and a few other client libs don't fall back IPv6→IPv4 cleanly and
+# time out. 127.0.0.1 sidesteps the resolution entirely.
 
 env: local
 orchestrator: local_sequential
@@ -7,7 +13,7 @@ orchestrator: local_sequential
 adapters:
   sftp:
     type: atmoz
-    host: localhost
+    host: 127.0.0.1
     port: 2222
     user: datalink
     password: datalink_local_only
@@ -33,7 +39,7 @@ adapters:
     # `datalink` login with db_owner rights on first `make up`.
     sqlserver:
       type: sqlserver
-      host: localhost
+      host: 127.0.0.1
       port: 1433
       user: datalink
       password: datalink_local_only
@@ -42,7 +48,7 @@ adapters:
     # Windows-native Postgres squatting on :5432 (see docker-compose.yml).
     postgres:
       type: postgres
-      host: localhost
+      host: 127.0.0.1
       port: 5434
       user: datalink
       password: datalink_local_only
@@ -52,7 +58,7 @@ adapters:
     # entry goes away there.
     postgres_replica:
       type: postgres
-      host: localhost
+      host: 127.0.0.1
       port: 5433
       user: datalink
       password: datalink_local_only
