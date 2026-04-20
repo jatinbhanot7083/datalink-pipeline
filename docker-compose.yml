@@ -42,12 +42,42 @@ services:
       - "127.0.0.1:2222:22"
     # atmoz/sftp command format: user:password[:e][:uid:gid[:dir1,dir2,...]]
     # The dir list is chown'd to user:gid at startup.
-    # NOTE: don't mount a volume at /home/datalink/drop — atmoz cannot chown
-    # a pre-existing mount point. Dev data is ephemeral across `make down`.
+    # Phase 5.7: mount the drop dir as a named volume so filebrowser (web
+    # upload) and Airflow (the consumer) can see the same files. atmoz
+    # chowns named volumes to 1001:100 on first create — the same uid
+    # filebrowser and airflow use.
     command: "datalink:datalink_local_only:1001:100:drop"
+    volumes:
+      - sftp_drop:/home/datalink/drop
     healthcheck:
       test: ["CMD", "sh", "-c", "pgrep sshd || exit 1"]
       interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # --- File browser — drag-drop CSVs into the SFTP drop zone ------------
+  # Shares the sftp_drop volume, so anything dropped here lands in exactly
+  # the path Airflow's bronze_ingest DAG reads from. No SFTP CLI required.
+  filebrowser:
+    restart: unless-stopped
+    image: filebrowser/filebrowser:v2.31.2
+    container_name: datalink-filebrowser
+    networks: [datalink]
+    # Runs as root so the filebrowser_config named volume is writable and
+    # files uploaded to /srv (bind-mounted to sftp_drop) get world-readable
+    # perms that atmoz's uid-1001 SFTP daemon + Airflow's uid-50000 worker
+    # can both read. Localhost-only deployment; not a prod pattern.
+    ports:
+      - "127.0.0.1:8082:80"
+    volumes:
+      - sftp_drop:/srv
+      - filebrowser_config:/config
+      - ./docker/filebrowser/filebrowser.json:/.filebrowser.json:ro
+    healthcheck:
+      # filebrowser has no /health endpoint; hit root to confirm the web
+      # server is accepting connections.
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:80/"]
+      interval: 10s
       timeout: 3s
       retries: 5
 
@@ -390,6 +420,139 @@ services:
       retries: 10
       start_period: 20s
 
+  # =====================================================================
+  # AIRFLOW — LocalExecutor in compose. Scheduler executes DAGs in-process
+  # so DuckDB file-lock is never contested between tasks. 3 containers:
+  # init (one-shot), webserver, scheduler.
+  # =====================================================================
+
+  # Dedicated Postgres for Airflow's own metadata DB. Separate from the
+  # operational Postgres the router pushes Gold UM into so demo reset
+  # doesn't wipe Airflow's state.
+  airflow_db:
+    restart: unless-stopped
+    image: postgres:16
+    container_name: datalink-airflow-db
+    networks: [datalink]
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow_local_only
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "airflow", "-d", "airflow"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # One-shot: run airflow db migrate + create the admin user, then exit.
+  airflow_init:
+    build:
+      context: ./docker/airflow
+    image: datalink-airflow:2.9.3
+    container_name: datalink-airflow-init
+    networks: [datalink]
+    depends_on:
+      airflow_db:
+        condition: service_healthy
+    environment: &airflow_env
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      # Point Airflow at the dags/ folder inside our bind-mounted repo root.
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/datalink/dags
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "False"
+      # Our DAG files import build_dag() from a helper module; they don't
+      # contain the literal string "DAG" or "airflow" at top level, which
+      # Airflow's default DAG_DISCOVERY_SAFE_MODE string-scanner requires.
+      # Force full parsing of every .py in DAGS_FOLDER instead.
+      AIRFLOW__CORE__DAG_DISCOVERY_SAFE_MODE: "False"
+      AIRFLOW__CORE__DAG_FILE_PROCESSOR_TIMEOUT: "120"
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow_local_only@airflow_db/airflow
+      AIRFLOW__WEBSERVER__SECRET_KEY: datalink_local_only_secret_key_change_in_prod
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "True"
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+      # datalink task-side env so adapters + dbt work without repeated config.
+      DL_ENV: local
+      # 127.0.0.1 doesn't resolve inside Airflow container — talk via the
+      # compose network instead. These override the settings.yaml's 127.0.0.1.
+      DL_ADAPTERS__SFTP__HOST: sftp
+      DL_ADAPTERS__SFTP__PORT: "22"
+      DL_ADAPTERS__OPERATIONAL_DBS__SQLSERVER__HOST: sqlserver
+      DL_ADAPTERS__OPERATIONAL_DBS__SQLSERVER__PORT: "1433"
+      DL_ADAPTERS__OPERATIONAL_DBS__POSTGRES__HOST: postgres
+      DL_ADAPTERS__OPERATIONAL_DBS__POSTGRES__PORT: "5432"
+      DL_ADAPTERS__OPERATIONAL_DBS__POSTGRES_REPLICA__HOST: postgres_replica
+      DL_ADAPTERS__OPERATIONAL_DBS__POSTGRES_REPLICA__PORT: "5432"
+      DL_ADAPTERS__WAREHOUSE__PATH: /opt/datalink/warehouse.duckdb
+      DL_ADAPTERS__NOTIFIER__PATH: /opt/datalink/logs/notifications.jsonl
+    volumes:
+      - .:/opt/datalink                    # repo root — dags/, config/, dbt/, datalink/
+      - airflow_logs:/opt/airflow/logs
+      - sftp_drop:/opt/sftp-drop            # Airflow can see the SFTP drop
+    # Explicit db migrate + admin user create. The `|| true` swallows the
+    # "user already exists" error on idempotent re-runs.
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        pip install --no-deps -q -e /opt/datalink
+        airflow db migrate
+        airflow users create \
+          --username admin --password admin_local_only \
+          --firstname DataLink --lastname Admin --role Admin \
+          --email datalink@example.com || true
+        echo "Airflow init complete."
+    restart: "no"
+
+  airflow_webserver:
+    restart: unless-stopped
+    image: datalink-airflow:2.9.3
+    container_name: datalink-airflow-webserver
+    networks: [datalink]
+    depends_on:
+      airflow_db: { condition: service_healthy }
+      airflow_init: { condition: service_completed_successfully }
+    environment: *airflow_env
+    volumes:
+      - .:/opt/datalink
+      - ./docker/airflow/entrypoint.sh:/opt/custom-entrypoint.sh:ro
+      - airflow_logs:/opt/airflow/logs
+      - sftp_drop:/opt/sftp-drop
+    ports:
+      - "127.0.0.1:8088:8080"
+    entrypoint: ["/opt/custom-entrypoint.sh"]
+    command: ["webserver"]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sfo /dev/null http://127.0.0.1:8080/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+
+  airflow_scheduler:
+    restart: unless-stopped
+    image: datalink-airflow:2.9.3
+    container_name: datalink-airflow-scheduler
+    networks: [datalink]
+    depends_on:
+      airflow_db: { condition: service_healthy }
+      airflow_init: { condition: service_completed_successfully }
+    environment: *airflow_env
+    volumes:
+      - .:/opt/datalink
+      - ./docker/airflow/entrypoint.sh:/opt/custom-entrypoint.sh:ro
+      - airflow_logs:/opt/airflow/logs
+      - sftp_drop:/opt/sftp-drop
+    entrypoint: ["/opt/custom-entrypoint.sh"]
+    command: ["scheduler"]
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $$(hostname) || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
 volumes:
   azurite_data:
   sqlserver_data:
@@ -401,3 +564,7 @@ volumes:
   loki_data:
   tempo_data:
   grafana_data:
+  sftp_drop:
+  filebrowser_config:
+  airflow_db_data:
+  airflow_logs:

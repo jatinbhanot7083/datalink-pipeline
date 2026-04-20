@@ -11,11 +11,14 @@ transition the pipeline to PAUSED via PipelineControl.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 import great_expectations as gx
@@ -58,6 +61,41 @@ class CheckpointResult:
     fail_pct: float  # fraction of expectations that failed, 0..100
     status: CheckpointStatus
     expectation_results: list[ExpectationResult]
+
+
+def _get_gx_context() -> Any:
+    """Return a file-backed GX context if `gx/` exists; else ephemeral.
+
+    File-backed mode writes Data Docs to `gx/uncommitted/data_docs/local_site/`
+    which the nginx-gx-docs container serves at http://localhost:8090.
+    Environment override: DL_GX_CONTEXT_MODE=ephemeral forces in-memory.
+    """
+    forced = os.environ.get("DL_GX_CONTEXT_MODE", "").strip().lower()
+    if forced == "ephemeral":
+        return gx.get_context(mode="ephemeral")
+
+    # Walk up from this file to find a `gx/` directory at the project root.
+    project_root = Path(__file__).resolve().parents[2]
+    gx_dir = project_root / "gx"
+    if gx_dir.is_dir():
+        # file mode persists configuration + Data Docs to disk.
+        return gx.get_context(mode="file", project_root_dir=str(project_root))
+    return gx.get_context(mode="ephemeral")
+
+
+def _render_data_docs(context: Any) -> None:
+    """Best-effort: rebuild the HTML Data Docs after a checkpoint run.
+
+    File-backed contexts support build_data_docs(); ephemeral ones don't.
+    We swallow exceptions because Data Docs are a presentation feature —
+    their absence must never fail the checkpoint itself.
+    """
+    builder = getattr(context, "build_data_docs", None)
+    if callable(builder):
+        # Data Docs are a presentation feature — their absence must never
+        # fail the checkpoint itself, so swallow any GX-internal error.
+        with contextlib.suppress(Exception):
+            builder()
 
 
 def _extract_expectation_results(
@@ -104,10 +142,16 @@ def run_checkpoint(
 
     For production Snowflake volumes this would stream; for the local DuckDB
     demo a full materialization is fine (≤10k rows).
+
+    Context mode: file-backed when a `gx/` directory exists at the project
+    root (Phase 5.7 — Data Docs render to gx/uncommitted/data_docs/local_site
+    so the nginx-gx-docs container can serve them). Falls back to ephemeral
+    (in-memory only, no Data Docs) when `gx/` is absent — useful for unit
+    tests and CI where we don't want to pollute the filesystem.
     """
     # Context MUST come first — sets the singleton project manager used by
     # ExpectationSuite.__init__.
-    context = gx.get_context(mode="ephemeral")
+    context = _get_gx_context()
     suite = suite_builder()
 
     rows = warehouse.query(f"SELECT * FROM {qualified_table}")
@@ -120,6 +164,10 @@ def run_checkpoint(
     )
     batch = batch_def.get_batch(batch_parameters={"dataframe": df})
     validation = batch.validate(suite)
+
+    # Render HTML Data Docs so the nginx-gx-docs site (http://localhost:8090)
+    # shows the report for this checkpoint run. No-op on ephemeral contexts.
+    _render_data_docs(context)
 
     results, row_count = _extract_expectation_results(validation)
     total = len(results)
