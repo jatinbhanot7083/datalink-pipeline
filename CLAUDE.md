@@ -103,27 +103,38 @@ make help                # list all targets
 
 ## 9. Current Phase
 
-**Phase 2 — Bronze Ingestion.** `make verify-phase-2` PASS on WSL2 Ubuntu. Awaiting Jatin's review before Phase 3 (Silver DV2.0).
+**Phase 3 — Silver Data Vault 2.0.** `make verify-phase-3` PASS (dbt run = 10 models green, dbt test = 60 tests green). Awaiting Jatin's review before Phase 4 (Gold UM + dual-warehouse router).
+
+### Phase 3 deliverables (on `phase-3-silver-dv2`)
+
+- **dbt project** under `dbt/` — DuckDB-local / Snowflake-prod via profile switch:
+  - `dbt_project.yml` (silver models: incremental, append, INSERT-ONLY)
+  - `profiles.yml` (targets: local-duckdb, dev-snowflake, prod-snowflake)
+  - `macros/dv_helpers.sql` — `dv_hash_key` + `dv_hash_diff` (dialect-agnostic MD5 over `|`-joined fields with NULL sentinel)
+- **10 Silver DV2.0 models:**
+  - Hubs (4): `hub_claim`, `hub_member`, `hub_provider`, `hub_plan` (last one added in Phase 3 so `LINK_MEMBER_PLAN` connects two hubs per DV2.0 spec)
+  - Satellites (3): `sat_claim_details`, `sat_member_demographics`, `sat_provider_info` — INSERT-ONLY, hash-diff-based SCD Type 2
+  - Links (3): `link_claim_member`, `link_claim_provider`, `link_member_plan` — INSERT-ONLY, composite hashes
+- **60 dbt tests:** every hub_hk unique + not_null, every business key unique, every sat and link has a relationships test back to its hub(s), custom composite-uniqueness on all satellites, source not_null on claim_id/member_id/plan_id/npi
+- **Makefile:** `make silver-run`, `silver-test`, `silver-clean`, `verify-phase-3{,-code,-dbt}`
+- **`tests/phase/test_phase_3.py`:** structural checks (10 new phase tests) — every model file exists and uses the hash macros, schema.yml has required tests, profile has all 3 targets
+- Bumped to 39 phase tests + 37 unit tests, ruff + mypy clean
+
+### Phase 3 key call
+
+Added a 4th hub `HUB_PLAN` beyond the Medallion doc's 3 hubs. Reason: the doc's listed `LINK_MEMBER_PLAN` needs two hubs to be a proper DV2.0 link; without `HUB_PLAN` it collapses into a degenerate single-hub bridge. `HUB_PLAN` is populated from both Bronze Claims and Bronze Membership (union) — captures every plan_id ever seen.
+
+### Still deferred (Phase 4+)
+
+- Real `SnowflakeWarehouse` adapter (prod warehouse path — Phase 4).
+- Airflow DAGs wrapping the Silver build — local_sequential is default.
+- `local_sequential` orchestrator CLI — smoke scripts cover the same path for now.
 
 ### Phase 2 deliverables (on `phase-2-bronze-ingestion`, commit `39ab4b5`)
 
-- Real adapters: `AtmozSftpSource` (paramiko), `AzuriteObjectStore` (Azure Blob SDK), `LocalFsObjectStore` (new — default for local env), `DuckDBWarehouse` (real MERGE + COPY-from-stage).
-- `datalink/pipeline/bronze/`: `ingest.py` (SFTP → ObjectStore → MERGE with 4 audit cols), `ddl_loader.py`, `ddl/raw_*.sql`, `schemas.py`.
-- `scripts/seed_sample_data.py`: deterministic synthetic healthcare data (500 providers + 2,000 members + 10,000 claims, FK-consistent, Luhn-valid NPIs, `FICTIONAL_` names).
-- `scripts/smoke_bronze.py`: drives `make demo` and `make verify-phase-2-demo`. Proves idempotency (re-run rows_affected = 0).
-- Makefile: `make demo`, `demo-reset`, `verify-phase-2{,-code,-demo}`.
-- Tests: `tests/phase/test_phase_2.py` adds 12 phase + 5 unit; 49 tests total, all green.
-- `docker-compose.yml`: fix atmoz sftp chown (correct uid:gid:dirs) and drop the broken sftp_data volume.
+### Phase 2 deliverables (on `phase-2-bronze-ingestion`, commit `39ab4b5`)
 
-### Phase 2 pivot — local ObjectStore defaults to `localfs`, not Azurite
-
-Docker Desktop 4.51.0 injects an internal proxy at `http.docker.internal:3128` that blocks pulls from `mcr.microsoft.com` — Azurite + SQL Server can't be pulled. `LocalFsObjectStore` is a real filesystem-backed adapter that satisfies the same Protocol; prod still uses ADLS Gen2 via a different adapter. Plug-in contract and config-only-prod-promotion guarantees preserved.
-
-### Still deferred (Phase 3+ or on demand)
-
-- Airflow `bronze_ingest_dag` — local_sequential is the default per Jatin's #6 decision; DAG lands when we want a live Airflow UI demo.
-- `local_sequential` orchestrator CLI — smoke scripts cover the same path for now.
-- Real `SnowflakeWarehouse` — Phase 4 (prod path).
+Bronze ingestion E2E: SFTP → LocalFs/Azurite → DuckDB MERGE with 4 audit columns. Real adapters (paramiko SFTP, Azure Blob SDK, DuckDB), deterministic sample data (500 providers + 2,000 members + 10,000 claims), idempotency proven. LocalFsObjectStore default for local (Docker Desktop 4.51.0 blocks MCR pulls; prod still uses ADLS Gen2 — plug-in contract preserved).
 
 ### Phase 1 deliverables (this branch)
 

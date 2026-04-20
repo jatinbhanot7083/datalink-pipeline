@@ -1,0 +1,41 @@
+# Local dbt profile — points at the same warehouse.duckdb that Bronze ingest wrote.
+# Prod: switch `type: duckdb` → `type: snowflake` + Snowflake creds via env vars.
+# This profile is NOT a secret; credentials for prod come from DL_* env vars
+# bound through dbt's {{ env_var() }}.
+
+datalink:
+  target: local
+  outputs:
+    local:
+      type: duckdb
+      # Path is relative to the process CWD when dbt runs (NOT project-dir).
+      # Makefile targets invoke dbt from the repo root, so "./warehouse.duckdb"
+      # resolves correctly. If you run `cd dbt && dbt run` manually, override
+      # via DL_ADAPTERS__WAREHOUSE__PATH=../warehouse.duckdb.
+      path: "{{ env_var('DL_ADAPTERS__WAREHOUSE__PATH', './warehouse.duckdb') }}"
+      schema: SILVER
+      threads: 4
+
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT', '') }}"
+      user: "{{ env_var('SNOWFLAKE_USER', '') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD', '') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', '') }}"
+      database: DATALINK_DEV
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'DATALINK_WH') }}"
+      schema: SILVER
+      threads: 8
+      client_session_keep_alive: false
+
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT', '') }}"
+      user: "{{ env_var('SNOWFLAKE_USER', '') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD', '') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE', '') }}"
+      database: DATALINK_PROD
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE', 'DATALINK_WH') }}"
+      schema: SILVER
+      threads: 16
+      client_session_keep_alive: false

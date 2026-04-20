@@ -1,0 +1,39 @@
+name: datalink
+version: 0.1.0
+config-version: 2
+
+profile: datalink
+
+# Source, model, test, etc. paths. All relative to dbt/.
+model-paths: ["models"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+analysis-paths: ["analyses"]
+
+clean-targets:
+  - target
+  - dbt_packages
+
+# Silver-model defaults. Per Medallion doc §4: INSERT-ONLY, historised
+# via load_dts (SCD Type 2). dbt's append incremental gets us there; we
+# filter dupes in the model body.
+models:
+  datalink:
+    silver:
+      +schema: silver             # DuckDB/Snowflake schema name
+      +materialized: incremental
+      +incremental_strategy: append
+      +on_schema_change: sync_all_columns
+      hubs:
+        +tags: ["silver", "hub"]
+      satellites:
+        +tags: ["silver", "sat"]
+      links:
+        +tags: ["silver", "link"]
+
+# Run tests with severity-based behavior. A failing `unique` test on a
+# hub_hk is a build-breaking bug; we default to error.
+tests:
+  +severity: error

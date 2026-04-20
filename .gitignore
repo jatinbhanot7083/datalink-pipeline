@@ -18,6 +18,7 @@ dbt/target/
 dbt/dbt_packages/
 dbt/logs/
 dbt/profiles/*.local.yml
+dbt/.user.yml
 
 # --- DuckDB (local warehouse state) ---
 *.duckdb

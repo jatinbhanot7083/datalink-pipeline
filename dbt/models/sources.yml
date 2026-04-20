@@ -1,0 +1,29 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: "Raw ingestion layer (written by datalink.pipeline.bronze)."
+    schema: BRONZE
+    tables:
+      - name: raw_claims
+        description: "EDI 837 / CSV claims, one row per claim_id."
+        columns:
+          - name: claim_id
+            tests: [not_null]
+          - name: member_id
+            tests: [not_null]
+          - name: provider_npi
+
+      - name: raw_membership
+        description: "EDI 834 / CSV enrollment roster."
+        columns:
+          - name: member_id
+            tests: [not_null]
+          - name: plan_id
+            tests: [not_null]
+
+      - name: raw_provider
+        description: "CMS NPPES provider registry."
+        columns:
+          - name: npi
+            tests: [not_null]

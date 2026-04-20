@@ -1,0 +1,159 @@
+version: 2
+
+models:
+  # ===================================================================
+  # Hubs — one row per unique business key, ever.
+  # ===================================================================
+  - name: hub_claim
+    description: "Hub: unique claim identifier (claim_id)."
+    columns:
+      - name: hub_claim_hk
+        description: "MD5 hash of claim_id — surrogate PK."
+        tests: [not_null, unique]
+      - name: claim_id
+        description: "Business key."
+        tests: [not_null, unique]
+      - name: load_dts
+        tests: [not_null]
+      - name: record_source
+        tests: [not_null]
+
+  - name: hub_member
+    description: "Hub: unique member enrollment — composite (member_id, plan_id)."
+    columns:
+      - name: hub_member_hk
+        tests: [not_null, unique]
+      - name: member_id
+        tests: [not_null]
+      - name: plan_id
+        tests: [not_null]
+      - name: load_dts
+        tests: [not_null]
+      - name: record_source
+        tests: [not_null]
+
+  - name: hub_provider
+    description: "Hub: unique provider (NPI)."
+    columns:
+      - name: hub_provider_hk
+        tests: [not_null, unique]
+      - name: npi
+        tests: [not_null, unique]
+      - name: load_dts
+        tests: [not_null]
+      - name: record_source
+        tests: [not_null]
+
+  - name: hub_plan
+    description: "Hub: unique plan (plan_id). Added Phase 3 so LINK_MEMBER_PLAN connects two hubs."
+    columns:
+      - name: hub_plan_hk
+        tests: [not_null, unique]
+      - name: plan_id
+        tests: [not_null, unique]
+      - name: load_dts
+        tests: [not_null]
+      - name: record_source
+        tests: [not_null]
+
+  # ===================================================================
+  # Satellites — descriptive attributes historised by load_dts.
+  # Uniqueness is by (hub_hk, load_dts); multiple rows per hub_hk are expected.
+  # ===================================================================
+  - name: sat_claim_details
+    description: |
+      Satellite: claim attributes (CPT, ICDs, amount, status, auth).
+      Composite uniqueness (hub_claim_hk, load_dts) enforced by
+      tests/sat_unique_composite.sql (dbt-core 1.8 has no native
+      composite-unique test without dbt_utils).
+    columns:
+      - name: hub_claim_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_claim')
+              field: hub_claim_hk
+      - name: load_dts
+        tests: [not_null]
+      - name: hash_diff
+        tests: [not_null]
+
+  - name: sat_member_demographics
+    columns:
+      - name: hub_member_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_member')
+              field: hub_member_hk
+      - name: load_dts
+        tests: [not_null]
+      - name: hash_diff
+        tests: [not_null]
+
+  - name: sat_provider_info
+    columns:
+      - name: hub_provider_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_provider')
+              field: hub_provider_hk
+      - name: load_dts
+        tests: [not_null]
+      - name: hash_diff
+        tests: [not_null]
+
+  # ===================================================================
+  # Links — many-to-many relationships between Hubs.
+  # ===================================================================
+  - name: link_claim_member
+    columns:
+      - name: link_claim_member_hk
+        tests: [not_null, unique]
+      - name: hub_claim_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_claim')
+              field: hub_claim_hk
+      - name: hub_member_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_member')
+              field: hub_member_hk
+
+  - name: link_claim_provider
+    columns:
+      - name: link_claim_provider_hk
+        tests: [not_null, unique]
+      - name: hub_claim_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_claim')
+              field: hub_claim_hk
+      - name: hub_provider_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_provider')
+              field: hub_provider_hk
+
+  - name: link_member_plan
+    columns:
+      - name: link_member_plan_hk
+        tests: [not_null, unique]
+      - name: hub_member_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_member')
+              field: hub_member_hk
+      - name: hub_plan_hk
+        tests:
+          - not_null
+          - relationships:
+              to: ref('hub_plan')
+              field: hub_plan_hk

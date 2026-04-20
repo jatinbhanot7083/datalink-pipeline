@@ -204,6 +204,42 @@ verify-phase-2-code: ## Phase 2 code checks — no Docker required
 	uv run mypy datalink
 	@echo "OK: phase-2 code checks"
 
+.PHONY: silver-run
+silver-run: ## dbt run — build Silver DV2.0 models from Bronze
+	uv run dbt run --project-dir dbt --profiles-dir dbt
+
+.PHONY: silver-test
+silver-test: ## dbt test — uniqueness + not_null + relationships on Silver
+	uv run dbt test --project-dir dbt --profiles-dir dbt
+
+.PHONY: silver-clean
+silver-clean: ## Drop all Silver tables (next silver-run rebuilds from scratch)
+	uv run python -c "import duckdb; duckdb.connect('warehouse.duckdb').execute('DROP SCHEMA IF EXISTS SILVER_silver CASCADE')"
+
+.PHONY: verify-phase-3
+verify-phase-3: verify-phase-3-code verify-phase-3-dbt ## Phase 3: code + dbt run/test green
+	@echo "$(BOLD)verify-phase-3 PASS$(RST)"
+
+.PHONY: verify-phase-3-code
+verify-phase-3-code: ## Phase 3 code checks — no Docker required
+	@echo "--- phase-3 structural tests ---"
+	uv run pytest -m phase -q
+	@echo "--- phase-3 unit tests ---"
+	uv run pytest -m unit -q
+	@echo "--- phase-3 lint ---"
+	uv run ruff check .
+	@echo "--- phase-3 type check ---"
+	uv run mypy datalink
+	@echo "OK: phase-3 code checks"
+
+.PHONY: verify-phase-3-dbt
+verify-phase-3-dbt: ## Phase 3 dbt verify — dbt run + dbt test (requires Bronze populated)
+	@echo "--- phase-3 Silver DV 2.0 (dbt run) ---"
+	uv run dbt run --project-dir dbt --profiles-dir dbt
+	@echo "--- phase-3 Silver tests (dbt test) ---"
+	uv run dbt test --project-dir dbt --profiles-dir dbt
+	@echo "OK: Silver DV 2.0 built + tested"
+
 .PHONY: verify-phase-2-demo
 verify-phase-2-demo: ## Phase 2 E2E demo — requires `make up` first
 	@echo "--- phase-2 E2E (SFTP → LocalFs → DuckDB, idempotent MERGE) ---"
