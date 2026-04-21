@@ -70,11 +70,19 @@ def run_checkpoint_with_hooks(
     control = PipelineControl(adapters.warehouse)
     control.ensure()
     control.start(pipeline_id)
-    # Idempotent seed: on very first run, populate client='default' with the
-    # 3 LIVE baselines. No-op on subsequent runs. Only when GX is enabled —
-    # no reason to seed if the whole quality layer is turned off.
+    # Phase 6: idempotently create the tenant's BRONZE / SILVER_silver /
+    # SILVER_gold_um schemas before the pipeline touches them. No-op for
+    # client_id=='default' on re-runs.
+    from datalink.tenancy import ensure_tenant_schemas
+
+    ensure_tenant_schemas(adapters.warehouse, client_id)
+
+    # Idempotent seed: populate THIS client's 3 LIVE baselines on first run.
+    # Phase 6: seed per-client so a new tenant gets the baseline automatically
+    # on its very first DAG run (no human step required). No-op on subsequent
+    # runs for the same tenant.
     if gx_enabled:
-        seed_baselines(adapters.warehouse)
+        seed_baselines(adapters.warehouse, client_id=client_id)
 
     # ------------------------------------------------------------------
     # Pre-Val crew (if enabled)

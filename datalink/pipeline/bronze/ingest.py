@@ -33,6 +33,7 @@ from datalink.pipeline.bronze.ddl_loader import (
     create_bronze_schema,
     qualified_name,
 )
+from datalink.tenancy import DEFAULT_CLIENT, Layer, schema_for
 
 _log = get_logger(__name__)
 
@@ -158,7 +159,8 @@ def ingest_file(
     remote_path: str,
     batch_id: str | None = None,
     record_source: str | None = None,
-    schema: str = "BRONZE",
+    schema: str | None = None,
+    client_id: str = DEFAULT_CLIENT,
 ) -> BronzeIngestResult:
     """End-to-end Bronze ingest for a single file on the SFTP drop zone.
 
@@ -167,7 +169,11 @@ def ingest_file(
       remote_path: path as returned by SftpSource.list_files().
       batch_id: pipeline-run identifier. Generated if None.
       record_source: upstream system tag. Defaults to the CSV filename stem.
-      schema: warehouse schema (default BRONZE).
+      schema: warehouse schema override. If None (default), resolved via
+              `schema_for(client_id, Layer.BRONZE)` — returns "BRONZE" for
+              the default client, "BRONZE_<UPPER_CLIENT>" for tenants.
+              Explicit schema passed by Phase-2 tests still honoured.
+      client_id: tenant identifier. Default 'default' = Phase-5.x baseline.
     """
     source_type = source_type.upper()
     if source_type not in BRONZE_TABLES:
@@ -175,7 +181,8 @@ def ingest_file(
             f"Unknown source_type {source_type!r}; expected one of {list(BRONZE_TABLES)}"
         )
     table: BronzeTable = BRONZE_TABLES[source_type]
-    target = qualified_name(table, schema)
+    resolved_schema = schema if schema is not None else schema_for(client_id, Layer.BRONZE)
+    target = qualified_name(table, resolved_schema)
     batch_id = batch_id or f"BATCH-{uuid.uuid4().hex[:12].upper()}"
     filename = Path(remote_path).name
     record_source = record_source or Path(remote_path).stem
@@ -188,7 +195,7 @@ def ingest_file(
     )
 
     # Ensure target schema + tables exist (idempotent).
-    create_bronze_schema(adapters.warehouse, schema)
+    create_bronze_schema(adapters.warehouse, resolved_schema)
 
     rows_before = _row_count(adapters.warehouse, target)
 

@@ -27,6 +27,7 @@ from datalink.config.models import (
     LoggingConfig,
     OrchestratorName,
     ProcessingConfig,
+    TenancyConfig,
 )
 
 
@@ -42,6 +43,7 @@ class Settings(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     adapters: AdapterConfig = Field(default_factory=AdapterConfig)
     features: FeatureConfig = Field(default_factory=FeatureConfig)
+    tenancy: TenancyConfig = Field(default_factory=TenancyConfig)
 
 
 # ----------------------------------------------------------------------------

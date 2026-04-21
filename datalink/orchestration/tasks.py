@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING, Any
 
 from datalink.config.loader import load_settings
 from datalink.logging import get_logger
+from datalink.tenancy import Layer, schema_for
 
 if TYPE_CHECKING:
     from datalink.adapters.factory import AdapterSet
@@ -102,7 +103,13 @@ def task_bronze_ingest(ctx: TaskContext) -> dict[str, Any]:
     results: dict[str, Any] = {}
     for source_type, fn in uploads:
         remote = f"{ctx.settings.adapters.sftp.remote_base_dir}/{fn}"
-        r = ingest_file(ctx.adapters, source_type, remote, batch_id=ctx.run_id)
+        r = ingest_file(
+            ctx.adapters,
+            source_type,
+            remote,
+            batch_id=ctx.run_id,
+            client_id=ctx.client_id,
+        )
         results[source_type] = {
             "rows_in_source": r.rows_in_source,
             "rows_in_target_after": r.rows_in_target_after,
@@ -126,7 +133,7 @@ def task_bronze_checkpoint(ctx: TaskContext) -> dict[str, Any]:
         run_id=ctx.run_id,
         client_id=ctx.client_id,
         checkpoint_name=BRONZE_STRUCTURAL,
-        qualified_table="BRONZE.RAW_CLAIMS",
+        qualified_table=f"{schema_for(ctx.client_id, Layer.BRONZE)}.RAW_CLAIMS",
         suite_builder=build_bronze_suite,
     )
     return _checkpoint_summary(hc, BRONZE_STRUCTURAL)
@@ -159,7 +166,7 @@ def task_silver_checkpoint(ctx: TaskContext) -> dict[str, Any]:
         run_id=ctx.run_id,
         client_id=ctx.client_id,
         checkpoint_name=SILVER_CLINICAL,
-        qualified_table="SILVER_silver.sat_claim_details",
+        qualified_table=f"{schema_for(ctx.client_id, Layer.SILVER_DV)}.sat_claim_details",
         suite_builder=build_silver_suite,
     )
     return _checkpoint_summary(hc, SILVER_CLINICAL)
@@ -197,7 +204,7 @@ def task_gold_checkpoint(ctx: TaskContext) -> dict[str, Any]:
         run_id=ctx.run_id,
         client_id=ctx.client_id,
         checkpoint_name=GOLD_BUSINESS,
-        qualified_table="SILVER_gold_um.gold_patient_auth",
+        qualified_table=f"{schema_for(ctx.client_id, Layer.GOLD_UM)}.gold_patient_auth",
         suite_builder=build_gold_suite,
     )
     return _checkpoint_summary(hc, GOLD_BUSINESS)
@@ -230,6 +237,10 @@ def _run_dbt(args: list[str], ctx: TaskContext | None = None) -> dict[str, Any]:
     warehouse handle before shelling out, and let the next task re-open it
     lazily. This is transparent to caller code — just don't keep a reference
     to `ctx.adapters.warehouse` across a dbt task.
+
+    Phase 6: passes `--vars '{client_id: <ctx.client_id>}'` so the
+    `generate_schema_name.sql` macro can suffix schemas per tenant. Absent
+    ctx or default client, no `--vars` flag is added (backward compat).
     """
     if ctx is not None and ctx._adapters is not None:
         close_fn = getattr(ctx._adapters.warehouse, "close", None)
@@ -240,6 +251,9 @@ def _run_dbt(args: list[str], ctx: TaskContext | None = None) -> dict[str, Any]:
 
     repo_root = Path(__file__).resolve().parents[2]
     cmd = ["dbt", *args, "--project-dir", "dbt", "--profiles-dir", "dbt"]
+    # Thread tenant through as a dbt var so generate_schema_name.sql picks it up.
+    if ctx is not None and ctx.client_id and ctx.client_id != "default":
+        cmd.extend(["--vars", f"{{client_id: {ctx.client_id}}}"])
     _log.info("task.dbt.run", cmd=" ".join(cmd))
     proc = subprocess.run(
         cmd,

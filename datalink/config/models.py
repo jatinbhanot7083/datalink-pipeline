@@ -185,3 +185,27 @@ class LoggingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     format: LogFormat = LogFormat.CONSOLE
+
+
+# ----------------------------------------------------------------------------
+# Tenancy — Phase 6. Multi-client routing.
+#
+# A "client" = one logical payer / customer whose data is kept in its own
+# set of warehouse schemas (BRONZE_<CLIENT>, SILVER_silver_<CLIENT>,
+# SILVER_gold_um_<CLIENT>). CONTROL stays shared.
+#
+# `default_client` is the client_id used when Airflow DAGs run without an
+# explicit `conf={"client_id": ...}` override. Phase-5.x backwards
+# compatibility: 'default' maps to the unsuffixed BRONZE / SILVER_silver /
+# SILVER_gold_um schemas so existing demo data keeps working.
+#
+# `enabled_clients` lets ops pre-declare tenants so schemas get created at
+# startup rather than lazily on first DAG run. Empty list = auto-create on
+# demand (the default-client plus whatever Airflow DAG conf specifies).
+# ----------------------------------------------------------------------------
+
+
+class TenancyConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    default_client: str = "default"
+    enabled_clients: list[str] = Field(default_factory=list)

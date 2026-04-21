@@ -3,7 +3,11 @@ version: 2
 sources:
   - name: bronze
     description: "Raw ingestion layer (written by datalink.pipeline.bronze)."
-    schema: BRONZE
+    # Phase 6 multi-tenant: schema name resolved at parse time via the
+    # `client_id` dbt var. Mirrors datalink.tenancy.schema_for(cid, BRONZE).
+    #   var client_id == 'default' → 'BRONZE'
+    #   var client_id == 'acme'    → 'BRONZE_ACME'
+    schema: "{% if var('client_id', 'default') == 'default' %}BRONZE{% else %}BRONZE_{{ var('client_id') | upper }}{% endif %}"
     tables:
       - name: raw_claims
         description: "EDI 837 / CSV claims, one row per claim_id."
