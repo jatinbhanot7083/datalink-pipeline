@@ -26,12 +26,17 @@ from typing import cast
 
 from datalink.adapters.factory import AdapterSet
 from datalink.adapters.protocols import Warehouse
+from datalink.config.models import SourceFormat
 from datalink.logging import get_logger
 from datalink.pipeline.bronze.ddl_loader import (
     BRONZE_TABLES,
     BronzeTable,
     create_bronze_schema,
     qualified_name,
+)
+from datalink.pipeline.bronze.parsers import (
+    SourceFormatConfig,
+    build_parser,
 )
 from datalink.tenancy import DEFAULT_CLIENT, Layer, schema_for
 
@@ -85,12 +90,17 @@ def _load_to_staging(
     source_file: str,
     batch_id: str,
     record_source: str,
+    fmt: SourceFormatConfig,
 ) -> int:
     """Load a CSV file into a staging table with the 4 audit columns appended.
 
     DuckDB and Snowflake both support "CREATE TABLE AS SELECT ... LIMIT 0"
     to clone a schema. We use it here to get the target's exact column types
     for the staging table.
+
+    Phase 6: `fmt` drives delimiter + header behaviour so pipe-delimited
+    or tab-delimited feeds work without code changes. Default is still
+    comma-delimited with header (Phase-5.x compat).
     """
     # Clone target schema into staging — empty, no rows.
     warehouse.execute(
@@ -115,15 +125,19 @@ def _load_to_staging(
 
     # INSERT with audit cols computed on the fly. Named params so positional
     # ordering can't drift when we change the column projection later.
+    # Positional params for csv_path/header/delim so DuckDB's read_csv_auto
+    # gets type-coerced args (header=BOOLEAN, delim=VARCHAR).
     sql = (
         f"INSERT INTO {staging_table} ({col_list_full}) "
         f"SELECT {col_list_source}, {_audit_columns_sql()} "
-        f"FROM read_csv_auto($csv_path, header = true)"
+        f"FROM read_csv_auto($csv_path, header = $header, delim = $delim)"
     )
     warehouse.execute(
         sql,
         {
             "csv_path": str(local_csv),
+            "header": fmt.has_header,
+            "delim": fmt.delimiter,
             "source_file": source_file,
             "batch_id": batch_id,
             "record_source": record_source,
@@ -161,6 +175,7 @@ def ingest_file(
     record_source: str | None = None,
     schema: str | None = None,
     client_id: str = DEFAULT_CLIENT,
+    source_format: SourceFormat | None = None,
 ) -> BronzeIngestResult:
     """End-to-end Bronze ingest for a single file on the SFTP drop zone.
 
@@ -174,6 +189,9 @@ def ingest_file(
               the default client, "BRONZE_<UPPER_CLIENT>" for tenants.
               Explicit schema passed by Phase-2 tests still honoured.
       client_id: tenant identifier. Default 'default' = Phase-5.x baseline.
+      source_format: per-source parser config (delimiter, header, encoding).
+                     If None, defaults to comma-delimited CSV with header
+                     (Phase-5.x behaviour).
     """
     source_type = source_type.upper()
     if source_type not in BRONZE_TABLES:
@@ -183,6 +201,21 @@ def ingest_file(
     table: BronzeTable = BRONZE_TABLES[source_type]
     resolved_schema = schema if schema is not None else schema_for(client_id, Layer.BRONZE)
     target = qualified_name(table, resolved_schema)
+    # Phase 6: resolve parser via source_format (or default CSV).
+    fmt_cfg = (
+        SourceFormatConfig(
+            format=source_format.format,
+            delimiter=source_format.delimiter,
+            has_header=source_format.has_header,
+            encoding=source_format.encoding,
+            options=dict(source_format.options),
+        )
+        if source_format is not None
+        else SourceFormatConfig()
+    )
+    parser = build_parser(fmt_cfg)
+    # Validate parser picks a format the warehouse knows (raises early on EDI).
+    parser.file_format()
     batch_id = batch_id or f"BATCH-{uuid.uuid4().hex[:12].upper()}"
     filename = Path(remote_path).name
     record_source = record_source or Path(remote_path).stem
@@ -233,6 +266,7 @@ def ingest_file(
             source_file=filename,
             batch_id=batch_id,
             record_source=record_source,
+            fmt=fmt_cfg,
         )
 
         # 5. MERGE staging → target on natural key. Idempotent.

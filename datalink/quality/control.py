@@ -137,6 +137,10 @@ _DDL = [
     # expectation suites. One row per (client_id, suite_name, version). Exactly
     # ONE row per (client_id, suite_name) may be LIVE at a time — enforced in
     # code since DuckDB lacks partial-unique-index support.
+    # Phase 6: `source_type` column identifies which source_type (CLAIMS /
+    # MEMBERSHIP / PROVIDER) the suite targets. NULL = stage-aggregate (legacy,
+    # pre-6.2). Per DataQuality_Metrics.docx the rule is "do not merge or mix" —
+    # baseline_seeder creates one suite per (client, stage, source_type).
     f"""
     CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.dq_suites (
         suite_id        VARCHAR PRIMARY KEY,
@@ -146,6 +150,7 @@ _DDL = [
         status          VARCHAR NOT NULL,
         expectations    VARCHAR NOT NULL,
         dq_dimensions   VARCHAR,
+        source_type     VARCHAR,
         source          VARCHAR NOT NULL,
         created_by      VARCHAR NOT NULL,
         created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
@@ -157,6 +162,11 @@ _DDL = [
         archived_at     TIMESTAMP
     )
     """,
+    # Phase 6 migration: add source_type column on existing DBs (idempotent
+    # via try/except since DuckDB has no IF NOT EXISTS for ADD COLUMN).
+    # Wrapped in a DO NOTHING sentinel via CREATE TABLE AS to avoid failing
+    # the whole DDL batch — we handle the column-exists case at DDL run time
+    # in create_control_tables() below.
     # Immutable audit log for every suite state transition.
     f"""
     CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.dq_suite_audit_log (
@@ -173,12 +183,24 @@ _DDL = [
 
 
 def create_control_tables(warehouse: Warehouse) -> None:
-    """Idempotently create control-layer schema + tables."""
+    """Idempotently create control-layer schema + tables.
+
+    Phase 6: also runs forward-migrations for columns added after 5.8.
+    """
     helper = getattr(warehouse, "create_schema_if_not_exists", None)
     if callable(helper):
         helper(CONTROL_SCHEMA)
     for stmt in _DDL:
         warehouse.execute(stmt)
+    # Forward-migration: Phase 6 adds `source_type` to dq_suites. On DBs that
+    # were created by Phase 5.8 the column is missing; try to add it, ignore
+    # the "already exists" error so the function stays idempotent.
+    try:
+        warehouse.execute(f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN source_type VARCHAR")
+    except Exception as exc:
+        msg = str(exc).lower()
+        if "already exists" not in msg and "duplicate column" not in msg:
+            raise
 
 
 class PipelineControl:

@@ -103,12 +103,15 @@ def task_bronze_ingest(ctx: TaskContext) -> dict[str, Any]:
     results: dict[str, Any] = {}
     for source_type, fn in uploads:
         remote = f"{ctx.settings.adapters.sftp.remote_base_dir}/{fn}"
+        # Phase 6: per-source delimiter / format config (defaults to CSV).
+        source_fmt = ctx.settings.sources.for_source(source_type)
         r = ingest_file(
             ctx.adapters,
             source_type,
             remote,
             batch_id=ctx.run_id,
             client_id=ctx.client_id,
+            source_format=source_fmt,
         )
         results[source_type] = {
             "rows_in_source": r.rows_in_source,

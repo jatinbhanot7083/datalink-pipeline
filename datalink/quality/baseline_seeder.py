@@ -1,16 +1,24 @@
-"""Seed CONTROL.dq_suites with the hand-coded Python suites as v1 LIVE baselines.
+"""Seed CONTROL.dq_suites with one LIVE baseline per (client, source, stage).
 
-Phase 5.8 introduces the DQ Control Plane — a DB-backed, version-tracked,
-multi-tenant registry for expectation suites. But all existing pipelines
-validate against the 3 hand-coded suites at `datalink/quality/suites/*.py`.
+Phase 6 refactor: the 3 stage-level baselines of Phase 5.8 are replaced by
+9 per-(source_type, stage) baselines — NO MERGING across sources. This
+matches Jatin's explicit directive for Phase 6:
 
-To preserve continuity, on first boot we:
-  1. Check if `client_id='default'` has any rows in dq_suites.
-  2. If not, convert each `build_*_suite()` result to JSON and insert as:
-       (client_id='default', version=1, status=LIVE, source=baseline_python)
-  3. From that point on, the runtime checkpoint uses `SuiteRegistry.get_live`
-     which returns the LIVE row (this seeded one, until a UI-authored
-     version is approved + activated).
+    "Membership for Client1 has its own suite, Claim for Client1 has its
+    own; DO NOT MERGE OR MIX"  (~135 suites = 15 clients x 3 sources x 3 stages)
+
+Naming convention:  f"{stage}_{source_lower}"  — e.g.:
+
+    bronze_claims, bronze_membership, bronze_provider,
+    silver_claims, silver_membership, silver_provider,
+    gold_claims,   gold_membership,   gold_provider
+
+For backward compatibility with Phase 5.7 scripts that still reference the
+3 aggregate suite names (`bronze_structural` / `silver_clinical` /
+`gold_business`), those 3 LEGACY_BASELINES are ALSO seeded (kept as Phase
+5.8 "aggregate" rows). They carry `source_type=NULL` and are marked by the
+Control Tower UI as legacy. The 9 per-source baselines are the authoritative
+source going forward.
 
 Idempotent — safe to call every `docker compose up` / every DAG run.
 """
@@ -21,7 +29,6 @@ from typing import Any
 
 from datalink.adapters.protocols import Warehouse
 from datalink.logging import get_logger
-from datalink.quality.control import CONTROL_SCHEMA
 from datalink.quality.registry import (
     DqDimension,
     SuiteDraft,
@@ -33,255 +40,286 @@ _log = get_logger(__name__)
 
 DEFAULT_CLIENT = "default"
 
+# Canonical source_type tags — case matches what bronze.ingest.ingest_file uses.
+SOURCE_CLAIMS = "CLAIMS"
+SOURCE_MEMBERSHIP = "MEMBERSHIP"
+SOURCE_PROVIDER = "PROVIDER"
+ALL_SOURCES = (SOURCE_CLAIMS, SOURCE_MEMBERSHIP, SOURCE_PROVIDER)
 
-# ----------------------------------------------------------------------------
-# Hand-authored JSON baselines — these MIRROR the GX objects the suite files
-# instantiate programmatically in `datalink/quality/suites/*.py`.
+
+# ============================================================================
+# BRONZE baselines — structural checks on RAW_<SOURCE> tables.
 #
-# Why duplicate them as JSON here (rather than introspecting the Python suite):
-# GX 1.x's ExpectationSuite objects don't round-trip cleanly to JSON in
-# current versions (internal IDs, ephemeral wrappers). Hand-authoring the
-# JSON is cleaner, and — since UI edits will diverge anyway — locking the
-# baselines here becomes the "schema spec" for what the UI allows.
-# ----------------------------------------------------------------------------
+# Every Bronze expectation is ROW-level and ASSUMES the 4 audit columns
+# (_load_dt, _source_file, _batch_id, _record_source) are already appended
+# by datalink.pipeline.bronze.ingest._load_to_staging.
+# ============================================================================
 
 
-# NOTE on the "meta" block: these annotations are what the UI renders as
-# dimension tags + severity badges. They're not passed to GX (GX ignores
-# unknown keys in `meta`), so we're safe to add UI-only fields.
+def _not_null(col: str, severity: str, desc: str, mostly: float | None = None) -> dict[str, Any]:
+    kw: dict[str, Any] = {"column": col}
+    if mostly is not None:
+        kw["mostly"] = mostly
+    return {
+        "expectation_type": "expect_column_values_to_not_be_null",
+        "kwargs": kw,
+        "meta": {
+            "dq_dimension": DqDimension.COMPLETENESS.value,
+            "severity": severity,
+            "description": desc,
+        },
+    }
 
-BRONZE_STRUCTURAL_BASELINE: list[dict[str, Any]] = [
-    # -------- ROW-LEVEL STRUCTURE --------
-    {
-        "expectation_type": "expect_table_row_count_to_be_between",
-        "kwargs": {"min_value": 100, "max_value": 10_000_000},
-        "meta": {
-            "dq_dimension": DqDimension.TIMELINESS.value,
-            "severity": "MEDIUM",
-            "description": "Row-count sanity — detects truncated or exploded files.",
-        },
-    },
-    # -------- SCHEMA DRIFT --------
-    {
-        "expectation_type": "expect_table_columns_to_match_ordered_list",
-        "kwargs": {
-            "column_list": [
-                "claim_id",
-                "member_id",
-                "provider_npi",
-                "cpt_code",
-                "icd10_primary",
-                "icd10_secondary",
-                "service_date",
-                "billed_amount",
-                "claim_status",
-                "plan_id",
-                "prior_auth_ref",
-                "_load_dt",
-                "_source_file",
-                "_batch_id",
-                "_record_source",
-            ]
-        },
-        "meta": {
-            "dq_dimension": DqDimension.VALIDITY.value,
-            "severity": "HIGH",
-            "description": "Column order must match Bronze DDL — schema-drift detector.",
-        },
-    },
-    # -------- COMPLETENESS (natural keys) --------
-    {
-        "expectation_type": "expect_column_values_to_not_be_null",
-        "kwargs": {"column": "claim_id"},
-        "meta": {
-            "dq_dimension": DqDimension.COMPLETENESS.value,
-            "severity": "HIGH",
-            "description": "Every claim must have a natural key.",
-        },
-    },
-    {
-        "expectation_type": "expect_column_values_to_not_be_null",
-        "kwargs": {"column": "member_id"},
-        "meta": {
-            "dq_dimension": DqDimension.COMPLETENESS.value,
-            "severity": "HIGH",
-            "description": "Every claim must be tied to a member.",
-        },
-    },
-    {
-        "expectation_type": "expect_column_values_to_not_be_null",
-        "kwargs": {"column": "provider_npi"},
-        "meta": {
-            "dq_dimension": DqDimension.COMPLETENESS.value,
-            "severity": "HIGH",
-            "description": "Every claim must name a provider.",
-        },
-    },
-    # -------- UNIQUENESS (PK candidates) --------
-    {
+
+def _unique(col: str, severity: str, desc: str) -> dict[str, Any]:
+    return {
         "expectation_type": "expect_column_values_to_be_unique",
-        "kwargs": {"column": "claim_id"},
+        "kwargs": {"column": col},
         "meta": {
             "dq_dimension": DqDimension.UNIQUENESS.value,
-            "severity": "HIGH",
-            "description": "claim_id is the Bronze primary key — duplicates break MERGE.",
+            "severity": severity,
+            "description": desc,
         },
-    },
-    # -------- VALIDITY (format / regex) --------
-    {
+    }
+
+
+def _regex(col: str, regex: str, severity: str, desc: str, mostly: float = 1.0) -> dict[str, Any]:
+    return {
         "expectation_type": "expect_column_values_to_match_regex",
-        "kwargs": {"column": "provider_npi", "regex": r"^\d{10}$", "mostly": 0.98},
+        "kwargs": {"column": col, "regex": regex, "mostly": mostly},
         "meta": {
             "dq_dimension": DqDimension.VALIDITY.value,
-            "severity": "HIGH",
-            "description": "NPI must be 10 digits (CMS standard). Allow 2% dirty.",
+            "severity": severity,
+            "description": desc,
         },
-    },
-    # -------- VALIDITY (range) --------
-    {
+    }
+
+
+def _between(
+    col: str,
+    lo: float,
+    hi: float,
+    severity: str,
+    desc: str,
+    dim: DqDimension = DqDimension.VALIDITY,
+) -> dict[str, Any]:
+    return {
         "expectation_type": "expect_column_values_to_be_between",
-        "kwargs": {"column": "billed_amount", "min_value": 0, "max_value": 2_000_000},
+        "kwargs": {"column": col, "min_value": lo, "max_value": hi},
         "meta": {
-            "dq_dimension": DqDimension.VALIDITY.value,
-            "severity": "MEDIUM",
-            "description": "Billed amount must be non-negative and below fraud-threshold.",
+            "dq_dimension": dim.value,
+            "severity": severity,
+            "description": desc,
         },
-    },
-    # -------- VALIDITY (value set) --------
-    {
+    }
+
+
+def _in_set(col: str, values: list[str], severity: str, desc: str) -> dict[str, Any]:
+    return {
         "expectation_type": "expect_column_values_to_be_in_set",
-        "kwargs": {
-            "column": "claim_status",
-            "value_set": ["SUBMITTED", "APPROVED", "DENIED", "PENDED"],
-        },
+        "kwargs": {"column": col, "value_set": values},
         "meta": {
             "dq_dimension": DqDimension.VALIDITY.value,
-            "severity": "HIGH",
-            "description": "Claim status must be one of the 4 standard codes.",
+            "severity": severity,
+            "description": desc,
         },
-    },
+    }
+
+
+def _row_count_between(lo: int, hi: int, severity: str, desc: str) -> dict[str, Any]:
+    return {
+        "expectation_type": "expect_table_row_count_to_be_between",
+        "kwargs": {"min_value": lo, "max_value": hi},
+        "meta": {
+            "dq_dimension": DqDimension.TIMELINESS.value,
+            "severity": severity,
+            "description": desc,
+        },
+    }
+
+
+# ---------- BRONZE_CLAIMS — validates BRONZE.RAW_CLAIMS ----------
+
+BRONZE_CLAIMS_BASELINE: list[dict[str, Any]] = [
+    _row_count_between(100, 10_000_000, "MEDIUM", "Claim volume sanity — detects truncated files."),
+    _not_null("claim_id", "HIGH", "Every claim must have a natural key."),
+    _not_null("member_id", "HIGH", "Every claim must tie to a member."),
+    _not_null("provider_npi", "HIGH", "Every claim must name a provider."),
+    _unique("claim_id", "HIGH", "claim_id is the Bronze PK — duplicates break MERGE."),
+    _regex("provider_npi", r"^\d{10}$", "HIGH", "NPI must be 10 digits (CMS).", mostly=0.98),
+    _between(
+        "billed_amount", 0, 2_000_000, "MEDIUM", "Billed amount non-negative + fraud-threshold."
+    ),
+    _in_set(
+        "claim_status",
+        ["SUBMITTED", "APPROVED", "DENIED", "PENDED"],
+        "HIGH",
+        "Claim status must be one of 4 standard codes.",
+    ),
 ]
 
 
-SILVER_CLINICAL_BASELINE: list[dict[str, Any]] = [
-    # -------- VALIDITY (CPT format) --------
-    {
-        "expectation_type": "expect_column_values_to_match_regex",
-        "kwargs": {"column": "cpt_code", "regex": r"^\d{5}$|^[A-Z]\d{4}$", "mostly": 0.95},
-        "meta": {
-            "dq_dimension": DqDimension.VALIDITY.value,
-            "severity": "HIGH",
-            "description": "CPT: 5 digits (Category I) or HCPCS alpha + 4 digits.",
-        },
-    },
-    # -------- VALIDITY (ICD-10 format) --------
-    {
-        "expectation_type": "expect_column_values_to_match_regex",
-        "kwargs": {
-            "column": "icd10_primary",
-            "regex": r"^[A-TV-Z]\d{2}(\.\w{1,4})?$",
-            "mostly": 0.98,
-        },
-        "meta": {
-            "dq_dimension": DqDimension.VALIDITY.value,
-            "severity": "HIGH",
-            "description": "Primary ICD-10 must conform to CMS/WHO format.",
-        },
-    },
-    # -------- VALIDITY (positive amounts) --------
-    {
-        "expectation_type": "expect_column_values_to_be_between",
-        "kwargs": {"column": "billed_amount", "min_value": 0.01, "max_value": 2_000_000},
-        "meta": {
-            "dq_dimension": DqDimension.VALIDITY.value,
-            "severity": "MEDIUM",
-            "description": "Silver claims must have strictly-positive billed amounts.",
-        },
-    },
-    # -------- COMPLETENESS (clinical keys) --------
-    {
-        "expectation_type": "expect_column_values_to_not_be_null",
-        "kwargs": {"column": "cpt_code"},
-        "meta": {
-            "dq_dimension": DqDimension.COMPLETENESS.value,
-            "severity": "HIGH",
-            "description": "Silver requires CPT — cleaning happened at this tier.",
-        },
-    },
+# ---------- BRONZE_MEMBERSHIP — validates BRONZE.RAW_MEMBERSHIP ----------
+
+BRONZE_MEMBERSHIP_BASELINE: list[dict[str, Any]] = [
+    _row_count_between(100, 10_000_000, "MEDIUM", "Enrollment volume sanity."),
+    _not_null("member_id", "HIGH", "Every enrollment row must name a member."),
+    _not_null("plan_id", "HIGH", "Enrollment requires a plan reference."),
+    # member_id+plan_id is the composite PK; validate member_id uniqueness isn't strict
+    # (one member can be on multiple plans in history). Validate that no row has NULL keys.
+    _not_null("enrollment_start", "HIGH", "Enrollment-start date required."),
 ]
 
 
-GOLD_BUSINESS_BASELINE: list[dict[str, Any]] = [
-    # -------- CONSISTENCY (A > B date ordering) --------
+# ---------- BRONZE_PROVIDER — validates BRONZE.RAW_PROVIDER ----------
+
+BRONZE_PROVIDER_BASELINE: list[dict[str, Any]] = [
+    _row_count_between(1, 10_000_000, "LOW", "Provider registry row-count sanity."),
+    _not_null("npi", "HIGH", "Every provider row requires an NPI."),
+    _unique("npi", "HIGH", "NPI is the Bronze PK in the provider registry."),
+    _regex("npi", r"^\d{10}$", "HIGH", "NPI must be 10 digits (CMS)."),
+]
+
+
+# ============================================================================
+# SILVER baselines — Silver DV 2.0 satellite checks.
+#
+# Silver's per-source split: sat_claim_details / sat_member_demographics /
+# sat_provider_info. Each suite targets its own satellite. Accuracy +
+# Consistency checks require cross-system joins so they surface at Silver+.
+# ============================================================================
+
+SILVER_CLAIMS_BASELINE: list[dict[str, Any]] = [
+    _regex(
+        "cpt_code",
+        r"^\d{5}$|^[A-Z]\d{4}$",
+        "HIGH",
+        "CPT: 5 digits (Cat I) or HCPCS alpha+4.",
+        mostly=0.95,
+    ),
+    _regex(
+        "icd10_primary",
+        r"^[A-TV-Z]\d{2}(\.\w{1,4})?$",
+        "HIGH",
+        "Primary ICD-10 must conform to CMS/WHO format.",
+        mostly=0.98,
+    ),
+    _between(
+        "billed_amount",
+        0.01,
+        2_000_000,
+        "MEDIUM",
+        "Silver claims must have strictly-positive billed amounts.",
+    ),
+    _not_null("cpt_code", "HIGH", "Silver requires CPT — cleaning happened at this tier."),
+]
+
+
+SILVER_MEMBERSHIP_BASELINE: list[dict[str, Any]] = [
+    _not_null("member_id", "HIGH", "Silver member row requires a member_id."),
+    _not_null("plan_id", "HIGH", "Silver member row requires a plan_id."),
+]
+
+
+SILVER_PROVIDER_BASELINE: list[dict[str, Any]] = [
+    _not_null("npi", "HIGH", "Silver provider row requires NPI."),
+    _regex(
+        "npi",
+        r"^\d{10}$",
+        "HIGH",
+        "Silver NPI must still conform to 10-digit format after cleaning.",
+    ),
+]
+
+
+# ============================================================================
+# GOLD baselines — UM operational business-rule checks.
+#
+# Gold UM aggregates all 3 sources into auth-centric tables. Each per-source
+# suite validates the aspect of Gold its source is responsible for.
+# ============================================================================
+
+GOLD_CLAIMS_BASELINE: list[dict[str, Any]] = [
     {
         "expectation_type": "expect_column_pair_values_a_to_be_greater_than_b",
         "kwargs": {"column_A": "auth_due_date", "column_B": "auth_from_date", "or_equal": True},
         "meta": {
             "dq_dimension": DqDimension.CONSISTENCY.value,
             "severity": "HIGH",
-            "description": "Auth due-date must not be before its from-date.",
+            "description": "Auth due-date must not be before its from-date (72h TAT standard).",
         },
     },
-    # -------- COMPLETENESS (PK) --------
-    {
-        "expectation_type": "expect_column_values_to_not_be_null",
-        "kwargs": {"column": "patient_auth_pk"},
-        "meta": {
-            "dq_dimension": DqDimension.COMPLETENESS.value,
-            "severity": "HIGH",
-            "description": "Gold surrogate key must always populate.",
-        },
-    },
-    # -------- UNIQUENESS (PK) --------
-    {
-        "expectation_type": "expect_column_values_to_be_unique",
-        "kwargs": {"column": "patient_auth_pk"},
-        "meta": {
-            "dq_dimension": DqDimension.UNIQUENESS.value,
-            "severity": "HIGH",
-            "description": "patient_auth_pk is the operational-DB upsert key.",
-        },
-    },
-    # -------- VALIDITY (status set) --------
-    {
-        "expectation_type": "expect_column_values_to_be_in_set",
-        "kwargs": {
-            "column": "auth_status",
-            "value_set": ["PENDING", "APPROVED", "DENIED", "PARTIAL", "WITHDRAWN"],
-        },
-        "meta": {
-            "dq_dimension": DqDimension.VALIDITY.value,
-            "severity": "HIGH",
-            "description": "Auth status must map to a Lu_AuthStatus code.",
-        },
-    },
+    _not_null("patient_auth_pk", "HIGH", "Gold surrogate key must always populate."),
+    _unique("patient_auth_pk", "HIGH", "patient_auth_pk is the ops-DB upsert key."),
+    _in_set(
+        "auth_status",
+        ["PENDING", "APPROVED", "DENIED", "PARTIAL", "WITHDRAWN"],
+        "HIGH",
+        "Auth status must map to a Lu_AuthStatus code.",
+    ),
 ]
 
 
-BASELINES: dict[str, list[dict[str, Any]]] = {
-    "bronze_structural": BRONZE_STRUCTURAL_BASELINE,
-    "silver_clinical": SILVER_CLINICAL_BASELINE,
-    "gold_business": GOLD_BUSINESS_BASELINE,
+GOLD_MEMBERSHIP_BASELINE: list[dict[str, Any]] = [
+    # Gold member aspects are enforced on gold_patient_auth (patient_id_text column).
+    _not_null("patient_id_text", "HIGH", "Every auth row must tie to a member (patient_id)."),
+]
+
+
+GOLD_PROVIDER_BASELINE: list[dict[str, Any]] = [
+    _not_null("provider_npi", "HIGH", "Every auth row must tie to a provider NPI."),
+    _regex(
+        "provider_npi",
+        r"^\d{10}$",
+        "HIGH",
+        "Provider NPI in Gold must be 10-digit CMS format.",
+    ),
+]
+
+
+# ============================================================================
+# 9-suite registry: per (stage, source_type) → baseline.
+# ============================================================================
+
+
+BASELINES_PER_SOURCE: dict[tuple[str, str], list[dict[str, Any]]] = {
+    # Bronze
+    ("bronze_claims", SOURCE_CLAIMS): BRONZE_CLAIMS_BASELINE,
+    ("bronze_membership", SOURCE_MEMBERSHIP): BRONZE_MEMBERSHIP_BASELINE,
+    ("bronze_provider", SOURCE_PROVIDER): BRONZE_PROVIDER_BASELINE,
+    # Silver DV
+    ("silver_claims", SOURCE_CLAIMS): SILVER_CLAIMS_BASELINE,
+    ("silver_membership", SOURCE_MEMBERSHIP): SILVER_MEMBERSHIP_BASELINE,
+    ("silver_provider", SOURCE_PROVIDER): SILVER_PROVIDER_BASELINE,
+    # Gold UM
+    ("gold_claims", SOURCE_CLAIMS): GOLD_CLAIMS_BASELINE,
+    ("gold_membership", SOURCE_MEMBERSHIP): GOLD_MEMBERSHIP_BASELINE,
+    ("gold_provider", SOURCE_PROVIDER): GOLD_PROVIDER_BASELINE,
+}
+
+
+# Legacy aggregate suites — kept for Phase 5.8 backward-compatibility with
+# scripts/demo_phase_5.py + tests/phase/test_phase_5.py which still reference
+# the 3 stage-level constants. source_type=NULL marks them as legacy.
+LEGACY_BASELINES: dict[str, list[dict[str, Any]]] = {
+    "bronze_structural": BRONZE_CLAIMS_BASELINE,  # Bronze aggregate == claims (same table validated)
+    "silver_clinical": SILVER_CLAIMS_BASELINE,
+    "gold_business": GOLD_CLAIMS_BASELINE,
 }
 
 
 def seed_baselines(warehouse: Warehouse, client_id: str = DEFAULT_CLIENT) -> int:
-    """Insert the 3 baseline suites as v1 LIVE for the given client, iff none exist yet.
+    """Insert the 9 per-source + 3 legacy suites as v1 LIVE for `client_id`.
 
-    Returns the number of suites seeded (0 if already present — idempotent).
+    Idempotent — returns the number of NEW suites seeded this call. On the
+    very first invocation for a fresh client, seeds 12 (9 per-source + 3
+    legacy). Subsequent calls return 0.
     """
-    rows = warehouse.query(
-        f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.dq_suites "
-        "WHERE client_id = $c AND source = $src",
-        {"c": client_id, "src": SuiteSource.BASELINE_PYTHON.value},
-    )
-    already_seeded = int(rows[0]["c"]) if rows else 0
-    if already_seeded >= len(BASELINES):
-        return 0
-
     reg = SuiteRegistry(warehouse)
     seeded = 0
-    for suite_name, expectations in BASELINES.items():
+
+    # Seed 9 per-source suites first.
+    for (suite_name, source_type), expectations in BASELINES_PER_SOURCE.items():
         existing = reg.list_versions(client_id, suite_name)
         if existing:
             continue
@@ -293,10 +331,9 @@ def seed_baselines(warehouse: Warehouse, client_id: str = DEFAULT_CLIENT) -> int
             created_by="system:baseline_seeder",
             source=SuiteSource.BASELINE_PYTHON,
             dq_dimensions=[d for d in dims if d],
+            source_type=source_type,
         )
         suite_id = reg.create_draft(draft)
-        # Fast-track: DRAFT → PENDING_REVIEW → APPROVED → LIVE in one shot.
-        # Baselines ARE pre-approved — they ARE the Phase 5 code.
         reg.submit_for_review(suite_id, actor="system:baseline_seeder")
         reg.approve(
             suite_id,
@@ -309,7 +346,51 @@ def seed_baselines(warehouse: Warehouse, client_id: str = DEFAULT_CLIENT) -> int
             "dq_suite.baseline_seeded",
             suite_name=suite_name,
             client_id=client_id,
+            source_type=source_type,
+            expectation_count=len(expectations),
+        )
+
+    # Seed 3 legacy aggregate suites for backward compat. source_type=NULL.
+    for suite_name, expectations in LEGACY_BASELINES.items():
+        existing = reg.list_versions(client_id, suite_name)
+        if existing:
+            continue
+        dims = sorted({e["meta"].get("dq_dimension") for e in expectations if e.get("meta")})
+        draft = SuiteDraft(
+            client_id=client_id,
+            suite_name=suite_name,
+            expectations=expectations,
+            created_by="system:baseline_seeder",
+            source=SuiteSource.BASELINE_PYTHON,
+            dq_dimensions=[d for d in dims if d],
+            source_type=None,  # legacy aggregate — no per-source tag
+        )
+        suite_id = reg.create_draft(draft)
+        reg.submit_for_review(suite_id, actor="system:baseline_seeder")
+        reg.approve(
+            suite_id,
+            actor="system:baseline_seeder",
+            notes="legacy aggregate suite — retained for Phase 5.8 scripts",
+        )
+        reg.activate(suite_id, actor="system:baseline_seeder")
+        seeded += 1
+        _log.info(
+            "dq_suite.legacy_baseline_seeded",
+            suite_name=suite_name,
+            client_id=client_id,
             expectation_count=len(expectations),
         )
 
     return seeded
+
+
+# ----------------------------------------------------------------------------
+# Aliases kept for Phase 5.7 code that still imports these symbols directly.
+# DO NOT remove without updating scripts/demo_phase_5.py + tests/phase/test_phase_5.py.
+# ----------------------------------------------------------------------------
+
+BRONZE_STRUCTURAL_BASELINE = BRONZE_CLAIMS_BASELINE
+SILVER_CLINICAL_BASELINE = SILVER_CLAIMS_BASELINE
+GOLD_BUSINESS_BASELINE = GOLD_CLAIMS_BASELINE
+
+BASELINES = LEGACY_BASELINES  # historical name

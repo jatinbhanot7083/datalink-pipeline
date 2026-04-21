@@ -8,7 +8,7 @@ here, it doesn't exist.
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -209,3 +209,52 @@ class TenancyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     default_client: str = "default"
     enabled_clients: list[str] = Field(default_factory=list)
+
+
+# ----------------------------------------------------------------------------
+# Source-format configs — Phase 6. Per-source-type parser settings.
+#
+# Every Bronze table (RAW_CLAIMS, RAW_MEMBERSHIP, RAW_PROVIDER, future
+# EDI feeds) can have its own file format + delimiter. Default config
+# is one-size-fits-all CSV, matching Phase-5.x behaviour.
+#
+# YAML shape (config/base.yaml or per-env):
+#
+#    sources:
+#      claims:      {format: csv, delimiter: "|", has_header: true}
+#      membership:  {format: csv, delimiter: ",", has_header: true}
+#      provider:    {format: csv, delimiter: "\\t", has_header: true}
+#
+# Keys should match the uppercase `source_type` normalized to lower-case
+# (CLAIMS → claims). Absent entries fall back to the default CsvParser.
+# ----------------------------------------------------------------------------
+
+
+class SourceFormat(BaseModel):
+    """Per-source parser config. See datalink.pipeline.bronze.parsers."""
+
+    model_config = ConfigDict(extra="forbid")
+    format: Literal["csv", "parquet", "edi_834", "edi_837"] = "csv"
+    delimiter: str = ","
+    has_header: bool = True
+    encoding: str = "utf-8"
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+class SourcesConfig(BaseModel):
+    """Registry of per-source-type format configs, keyed by lower-case source_type."""
+
+    model_config = ConfigDict(extra="forbid")
+    claims: SourceFormat = Field(default_factory=SourceFormat)
+    membership: SourceFormat = Field(default_factory=SourceFormat)
+    provider: SourceFormat = Field(default_factory=SourceFormat)
+
+    def for_source(self, source_type: str) -> SourceFormat:
+        """Lookup the config for a source_type; fallback to default CSV."""
+        key = source_type.lower()
+        declared = {"claims", "membership", "provider"}
+        if key in declared:
+            attr = getattr(self, key)
+            assert isinstance(attr, SourceFormat)  # narrows for mypy
+            return attr
+        return SourceFormat()

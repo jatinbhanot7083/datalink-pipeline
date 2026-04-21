@@ -94,7 +94,12 @@ _LEGAL_TRANSITIONS: dict[SuiteStatus, set[SuiteStatus]] = {
 
 @dataclass(frozen=True)
 class SuiteVersion:
-    """One version of a (client_id, suite_name) suite."""
+    """One version of a (client_id, suite_name) suite.
+
+    Phase 6: `source_type` identifies which ingested source the suite
+    targets (CLAIMS / MEMBERSHIP / PROVIDER). NULL = stage-aggregate
+    (legacy 5.8 row; do not mix with per-source suites).
+    """
 
     suite_id: str
     client_id: str
@@ -106,6 +111,7 @@ class SuiteVersion:
     source: SuiteSource
     created_by: str
     created_at: datetime
+    source_type: str | None = None
     submitted_at: datetime | None = None
     reviewed_by: str | None = None
     reviewed_at: datetime | None = None
@@ -124,6 +130,7 @@ class SuiteDraft:
     created_by: str
     source: SuiteSource = SuiteSource.UI
     dq_dimensions: list[str] = field(default_factory=list)
+    source_type: str | None = None
 
 
 # ----------------------------------------------------------------------------
@@ -199,6 +206,22 @@ class SuiteRegistry:
         )
         return [r["suite_name"] for r in rows]
 
+    def list_live_by_source(self, client_id: str, source_type: str) -> list[SuiteVersion]:
+        """All LIVE suites for a client filtered by source_type (CLAIMS/MEMBERSHIP/...).
+
+        Phase 6. Powers Executive Dashboard breakdowns and the
+        per-source checkpoint router. `source_type` is matched
+        case-insensitively (CLAIMS == claims).
+        """
+        rows = self._wh.query(
+            f"SELECT * FROM {CONTROL_SCHEMA}.dq_suites "
+            "WHERE client_id = $c AND status = $st "
+            "AND UPPER(source_type) = UPPER($srct) "
+            "ORDER BY suite_name",
+            {"c": client_id, "st": SuiteStatus.LIVE.value, "srct": source_type},
+        )
+        return [_row_to_version(r) for r in rows]
+
     # ------------------------------------------------------------------
     # WRITES — state transitions
     # ------------------------------------------------------------------
@@ -211,8 +234,8 @@ class SuiteRegistry:
         self._wh.execute(
             f"INSERT INTO {CONTROL_SCHEMA}.dq_suites "
             "(suite_id, client_id, suite_name, version, status, expectations, "
-            " dq_dimensions, source, created_by, created_at) "
-            "VALUES ($id, $c, $s, $v, $st, $e, $d, $src, $cb, $ts)",
+            " dq_dimensions, source_type, source, created_by, created_at) "
+            "VALUES ($id, $c, $s, $v, $st, $e, $d, $srct, $src, $cb, $ts)",
             {
                 "id": suite_id,
                 "c": draft.client_id,
@@ -221,6 +244,7 @@ class SuiteRegistry:
                 "st": SuiteStatus.DRAFT.value,
                 "e": json.dumps(draft.expectations),
                 "d": json.dumps(draft.dq_dimensions),
+                "srct": draft.source_type,
                 "src": draft.source.value,
                 "cb": draft.created_by,
                 "ts": datetime.now(UTC),
@@ -424,6 +448,8 @@ def _row_to_version(row: dict[str, Any]) -> SuiteVersion:
         source=SuiteSource(row["source"]),
         created_by=row["created_by"],
         created_at=row["created_at"],
+        # source_type is nullable — older 5.8 rows may not have it.
+        source_type=row.get("source_type"),
         submitted_at=row.get("submitted_at"),
         reviewed_by=row.get("reviewed_by"),
         reviewed_at=row.get("reviewed_at"),

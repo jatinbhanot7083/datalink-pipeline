@@ -268,31 +268,87 @@ def test_pending_review_queue(reg: SuiteRegistry) -> None:
 
 
 # ----------------------------------------------------------------------------
+# Per-source helpers (Phase 6)
+# ----------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+def test_list_live_by_source_filters_to_source_type(wh, reg: SuiteRegistry) -> None:
+    """After seeding, list_live_by_source('CLAIMS') returns exactly 3 suites
+    (bronze_claims, silver_claims, gold_claims) — one per stage."""
+    seed_baselines(wh, client_id="default")
+    claims_suites = reg.list_live_by_source("default", "CLAIMS")
+    assert {s.suite_name for s in claims_suites} == {
+        "bronze_claims",
+        "silver_claims",
+        "gold_claims",
+    }
+    # case-insensitive
+    claims_lower = reg.list_live_by_source("default", "claims")
+    assert len(claims_lower) == 3
+
+
+@pytest.mark.unit
+def test_list_live_by_source_isolates_membership(wh, reg: SuiteRegistry) -> None:
+    seed_baselines(wh, client_id="default")
+    mem = reg.list_live_by_source("default", "MEMBERSHIP")
+    assert {s.suite_name for s in mem} == {
+        "bronze_membership",
+        "silver_membership",
+        "gold_membership",
+    }
+    # every expectation in a membership suite must NOT reference claim_id
+    for suite in mem:
+        for exp in suite.expectations:
+            col = exp.get("kwargs", {}).get("column", "")
+            assert col != "claim_id", f"membership suite must not check claim_id, got {exp}"
+
+
+# ----------------------------------------------------------------------------
 # Baseline seeder
 # ----------------------------------------------------------------------------
 
 
 @pytest.mark.unit
-def test_seed_baselines_creates_three_live_suites(wh, reg: SuiteRegistry) -> None:
+def test_seed_baselines_creates_nine_per_source_plus_three_legacy(wh, reg: SuiteRegistry) -> None:
+    """Phase 6: 9 per-(stage, source) suites + 3 legacy aggregate suites = 12 LIVE baselines."""
     n = seed_baselines(wh, client_id="default")
-    assert n == 3
-    for suite_name in ["bronze_structural", "silver_clinical", "gold_business"]:
+    assert n == 12
+    # 9 per-source suites, each tagged with a source_type
+    per_source = [
+        ("bronze_claims", "CLAIMS"),
+        ("bronze_membership", "MEMBERSHIP"),
+        ("bronze_provider", "PROVIDER"),
+        ("silver_claims", "CLAIMS"),
+        ("silver_membership", "MEMBERSHIP"),
+        ("silver_provider", "PROVIDER"),
+        ("gold_claims", "CLAIMS"),
+        ("gold_membership", "MEMBERSHIP"),
+        ("gold_provider", "PROVIDER"),
+    ]
+    for suite_name, source_type in per_source:
         live = reg.get_live("default", suite_name)
-        assert live is not None
+        assert live is not None, f"missing LIVE suite {suite_name}"
         assert live.source is SuiteSource.BASELINE_PYTHON
         assert live.status is SuiteStatus.LIVE
         assert live.version == 1
+        assert live.source_type == source_type
         assert len(live.expectations) > 0
-        # At least one expectation with a recognised dq_dimension.
         assert any(
             e.get("meta", {}).get("dq_dimension") in {d.value for d in DqDimension}
             for e in live.expectations
         )
+    # 3 legacy aggregate suites (source_type IS NULL)
+    for suite_name in ["bronze_structural", "silver_clinical", "gold_business"]:
+        live = reg.get_live("default", suite_name)
+        assert live is not None, f"missing legacy aggregate suite {suite_name}"
+        assert live.source_type is None
 
 
 @pytest.mark.unit
 def test_seed_baselines_is_idempotent(wh) -> None:
-    assert seed_baselines(wh) == 3
+    """12 suites seeded on first call, 0 on subsequent calls."""
+    assert seed_baselines(wh) == 12
     assert seed_baselines(wh) == 0  # already seeded; no-op
     assert seed_baselines(wh) == 0
 
