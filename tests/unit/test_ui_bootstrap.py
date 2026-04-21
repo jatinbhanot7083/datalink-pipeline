@@ -92,6 +92,43 @@ def test_ensure_warehouse_swallows_errors(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_ensure_warehouse_sets_world_writable_perms(tmp_path: Path) -> None:
+    """CRITICAL: file must be 0o666 after creation so the Airflow container
+    (uid 50000) can write to the same file the control-tower container
+    (root) created. Regression guard for Phase-6 'Permission denied' bug."""
+    import os
+    import stat
+
+    db = tmp_path / "wh.duckdb"
+    assert not db.exists()
+    ensure_warehouse_exists(str(db))
+
+    mode = stat.S_IMODE(os.stat(db).st_mode)
+    # Require BOTH user-write AND group+other write bits (0o666 or 0o777).
+    assert mode & 0o002, f"world-write missing; mode=0o{mode:o}"
+    assert mode & 0o020, f"group-write missing; mode=0o{mode:o}"
+    assert mode & 0o200, f"owner-write missing; mode=0o{mode:o}"
+
+
+@pytest.mark.unit
+def test_ensure_warehouse_preserves_perms_on_existing_file(tmp_path: Path) -> None:
+    """If the file already exists, DON'T chmod — respect whatever
+    Airflow/dbt set. We only touch perms on creation."""
+    import os
+    import stat
+
+    db = tmp_path / "wh.duckdb"
+    # Simulate Airflow created it first with 0o644 (the historic default).
+    db.touch()
+    os.chmod(db, 0o644)
+
+    ensure_warehouse_exists(str(db))
+
+    mode = stat.S_IMODE(os.stat(db).st_mode)
+    assert mode == 0o644, f"bootstrap must NOT re-chmod an existing file; got 0o{mode:o}"
+
+
+@pytest.mark.unit
 def test_read_only_open_after_bootstrap_does_not_raise(tmp_path: Path) -> None:
     """The end-to-end regression: after bootstrap, the original failing
     duckdb.connect(path, read_only=True) must succeed. THIS IS THE BUG."""

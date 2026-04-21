@@ -43,11 +43,20 @@ def ensure_warehouse_exists(path: str) -> None:
     Swallows every exception so a failure here never blocks page render —
     if bootstrap fails, pages still fall back to empty-state UX via their
     own try/except wrappers.
+
+    CRITICAL: chmod 0o666 after creation. The warehouse file is bind-mounted
+    into BOTH the control-tower container (which runs as root and calls this
+    function) AND the airflow containers (which run as uid 50000 and write
+    from DAG tasks). Without the chmod, root's default 0o644 blocks airflow
+    from writing, producing `Permission denied` on the first sensor poke.
+    0o666 lets every container on the shared bind-mount read + write.
     """
     try:
         p = Path(path)
         # Ensure parent dir exists (e.g. /opt/datalink/ inside the container).
         p.parent.mkdir(parents=True, exist_ok=True)
+
+        already_existed = p.exists()
 
         # Open read-write to create the file if missing. This is the ONLY
         # place we write to the UI-visible warehouse from Python inside the
@@ -85,6 +94,17 @@ def ensure_warehouse_exists(path: str) -> None:
                 conn.execute("CREATE SCHEMA IF NOT EXISTS CONTROL")
         finally:
             conn.close()
+
+        # Only chmod if WE created the file — avoid stomping on perms
+        # Airflow/dbt may have set after the fact. 0o666 so every container
+        # on the shared bind-mount (control-tower as root, airflow as uid
+        # 50000) can read + write.
+        if not already_existed:
+            # non-fatal: some filesystems don't support chmod (Windows host bind-mount).
+            import contextlib
+
+            with contextlib.suppress(OSError):
+                os.chmod(path, 0o666)
     except Exception:
         # Never block page render on bootstrap failure. Pages have their own
         # empty-state fallbacks — this just improves the common case.
