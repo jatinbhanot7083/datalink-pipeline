@@ -38,6 +38,12 @@ from datalink.quality.registry import (
 
 WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
 
+# Phase 6 fix: bootstrap warehouse file + CONTROL schema before any
+# read-only connection attempt (fresh-boot fix).
+from datalink.ui._bootstrap import ensure_warehouse_exists  # noqa: E402
+
+ensure_warehouse_exists(WAREHOUSE_PATH)
+
 st.set_page_config(
     page_title="DataLink — DQ Author",
     page_icon="🛡️",

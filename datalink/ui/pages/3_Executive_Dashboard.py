@@ -42,6 +42,14 @@ import streamlit as st
 
 WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
 
+# Phase 6 fix: ensure the DuckDB file + CONTROL schema exist before we try
+# to open it read-only. On a fresh `docker compose up`, warehouse.duckdb
+# doesn't exist until the first DAG runs — without this, every Streamlit
+# page stack-traces with 'Cannot open database in read-only mode'.
+from datalink.ui._bootstrap import ensure_warehouse_exists  # noqa: E402
+
+ensure_warehouse_exists(WAREHOUSE_PATH)
+
 st.set_page_config(
     page_title="DataLink — Executive Dashboard",
     page_icon="📊",

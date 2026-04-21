@@ -43,6 +43,14 @@ SFTP_PASS = os.environ.get("DL_CT_SFTP_PASS", "datalink_local_only")
 
 WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
 
+# Phase 6 fix: bootstrap warehouse file + CONTROL schema before any
+# read-only probe. Prevents "Cannot open database in read-only mode"
+# stack trace on fresh `docker compose up` when warehouse.duckdb does
+# not yet exist. See datalink/ui/_bootstrap.py.
+from datalink.ui._bootstrap import ensure_warehouse_exists  # noqa: E402
+
+ensure_warehouse_exists(WAREHOUSE_PATH)
+
 PG_HOST = os.environ.get("DL_CT_PG_HOST", "postgres")
 PG_PORT = int(os.environ.get("DL_CT_PG_PORT", "5432"))
 PG_USER = os.environ.get("DL_CT_PG_USER", "datalink")
