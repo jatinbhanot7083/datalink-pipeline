@@ -164,11 +164,19 @@ def _render_kpis() -> None:
     clients_count_df = _try_query("SELECT COUNT(DISTINCT client_id) AS n FROM CONTROL.dq_suites")
     total_clients = int(clients_count_df["n"].iloc[0]) if not clients_count_df.empty else 0
 
+    # Count distinct run_ids across BOTH orchestration paths:
+    #   - pipeline_task_progress (local_sequential runner, Phase 6.3)
+    #   - pipeline_checkpoints   (Airflow + local_sequential, Phase 5+)
+    # UNION so the KPI is correct regardless of which orchestrator fired the run.
     runs_df = _try_query(
         f"""
-        SELECT COUNT(DISTINCT run_id) AS n
-        FROM CONTROL.pipeline_task_progress
-        WHERE completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+        SELECT COUNT(DISTINCT run_id) AS n FROM (
+          SELECT run_id FROM CONTROL.pipeline_task_progress
+            WHERE completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+          UNION ALL
+          SELECT run_id FROM CONTROL.pipeline_checkpoints
+            WHERE completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+        )
         """
     )
     total_runs = int(runs_df["n"].iloc[0]) if not runs_df.empty else 0
@@ -219,18 +227,22 @@ st.markdown("---")
 col_left, col_right = st.columns(2)
 
 with col_left:
-    st.subheader("Rows processed per client")
+    st.subheader("Rows processed per pipeline / checkpoint")
+    # pipeline_checkpoints.pipeline_id is the PIPELINE name
+    # (bronze_ingest / silver_transform / gold_um_push). Per-client row
+    # counts require a schema change (add client_id to pipeline_checkpoints)
+    # — deferred to Phase 7. For now show per-checkpoint breakdown which
+    # is still the most-requested exec-level view.
     rpc_sql = f"""
-        SELECT pipeline_id AS client_id,
+        SELECT checkpoint_name,
                SUM(row_count) AS rows_total
         FROM CONTROL.pipeline_checkpoints
         WHERE completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
-        {client_filter_sql.replace("client_id", "pipeline_id")}
-        GROUP BY pipeline_id
+        GROUP BY checkpoint_name
         ORDER BY rows_total DESC
         LIMIT 20
     """
-    rpc_df = _try_query(rpc_sql, client_params)
+    rpc_df = _try_query(rpc_sql)
     if rpc_df.empty:
         st.markdown(
             '<div class="empty-state">No rows processed yet in this window.<br>'
@@ -240,10 +252,10 @@ with col_left:
     else:
         fig = px.bar(
             rpc_df,
-            x="client_id",
+            x="checkpoint_name",
             y="rows_total",
             color_discrete_sequence=[_NAVY],
-            labels={"client_id": "Pipeline", "rows_total": "Rows"},
+            labels={"checkpoint_name": "Checkpoint", "rows_total": "Rows"},
         )
         fig.update_layout(height=340, showlegend=False, margin=dict(t=10, b=40))
         st.plotly_chart(fig, use_container_width=True)
@@ -322,14 +334,30 @@ with col_a:
 
 with col_b:
     st.subheader("Pipeline run history")
+    # UNION both orchestration paths so Airflow + local_sequential runs
+    # both count. pipeline_checkpoints uses status values 'PASSED' /
+    # 'BREACH' / 'SKIPPED'; pipeline_task_progress uses 'SUCCESS' /
+    # 'FAILED'. Normalize both into pass/fail so the line chart is sane.
     runs_sql = f"""
+        WITH all_runs AS (
+          SELECT completed_at,
+                 CASE WHEN status IN ('PASSED','SUCCESS') THEN 1 ELSE 0 END AS ok,
+                 CASE WHEN status IN ('BREACH','FAILED')  THEN 1 ELSE 0 END AS bad
+            FROM CONTROL.pipeline_checkpoints
+           WHERE completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+          UNION ALL
+          SELECT completed_at,
+                 CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END AS ok,
+                 CASE WHEN status = 'FAILED'  THEN 1 ELSE 0 END AS bad
+            FROM CONTROL.pipeline_task_progress
+           WHERE completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+        )
         SELECT DATE_TRUNC('day', completed_at) AS d,
-               SUM(CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END) AS succeeded,
-               SUM(CASE WHEN status = 'FAILED'  THEN 1 ELSE 0 END) AS failed
-        FROM CONTROL.pipeline_task_progress
-        WHERE completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
-        GROUP BY d
-        ORDER BY d
+               SUM(ok)  AS succeeded,
+               SUM(bad) AS failed
+          FROM all_runs
+         GROUP BY d
+         ORDER BY d
     """
     runs_df = _try_query(runs_sql)
     if runs_df.empty:
