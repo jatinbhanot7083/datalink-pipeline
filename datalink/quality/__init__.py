@@ -9,6 +9,7 @@ When features.gx.enabled = false, all checkpoints are skipped with a
 `gx: disabled (config)` log line and the pipeline runs unchanged.
 """
 
+from datalink.quality.baseline_seeder import DEFAULT_CLIENT, seed_baselines
 from datalink.quality.checkpoint import (
     CheckpointResult,
     CheckpointStatus,
@@ -20,13 +21,29 @@ from datalink.quality.control import (
     PipelineState,
     create_control_tables,
 )
+from datalink.quality.registry import (
+    DqDimension,
+    SuiteDraft,
+    SuiteRegistry,
+    SuiteSource,
+    SuiteStatus,
+    SuiteVersion,
+)
 
 __all__ = [
+    "DEFAULT_CLIENT",
     "CheckpointResult",
     "CheckpointStatus",
+    "DqDimension",
     "ExpectationResult",
     "PipelineControl",
     "PipelineState",
+    "SuiteDraft",
+    "SuiteRegistry",
+    "SuiteSource",
+    "SuiteStatus",
+    "SuiteVersion",
     "create_control_tables",
     "run_checkpoint",
+    "seed_baselines",
 ]

@@ -133,6 +133,42 @@ _DDL = [
         phi_check       VARCHAR
     )
     """,
+    # Phase 5.8: DQ Control Plane — UI-authored, version-tracked, multi-tenant
+    # expectation suites. One row per (client_id, suite_name, version). Exactly
+    # ONE row per (client_id, suite_name) may be LIVE at a time — enforced in
+    # code since DuckDB lacks partial-unique-index support.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.dq_suites (
+        suite_id        VARCHAR PRIMARY KEY,
+        client_id       VARCHAR NOT NULL,
+        suite_name      VARCHAR NOT NULL,
+        version         INTEGER NOT NULL,
+        status          VARCHAR NOT NULL,
+        expectations    VARCHAR NOT NULL,
+        dq_dimensions   VARCHAR,
+        source          VARCHAR NOT NULL,
+        created_by      VARCHAR NOT NULL,
+        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        submitted_at    TIMESTAMP,
+        reviewed_by     VARCHAR,
+        reviewed_at     TIMESTAMP,
+        review_notes    VARCHAR,
+        activated_at    TIMESTAMP,
+        archived_at     TIMESTAMP
+    )
+    """,
+    # Immutable audit log for every suite state transition.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.dq_suite_audit_log (
+        audit_id        VARCHAR PRIMARY KEY,
+        suite_id        VARCHAR NOT NULL,
+        from_status     VARCHAR,
+        to_status       VARCHAR NOT NULL,
+        actor           VARCHAR NOT NULL,
+        notes           VARCHAR,
+        ts              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
 ]
 
 
