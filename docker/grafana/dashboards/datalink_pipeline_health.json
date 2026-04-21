@@ -1,0 +1,299 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Phase 6 — DataLink Pipeline Health. Log-driven (Loki) view of pipeline runs, task completions, GX checkpoints, agent invocations, and fail-safe state transitions. Paired with the Streamlit Executive + CrewAI dashboards for data-plane metrics.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "liveNow": false,
+  "panels": [
+    {
+      "type": "text",
+      "title": "DataLink Pipeline Health — Phase 6",
+      "gridPos": {"h": 3, "w": 24, "x": 0, "y": 0},
+      "options": {
+        "mode": "markdown",
+        "content": "### DataLink Pipeline Health\n\nLog-based panels read from **Loki** (structlog output from every `datalink.*` module).  For data-plane metrics (row counts, DQ pass rates, per-client breakdowns) see the **Streamlit Executive Dashboard** at `http://localhost:8000`.\n\n**Fail-safe state:** `pipeline_control.transition` events surface in the state-transitions panel — auto-pause on GX threshold breach and FatalPipelineError -> ABORTED are both visible here."
+      }
+    },
+
+    {
+      "type": "stat",
+      "title": "Pipeline runs (last 24h)",
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 3},
+      "datasource": {"type": "loki", "uid": "datalink-loki"},
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service=\"datalink\"} |= \"local_sequential.run.start\" [24h]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "unit": "short"
+        }
+      }
+    },
+
+    {
+      "type": "stat",
+      "title": "Task failures (last 24h)",
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 3},
+      "datasource": {"type": "loki", "uid": "datalink-loki"},
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service=\"datalink\"} |= \"local_sequential.task.failed\" [24h]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "continuous-RdYlGr"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 1},
+              {"color": "red", "value": 5}
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "type": "stat",
+      "title": "GX BREACH events (last 24h)",
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 3},
+      "datasource": {"type": "loki", "uid": "datalink-loki"},
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service=\"datalink\"} |= \"gx_checkpoint.breach\" [24h]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "continuous-RdYlGr"},
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": null},
+              {"color": "yellow", "value": 1},
+              {"color": "red", "value": 3}
+            ]
+          }
+        }
+      }
+    },
+
+    {
+      "type": "stat",
+      "title": "Agent invocations (last 24h)",
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 3},
+      "datasource": {"type": "loki", "uid": "datalink-loki"},
+      "targets": [
+        {
+          "expr": "sum(count_over_time({service=\"datalink\"} |~ \"agent.invoke\" [24h]))",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "center",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "unit": "short"
+        }
+      }
+    },
+
+    {
+      "type": "timeseries",
+      "title": "Task completion rate (successes vs failures)",
+      "gridPos": {"h": 9, "w": 12, "x": 0, "y": 8},
+      "datasource": {"type": "loki", "uid": "datalink-loki"},
+      "targets": [
+        {
+          "expr": "sum(rate({service=\"datalink\"} |= \"local_sequential.task.done\" [5m]))",
+          "refId": "A",
+          "legendFormat": "succeeded/sec"
+        },
+        {
+          "expr": "sum(rate({service=\"datalink\"} |= \"local_sequential.task.failed\" [5m]))",
+          "refId": "B",
+          "legendFormat": "failed/sec"
+        },
+        {
+          "expr": "sum(rate({service=\"datalink\"} |= \"local_sequential.task.fatal\" [5m]))",
+          "refId": "C",
+          "legendFormat": "fatal/sec"
+        }
+      ],
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "lineWidth": 2,
+            "showPoints": "never"
+          },
+          "unit": "ops"
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "failed/sec"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "fatal/sec"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "dark-red"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "succeeded/sec"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]
+          }
+        ]
+      }
+    },
+
+    {
+      "type": "timeseries",
+      "title": "Pipeline state transitions",
+      "gridPos": {"h": 9, "w": 12, "x": 12, "y": 8},
+      "datasource": {"type": "loki", "uid": "datalink-loki"},
+      "targets": [
+        {
+          "expr": "sum by (to_state) (count_over_time({service=\"datalink\"} |= \"pipeline_control.transition\" | regexp `to_state=(?P<to_state>\\w+)` [5m]))",
+          "refId": "A",
+          "legendFormat": "{{to_state}}"
+        }
+      ],
+      "options": {
+        "legend": {"displayMode": "table", "placement": "bottom", "showLegend": true}
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 60,
+            "lineWidth": 1
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "PAUSED"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "orange"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "ABORTED"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "RUNNING"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "RESUMING"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "blue"}}]
+          }
+        ]
+      }
+    },
+
+    {
+      "type": "logs",
+      "title": "Recent pipeline events (last 1h)",
+      "gridPos": {"h": 12, "w": 24, "x": 0, "y": 17},
+      "datasource": {"type": "loki", "uid": "datalink-loki"},
+      "targets": [
+        {
+          "expr": "{service=\"datalink\"} |~ \"local_sequential\\\\.|pipeline_control\\\\.|gx_checkpoint\\\\.|agent\\\\.\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "showCommonLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      }
+    },
+
+    {
+      "type": "logs",
+      "title": "Agent reasoning log (PHI-safe previews)",
+      "gridPos": {"h": 10, "w": 24, "x": 0, "y": 29},
+      "datasource": {"type": "loki", "uid": "datalink-loki"},
+      "targets": [
+        {
+          "expr": "{service=\"datalink\"} |= \"agent.invoke\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "showLabels": false,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": ["datalink", "phase-6", "pipeline-health"],
+  "templating": {"list": []},
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {},
+  "timezone": "",
+  "title": "DataLink — Pipeline Health",
+  "uid": "datalink-pipeline-health",
+  "version": 1,
+  "weekStart": ""
+}
