@@ -575,6 +575,77 @@ services:
       retries: 5
       start_period: 60s
 
+  # =====================================================================
+  # CONTROL TOWER — the single exec URL (Streamlit) at http://localhost:8000
+  # =====================================================================
+
+  control_tower:
+    restart: unless-stopped
+    build:
+      context: ./docker/control-tower
+    image: datalink-control-tower:0.1
+    container_name: datalink-control-tower
+    networks: [datalink]
+    depends_on:
+      airflow_webserver: { condition: service_healthy }
+      postgres:          { condition: service_healthy }
+      postgres_replica:  { condition: service_healthy }
+      sqlserver:         { condition: service_healthy }
+      sftp:              { condition: service_healthy }
+    environment:
+      # All sibling services by compose DNS name — Control Tower is inside
+      # the compose network. Overridable per env for non-local deploys.
+      DL_CT_AIRFLOW_URL: http://airflow_webserver:8080
+      DL_CT_AIRFLOW_USER: admin
+      DL_CT_AIRFLOW_PASS: admin_local_only
+      DL_CT_SFTP_HOST: sftp
+      DL_CT_SFTP_PORT: "22"
+      DL_CT_SFTP_USER: datalink
+      DL_CT_SFTP_PASS: datalink_local_only
+      DL_CT_WAREHOUSE_PATH: /opt/datalink/warehouse.duckdb
+      DL_CT_PG_HOST: postgres
+      DL_CT_PG_DB: datalink_um
+      DL_CT_PG_USER: datalink
+      DL_CT_PG_PASS: datalink_local_only
+      DL_CT_PG_REPLICA_HOST: postgres_replica
+      DL_CT_PG_REPLICA_DB: datalink_um_replica
+      DL_CT_MSSQL_HOST: sqlserver
+      DL_CT_MSSQL_PORT: "1433"
+      DL_CT_MSSQL_DB: DataLinkUM
+      DL_CT_MSSQL_USER: datalink
+      DL_CT_MSSQL_PASS: datalink_local_only
+    volumes:
+      - .:/opt/datalink                     # code hot-reloads without rebuild
+    ports:
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sfo /dev/null http://127.0.0.1:8000/_stcore/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 45s
+
+  # =====================================================================
+  # PORTAINER — web UI for container ops (replacement for Docker Desktop's
+  # list/logs/stats view, reading from native dockerd-in-WSL2)
+  # =====================================================================
+
+  portainer:
+    restart: unless-stopped
+    image: portainer/portainer-ce:2.21.4
+    container_name: datalink-portainer
+    networks: [datalink]
+    # Portainer reads the host Docker API via the mounted socket. Only the
+    # native WSL2 dockerd is exposed there — Portainer sees exactly the
+    # DataLink containers + any other local dev stacks on the same daemon.
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer_data:/data
+    ports:
+      - "127.0.0.1:9443:9443"   # HTTPS UI (self-signed cert; browser warns first time)
+    # No healthcheck: the distroless base ships without curl/wget. Docker's
+    # "container alive" check is enough for this use case.
+
 volumes:
   azurite_data:
   sqlserver_data:
@@ -590,3 +661,4 @@ volumes:
   filebrowser_config:
   airflow_db_data:
   airflow_logs:
+  portainer_data:

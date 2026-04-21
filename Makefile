@@ -79,13 +79,17 @@ up: ## Start the full Phase-5.7 stack (SFTP + 3 ops DBs + Azurite + SQLServer + 
 	@echo "$(BOLD)services up$(RST)"
 	@docker compose ps --format 'table {{.Service}}\t{{.Status}}'
 	@echo ""
-	@echo "$(BOLD)Browse:$(RST)"
-	@echo "  pgAdmin            → http://localhost:5050   (datalink@local.invalid / datalink_local_only)"
-	@echo "  Adminer            → http://localhost:8081   (system=PostgreSQL, server=postgres, user=datalink)"
+	@echo "$(BOLD)Browse — exec URL first, ops drill-downs after:$(RST)"
+	@echo "  $(BOLD)Control Tower     → http://localhost:8000$(RST)   (single exec URL)"
+	@echo "  Airflow            → http://localhost:8088   (admin / admin_local_only)"
+	@echo "  Filebrowser        → http://localhost:8082   (drag-drop SFTP drop zone)"
+	@echo "  GX Data Docs       → http://localhost:8090"
+	@echo "  Webhook Inbox      → http://localhost:9000   (agent notifications)"
+	@echo "  pgAdmin            → http://localhost:5050   (datalink@example.com / datalink_local_only)"
+	@echo "  Adminer            → http://localhost:8081   (system=MS SQL / server=sqlserver / user=datalink)"
 	@echo "  Grafana            → http://localhost:3000   (admin / admin_local_only)"
 	@echo "  Prometheus         → http://localhost:9090"
-	@echo "  GX Data Docs       → http://localhost:8090"
-	@echo "  OTEL health        → http://localhost:13133"
+	@echo "  Portainer          → https://localhost:9443  (container ops)"
 
 .PHONY: up-mcr
 up-mcr: up ## Alias for `make up` (kept for backwards compat; mcr profile is folded into default now)
