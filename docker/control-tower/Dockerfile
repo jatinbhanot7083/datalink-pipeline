@@ -14,7 +14,12 @@ FROM python:3.11-slim
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    # Phase 6 fix: put /opt/datalink on the module search path so
+    # `import datalink.*` works even if the entrypoint's `pip install
+    # --editable` step fails or hasn't run yet (bind-mount alone is
+    # enough to find the package).
+    PYTHONPATH=/opt/datalink
 
 # Microsoft ODBC Driver 18 for SQL Server + unixodbc runtime.
 RUN apt-get update \

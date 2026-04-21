@@ -2,24 +2,31 @@
 # NOTE: deliberately not `set -e` so a single failing step doesn't
 # abort the whole entrypoint. Each step handles its own failure.
 
-# Install datalink editable from the bind-mount so code edits are live.
-# hatchling pre-installed in the image so this step doesn't fetch anything.
-# Timeout cap at 60s — if it hangs longer than that something is
-# genuinely broken and we'd rather fail visibly than wait forever.
-echo "[entrypoint] installing datalink (editable, max 60s)..."
+# PYTHONPATH=/opt/datalink is set in the Dockerfile ENV, so `import
+# datalink.*` works from the bind-mount alone. The editable install
+# below is a NICE-TO-HAVE (updates pip metadata + console-scripts) but
+# not required for the UI to function.
+echo "[entrypoint] PYTHONPATH=$PYTHONPATH"
+echo "[entrypoint] verifying datalink is importable..."
+python -c "import datalink, sys; print('[entrypoint] datalink OK, from', datalink.__file__)" \
+    || echo "[entrypoint] ERROR: datalink NOT importable — bind mount broken?"
+
+# Optional editable install, skipped if it hangs or errors. Pages work
+# without it thanks to PYTHONPATH.
+echo "[entrypoint] attempting editable install (optional, max 30s)..."
 if [ -f /opt/datalink/pyproject.toml ]; then
-    timeout 60 pip install --no-deps --no-build-isolation -e /opt/datalink 2>&1 \
-        | sed 's/^/[entrypoint pip] /'
+    timeout 30 pip install --no-deps --no-build-isolation -e /opt/datalink 2>&1 \
+        | sed 's|^|[entrypoint pip] |'
     rc=${PIPESTATUS[0]}
     if [ "$rc" -eq 0 ]; then
-        echo "[entrypoint] datalink editable install OK"
+        echo "[entrypoint] editable install OK"
     elif [ "$rc" -eq 124 ]; then
-        echo "[entrypoint] ERROR: pip install timed out after 60s"
+        echo "[entrypoint] WARN: pip install timed out — PYTHONPATH fallback still works"
     else
-        echo "[entrypoint] WARN: pip install exit $rc — datalink imports may fail"
+        echo "[entrypoint] WARN: pip install exit $rc — PYTHONPATH fallback still works"
     fi
 else
-    echo "[entrypoint] ERROR: /opt/datalink/pyproject.toml not found — bind mount broken?"
+    echo "[entrypoint] WARN: /opt/datalink/pyproject.toml not found — bind-mount may be broken"
 fi
 
 # Phase 6 fix: pre-create warehouse.duckdb + CONTROL schema + seed 7
