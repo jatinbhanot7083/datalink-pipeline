@@ -19,15 +19,39 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-import great_expectations as gx
 import pandas as pd
-from great_expectations.core.expectation_suite import ExpectationSuite
 
 from datalink.adapters.protocols import Warehouse
 from datalink.logging import get_logger
 from datalink.quality.control import CONTROL_SCHEMA
+
+# Phase 6 fix: great_expectations is a HEAVY dep (~150MB incl. marshmallow /
+# sqlalchemy / altair) and is only needed when an actual checkpoint runs.
+# Deferring the import to function-body time means the control-tower
+# container can skip installing GX entirely and still import
+# `datalink.quality.*` — critical for the DQ Dashboard pages and the
+# bootstrap seeder.
+if TYPE_CHECKING:
+    from great_expectations.core.expectation_suite import ExpectationSuite
+else:
+    ExpectationSuite = Any  # runtime fallback; only used in annotations
+
+
+def _gx_module() -> Any:
+    """Lazy accessor for the top-level great_expectations module."""
+    import great_expectations as gx
+
+    return gx
+
+
+def _gx_expectation_suite_cls() -> Any:
+    """Lazy accessor for ExpectationSuite — imported on first use."""
+    from great_expectations.core.expectation_suite import ExpectationSuite as _Es
+
+    return _Es
+
 
 _log = get_logger(__name__)
 
@@ -70,6 +94,7 @@ def _get_gx_context() -> Any:
     which the nginx-gx-docs container serves at http://localhost:8090.
     Environment override: DL_GX_CONTEXT_MODE=ephemeral forces in-memory.
     """
+    gx = _gx_module()
     forced = os.environ.get("DL_GX_CONTEXT_MODE", "").strip().lower()
     if forced == "ephemeral":
         return gx.get_context(mode="ephemeral")
@@ -132,6 +157,7 @@ def _run_with_data_docs(
                 )
             )
 
+        gx = _gx_module()
         cp_name = f"cp_{checkpoint_name}"
         try:
             cp = context.checkpoints.get(cp_name)
