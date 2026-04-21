@@ -2,125 +2,127 @@
 
 Why this exists
 ---------------
-Every Streamlit page in the Control Tower (home + DQ Author + DQ Review +
-Executive + CrewAI) opens DuckDB with `read_only=True` so Airflow / DAG
-tasks can keep the write lock while the UI renders.
+Every Streamlit page opens DuckDB with `read_only=True` so Airflow / DAG
+tasks keep the write lock. DuckDB refuses to create a missing file in
+read-only mode:
 
-DuckDB behaviour: `read_only=True` on a missing file raises
+    IOException: Cannot open database in read-only mode: database does not exist
 
-    IOException: Cannot open database "<path>" in read-only mode:
-                 database does not exist
+Without this module, fresh `docker compose up` makes every page stack-trace
+until the first DAG run.
 
-This hit on the very first Streamlit load after `docker compose up` (the
-warehouse.duckdb file doesn't get created until bronze_ingest writes to
-it). Every UI page would stack-trace until an operator kicked off a DAG.
+Fix (layered — each step independently failure-isolated so a bug in one
+step NEVER prevents earlier steps from succeeding):
 
-Fix
----
-`ensure_warehouse_exists(path)` opens the file ONCE in read-write mode,
-materialises the CONTROL schema + tables, then closes the handle. Safe
-to call from every page's top-level scope — fully idempotent, cheap
-(~50 ms) on re-entry because CREATE TABLE IF NOT EXISTS is a no-op.
+  Step 1: mkdir -p the parent dir               (1st try/except)
+  Step 2: open read-WRITE to create the file    (2nd try/except — if this
+                                                 fails nothing else runs)
+  Step 3: run create_control_tables()           (3rd try/except — schema)
+  Step 4: seed all 7 clients with baselines     (4th try/except — data)
+  Step 5: chmod 0o666 if we created the file    (5th try/except — perms)
+
+If step 2 succeeds but step 3/4 fail, the file still exists and read-only
+opens on pages will succeed (they render empty-state). If ALL steps
+succeed, the Control Tower boots with 84 baseline suites already LIVE
+across 7 clients.
 
 Called from:
   * datalink/ui/control_tower.py          (home page)
-  * datalink/ui/pages/1_DQ_Author.py
-  * datalink/ui/pages/2_DQ_Review.py
-  * datalink/ui/pages/3_Executive_Dashboard.py
-  * datalink/ui/pages/4_CrewAI_Dashboard.py
-  * docker/control-tower/entrypoint.sh    (belt-and-braces on container start)
+  * datalink/ui/pages/*.py                (every page)
+  * docker/control-tower/entrypoint.sh    (container start, belt-and-braces)
 """
 
 from __future__ import annotations
 
+import contextlib
 import os
+import sys
+import traceback
 from pathlib import Path
+from typing import Any
 
 
-def ensure_warehouse_exists(path: str) -> None:
-    """Create the DuckDB file + CONTROL schema if absent. Idempotent.
+def ensure_warehouse_exists(path: str, *, verbose: bool = False) -> None:
+    """Create the DuckDB file + CONTROL schema + seed baselines if absent.
 
-    Swallows every exception so a failure here never blocks page render —
-    if bootstrap fails, pages still fall back to empty-state UX via their
-    own try/except wrappers.
-
-    CRITICAL: chmod 0o666 after creation. The warehouse file is bind-mounted
-    into BOTH the control-tower container (which runs as root and calls this
-    function) AND the airflow containers (which run as uid 50000 and write
-    from DAG tasks). Without the chmod, root's default 0o644 blocks airflow
-    from writing, producing `Permission denied` on the first sensor poke.
-    0o666 lets every container on the shared bind-mount read + write.
+    Fully idempotent. `verbose=True` writes per-step diagnostics to stderr
+    so operators can see exactly which step succeeded or failed. On
+    container entrypoint we pass verbose=True; on Streamlit page imports
+    we leave it False (pages have their own empty-state fallbacks).
     """
+    # Step 1 — parent dir -----------------------------------------------
     try:
         p = Path(path)
-        # Ensure parent dir exists (e.g. /opt/datalink/ inside the container).
         p.parent.mkdir(parents=True, exist_ok=True)
-
         already_existed = p.exists()
+        if verbose:
+            print(f"[bootstrap] step 1: parent dir OK — {p.parent}", file=sys.stderr)
+    except Exception:
+        if verbose:
+            traceback.print_exc()
+        return  # can't proceed without a writable dir
 
-        # Open read-write to create the file if missing. This is the ONLY
-        # place we write to the UI-visible warehouse from Python inside the
-        # control-tower container — all real writes come from Airflow tasks.
+    # Step 2 — create the DB file ---------------------------------------
+    try:
         import duckdb
 
         conn = duckdb.connect(path, read_only=False)
+        if verbose:
+            print(f"[bootstrap] step 2: file created / opened — {path}", file=sys.stderr)
+    except Exception:
+        if verbose:
+            traceback.print_exc()
+        return  # file creation is the whole point; abort if it failed
+
+    try:
+        # Step 3 — CONTROL schema + tables (forward-migrated) -----------
         try:
-            # Idempotent DDL for the control surface. Mirrors the full list
-            # in datalink.quality.control._DDL but scoped to the minimum
-            # set every UI page queries. If datalink is importable we use
-            # the full create_control_tables() for parity.
+            from datalink.quality.control import create_control_tables
+
+            create_control_tables(_DuckShim(conn))  # type: ignore[arg-type]
+            if verbose:
+                print("[bootstrap] step 3: CONTROL tables created / migrated", file=sys.stderr)
+        except Exception:
+            # datalink may not be importable (entrypoint runs before pip install
+            # on the very first container start). Fall back to the minimum schema.
+            if verbose:
+                traceback.print_exc()
             try:
-                from datalink.quality.control import create_control_tables
-
-                # Thin Warehouse protocol shim — create_control_tables only
-                # needs .execute() + optional create_schema_if_not_exists.
-                class _Shim:
-                    def __init__(self, c: duckdb.DuckDBPyConnection) -> None:
-                        self._c = c
-
-                    def execute(self, sql: str, params=None) -> None:  # type: ignore[no-untyped-def]
-                        if params:
-                            self._c.execute(sql, params)
-                        else:
-                            self._c.execute(sql)
-
-                    def create_schema_if_not_exists(self, schema: str) -> None:
-                        self._c.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
-
-                create_control_tables(_Shim(conn))  # type: ignore[arg-type]
-                # Phase 6: seed all 7 clients (default + 6 real payer
-                # tenants) on first boot so dashboards and the client
-                # dropdown are populated out of the box. Idempotent —
-                # returns 0-per-client on subsequent boots.
-                try:
-                    from datalink.quality.baseline_seeder import seed_all_real_clients
-
-                    seed_all_real_clients(_Shim(conn))  # type: ignore[arg-type]
-                except Exception:
-                    # Seeder failure shouldn't crash bootstrap. Dashboards
-                    # still render; operator can trigger seeding later.
-                    pass
-            except Exception:
-                # datalink isn't importable (e.g. entrypoint.sh pre-install).
-                # Fall back to a minimal CREATE SCHEMA so read-only opens succeed.
                 conn.execute("CREATE SCHEMA IF NOT EXISTS CONTROL")
-        finally:
+                if verbose:
+                    print("[bootstrap] step 3 fallback: bare CREATE SCHEMA", file=sys.stderr)
+            except Exception:
+                if verbose:
+                    traceback.print_exc()
+
+        # Step 4 — seed all 7 clients with 12 suites each (84 total) ----
+        try:
+            from datalink.quality.baseline_seeder import seed_all_real_clients
+
+            result = seed_all_real_clients(_DuckShim(conn))  # type: ignore[arg-type]
+            if verbose:
+                total = sum(result.values())
+                print(
+                    f"[bootstrap] step 4: seeded {total} baseline suites "
+                    f"across {len(result)} clients — {result}",
+                    file=sys.stderr,
+                )
+        except Exception:
+            if verbose:
+                traceback.print_exc()
+    finally:
+        with contextlib.suppress(Exception):
             conn.close()
 
-        # Only chmod if WE created the file — avoid stomping on perms
-        # Airflow/dbt may have set after the fact. 0o666 so every container
-        # on the shared bind-mount (control-tower as root, airflow as uid
-        # 50000) can read + write.
-        if not already_existed:
-            # non-fatal: some filesystems don't support chmod (Windows host bind-mount).
-            import contextlib
-
-            with contextlib.suppress(OSError):
-                os.chmod(path, 0o666)
-    except Exception:
-        # Never block page render on bootstrap failure. Pages have their own
-        # empty-state fallbacks — this just improves the common case.
-        pass
+    # Step 5 — chmod only if WE created the file (don't stomp on existing perms) -
+    if not already_existed:
+        try:
+            os.chmod(path, 0o666)
+            if verbose:
+                print("[bootstrap] step 5: chmod 0o666 OK", file=sys.stderr)
+        except OSError:
+            if verbose:
+                traceback.print_exc()
 
 
 def default_warehouse_path() -> str:
@@ -130,3 +132,37 @@ def default_warehouse_path() -> str:
     Overridable via:   DL_CT_WAREHOUSE_PATH env var
     """
     return os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
+
+
+class _DuckShim:
+    """Warehouse-protocol adapter for raw duckdb.DuckDBPyConnection.
+
+    Implements every method that `create_control_tables` and the
+    baseline seeder / registry code call on a warehouse:
+      * execute(sql, params=None)
+      * query(sql, params=None) -> list[dict]   (for SuiteRegistry reads)
+      * create_schema_if_not_exists(schema)
+
+    Keeping this shim in _bootstrap.py rather than using
+    DuckDBWarehouse.from_config() avoids the circular-init that
+    DuckDBWarehouse does (it opens its own connection from
+    WarehouseConfig, which would collide with ours).
+    """
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, params: dict[str, Any] | None = None) -> None:
+        if params:
+            self._conn.execute(sql, params)
+        else:
+            self._conn.execute(sql)
+
+    def query(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        cur = self._conn.execute(sql, params) if params else self._conn.execute(sql)
+        cols = [d[0] for d in cur.description] if cur.description else []
+        rows = cur.fetchall()
+        return [dict(zip(cols, row, strict=False)) for row in rows]
+
+    def create_schema_if_not_exists(self, schema: str) -> None:
+        self._conn.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")

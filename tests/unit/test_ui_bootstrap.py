@@ -56,7 +56,13 @@ def test_ensure_warehouse_creates_control_schema(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_ensure_warehouse_is_idempotent(tmp_path: Path) -> None:
-    """Repeated calls must NOT wipe existing data or error."""
+    """Repeated calls must NOT wipe existing data or error.
+
+    Phase 6 note: the first bootstrap now seeds 84 baseline suites across
+    7 clients (default + 6 real payers). A user-written row with
+    client_id='c1' must coexist with those baselines unchanged after
+    a second bootstrap call.
+    """
     db = tmp_path / "wh.duckdb"
     ensure_warehouse_exists(str(db))
 
@@ -67,17 +73,24 @@ def test_ensure_warehouse_is_idempotent(tmp_path: Path) -> None:
         "(suite_id, client_id, suite_name, version, status, expectations, source, created_by) "
         "VALUES ('s1', 'c1', 'n1', 1, 'LIVE', '[]', 'ui', 'alice')"
     )
+    # Count rows BEFORE second bootstrap (baselines + our sentinel).
+    before_count = conn.execute("SELECT COUNT(*) FROM CONTROL.dq_suites").fetchone()[0]
     conn.close()
 
-    # Second call — must be a no-op for the data.
+    # Second bootstrap — must be a no-op for the data (seeder is idempotent).
     ensure_warehouse_exists(str(db))
 
     conn = duckdb.connect(str(db), read_only=True)
     try:
-        rows = conn.execute("SELECT suite_id FROM CONTROL.dq_suites").fetchall()
+        after_count = conn.execute("SELECT COUNT(*) FROM CONTROL.dq_suites").fetchone()[0]
+        sentinel = conn.execute(
+            "SELECT suite_id FROM CONTROL.dq_suites WHERE suite_id = 's1'"
+        ).fetchall()
     finally:
         conn.close()
-    assert [r[0] for r in rows] == ["s1"], "idempotent bootstrap must preserve data"
+
+    assert after_count == before_count, "idempotent bootstrap must NOT add or drop rows"
+    assert len(sentinel) == 1, "sentinel row must be preserved"
 
 
 @pytest.mark.unit
