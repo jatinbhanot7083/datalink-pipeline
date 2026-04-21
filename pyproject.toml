@@ -167,6 +167,9 @@ module = [
     "airflow.*", "airflow",
     "streamlit", "streamlit.*", "streamlit_extras.*",
     "httpx", "httpx.*",
+    # Plotly only exists in the control-tower container (see docker/control-tower/Dockerfile).
+    # Local dev venv doesn't install it — suppress import stub lookups.
+    "plotly", "plotly.*",
 ]
 ignore_missing_imports = true
 

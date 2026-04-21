@@ -32,9 +32,11 @@ RUN apt-get update \
 
 # Python deps for the Control Tower. datalink is bind-mounted + installed
 # editable at container start via the entrypoint.
+# Phase 6: plotly added for Executive + CrewAI dashboard charts.
 RUN pip install \
     "streamlit>=1.40,<2.0" \
     "streamlit-extras>=0.5,<1.0" \
+    "plotly>=5.22,<7.0" \
     "duckdb>=1.0,<2.0" \
     "pandas>=2.2,<3.0" \
     "psycopg[binary]>=3.2,<4.0" \
