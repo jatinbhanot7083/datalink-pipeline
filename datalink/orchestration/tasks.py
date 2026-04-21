@@ -49,6 +49,10 @@ class TaskContext:
     pipeline_id: str
     run_id: str
     env: str = "local"
+    # Phase 5.8: which client's DQ suite to use. "default" = the baseline
+    # suites seeded from the Phase-5 Python files; real tenants pass their
+    # own id via Airflow DAG conf (see DAG config "client_id" field).
+    client_id: str = "default"
     # Populated lazily at first .adapters access so each Airflow task can
     # build its own in-process AdapterSet without upstream tasks' state.
     _settings: Settings | None = None
@@ -120,6 +124,7 @@ def task_bronze_checkpoint(ctx: TaskContext) -> dict[str, Any]:
         settings=ctx.settings,
         pipeline_id=ctx.pipeline_id,
         run_id=ctx.run_id,
+        client_id=ctx.client_id,
         checkpoint_name=BRONZE_STRUCTURAL,
         qualified_table="BRONZE.RAW_CLAIMS",
         suite_builder=build_bronze_suite,
@@ -152,6 +157,7 @@ def task_silver_checkpoint(ctx: TaskContext) -> dict[str, Any]:
         settings=ctx.settings,
         pipeline_id=ctx.pipeline_id,
         run_id=ctx.run_id,
+        client_id=ctx.client_id,
         checkpoint_name=SILVER_CLINICAL,
         qualified_table="SILVER_silver.sat_claim_details",
         suite_builder=build_silver_suite,
@@ -189,6 +195,7 @@ def task_gold_checkpoint(ctx: TaskContext) -> dict[str, Any]:
         settings=ctx.settings,
         pipeline_id=ctx.pipeline_id,
         run_id=ctx.run_id,
+        client_id=ctx.client_id,
         checkpoint_name=GOLD_BUSINESS,
         qualified_table="SILVER_gold_um.gold_patient_auth",
         suite_builder=build_gold_suite,

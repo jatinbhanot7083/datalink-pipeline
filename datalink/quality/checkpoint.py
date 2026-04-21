@@ -98,6 +98,66 @@ def _render_data_docs(context: Any) -> None:
             builder()
 
 
+def _run_with_data_docs(
+    context: Any,
+    checkpoint_name: str,
+    batch_def: Any,
+    suite: ExpectationSuite,
+    df: pd.DataFrame,
+) -> Any:
+    """Run the validation via a GX Checkpoint + UpdateDataDocsAction.
+
+    This is the GX-1.x idiom for "validate a batch AND write the result
+    into the Data Docs HTML site". Using `batch.validate(suite)` alone
+    returns the result to our code but never writes it to data_docs/.
+
+    If the Checkpoint path errors out (e.g. ephemeral context, or a GX
+    store that hasn't been initialised), we fall back to the raw
+    batch.validate() so the in-DB audit still captures expectation-level
+    results — the Data Docs site is secondary.
+    """
+    try:
+        from great_expectations.checkpoint import UpdateDataDocsAction
+        from great_expectations.core.validation_definition import ValidationDefinition
+
+        val_def_name = f"val_def_{checkpoint_name}"
+        try:
+            val_def = context.validation_definitions.get(val_def_name)
+        except Exception:
+            val_def = context.validation_definitions.add(
+                ValidationDefinition(
+                    name=val_def_name,
+                    data=batch_def,
+                    suite=suite,
+                )
+            )
+
+        cp_name = f"cp_{checkpoint_name}"
+        try:
+            cp = context.checkpoints.get(cp_name)
+        except Exception:
+            cp = context.checkpoints.add(
+                gx.Checkpoint(
+                    name=cp_name,
+                    validation_definitions=[val_def],
+                    actions=[UpdateDataDocsAction(name="update_data_docs")],
+                )
+            )
+
+        result = cp.run(batch_parameters={"dataframe": df})
+        # cp.run returns a CheckpointResult; the per-validation
+        # ExpectationSuiteValidationResult is inside .run_results[key].
+        run_results = list(result.run_results.values())
+        if run_results:
+            # Also rebuild the index/nav so the new run shows up in the listing.
+            _render_data_docs(context)
+            return run_results[0]
+    except Exception:
+        # Fall back to raw validate — in-DB audit still records expectations.
+        pass
+    return batch_def.get_batch(batch_parameters={"dataframe": df}).validate(suite)
+
+
 def _extract_expectation_results(
     validation_result: Any,
 ) -> tuple[list[ExpectationResult], int]:
@@ -123,22 +183,103 @@ def _extract_expectation_results(
     return results, total_rows
 
 
+def _load_suite_from_registry(
+    warehouse: Warehouse, client_id: str, suite_name: str
+) -> ExpectationSuite | None:
+    """Phase 5.8: look up the LIVE suite for (client_id, suite_name) in
+    CONTROL.dq_suites and materialise it as a GX ExpectationSuite.
+
+    Falls back to `client_id='default'` when the requested client has no
+    LIVE suite yet (e.g., a new Client B on their first run — they use the
+    default baseline until their DQ analyst authors their own).
+
+    Returns None if neither the requested client nor default has a LIVE
+    suite — caller should fall back to the legacy `suite_builder` path.
+    """
+    # Lazy import to avoid circularity through __init__.py.
+    from datalink.quality.registry import SuiteRegistry
+
+    reg = SuiteRegistry(warehouse)
+    live = reg.get_live(client_id, suite_name)
+    if live is None and client_id != "default":
+        _log.info(
+            "checkpoint.suite_fallback_to_default",
+            requested_client=client_id,
+            suite_name=suite_name,
+        )
+        live = reg.get_live("default", suite_name)
+    if live is None:
+        return None
+    _log.info(
+        "checkpoint.suite_loaded_from_registry",
+        suite_id=live.suite_id,
+        client_id=live.client_id,
+        suite_name=suite_name,
+        version=live.version,
+        expectation_count=len(live.expectations),
+    )
+    return _json_to_suite(live.suite_id, suite_name, live.expectations)
+
+
+def _json_to_suite(
+    suite_id: str, suite_name: str, expectations: list[dict[str, Any]]
+) -> ExpectationSuite:
+    """Convert a JSON expectation list to a live GX ExpectationSuite.
+
+    Class lookup: `expect_column_values_to_not_be_null` →
+    `ExpectColumnValuesToNotBeNull` attribute on `great_expectations.expectations`.
+    Unknown types are logged + skipped (never crashes the checkpoint).
+    """
+    # Import here so mypy + the top-level import block stays tidy.
+    from great_expectations import expectations as gx_expectations
+
+    suite = ExpectationSuite(name=f"{suite_name}_v{suite_id[:8]}")
+    for exp in expectations:
+        exp_type = exp.get("expectation_type")
+        if not exp_type:
+            continue
+        class_name = "".join(word.capitalize() for word in exp_type.split("_"))
+        exp_class = getattr(gx_expectations, class_name, None)
+        if exp_class is None:
+            _log.warning(
+                "checkpoint.unknown_expectation_type",
+                expectation_type=exp_type,
+                class_name=class_name,
+            )
+            continue
+        kwargs = exp.get("kwargs", {})
+        try:
+            suite.add_expectation(exp_class(**kwargs))
+        except Exception as e:
+            _log.warning(
+                "checkpoint.expectation_instantiation_failed",
+                expectation_type=exp_type,
+                error=str(e),
+            )
+    return suite
+
+
 def run_checkpoint(
     warehouse: Warehouse,
     qualified_table: str,
-    suite_builder: Callable[[], ExpectationSuite],
     checkpoint_name: str,
     pipeline_id: str,
     run_id: str,
+    client_id: str = "default",
+    suite_builder: Callable[[], ExpectationSuite] | None = None,
     fail_threshold_pct: float = 5.0,
     record_results: bool = True,
 ) -> CheckpointResult:
     """Load the table into a pandas DataFrame, evaluate the suite, record results.
 
-    `suite_builder` is a factory callable (the module-level build_*_suite
-    functions). We establish the GX context FIRST, then call the builder —
-    GX 1.x needs a live context before ExpectationSuite() is instantiated
-    (the suite's __init__ reaches into the singleton project manager).
+    Suite resolution (Phase 5.8 change):
+      1. PRIMARY — look up LIVE suite in CONTROL.dq_suites for
+         (client_id, checkpoint_name). Falls back to client_id='default'
+         if the client has no suite of their own yet.
+      2. LEGACY — if registry returns None and `suite_builder` was
+         provided, call it. This keeps old tests + Phase-5 callers working
+         during migration.
+      3. ERROR — if both paths fail, raise ValueError with a clear message.
 
     For production Snowflake volumes this would stream; for the local DuckDB
     demo a full materialization is fine (≤10k rows).
@@ -152,22 +293,56 @@ def run_checkpoint(
     # Context MUST come first — sets the singleton project manager used by
     # ExpectationSuite.__init__.
     context = _get_gx_context()
-    suite = suite_builder()
+
+    # Phase 5.8 primary path: load from registry.
+    suite = _load_suite_from_registry(warehouse, client_id, checkpoint_name)
+    if suite is None:
+        if suite_builder is None:
+            raise ValueError(
+                f"No LIVE suite in CONTROL.dq_suites for ({client_id!r}, "
+                f"{checkpoint_name!r}) and no suite_builder fallback supplied. "
+                "Run seed_baselines(warehouse) on first boot."
+            )
+        _log.info(
+            "checkpoint.fallback_to_suite_builder",
+            client_id=client_id,
+            suite_name=checkpoint_name,
+        )
+        suite = suite_builder()
 
     rows = warehouse.query(f"SELECT * FROM {qualified_table}")
     df = pd.DataFrame(rows)
 
-    batch_def = (
-        context.data_sources.add_pandas(f"pandas_{checkpoint_name}")
-        .add_dataframe_asset(f"asset_{checkpoint_name}")
-        .add_batch_definition_whole_dataframe("batch_def")
-    )
-    batch = batch_def.get_batch(batch_parameters={"dataframe": df})
-    validation = batch.validate(suite)
+    # file-backed GX persists datasource definitions to disk, so on the
+    # 2nd+ run add_pandas() raises "already exists". Use get-or-add pattern:
+    # try to retrieve the existing datasource/asset/batch-def, fall back to
+    # creating only when absent.
+    ds_name = f"pandas_{checkpoint_name}"
+    asset_name = f"asset_{checkpoint_name}"
+    batch_def_name = "batch_def"
+    try:
+        ds = context.data_sources.get(ds_name)
+    except Exception:
+        ds = context.data_sources.add_pandas(ds_name)
+    try:
+        asset = ds.get_asset(asset_name)
+    except Exception:
+        asset = ds.add_dataframe_asset(asset_name)
+    try:
+        batch_def = asset.get_batch_definition(batch_def_name)
+    except Exception:
+        batch_def = asset.add_batch_definition_whole_dataframe(batch_def_name)
 
-    # Render HTML Data Docs so the nginx-gx-docs site (http://localhost:8090)
-    # shows the report for this checkpoint run. No-op on ephemeral contexts.
-    _render_data_docs(context)
+    # Persist the suite so the ValidationDefinition can reference it by name.
+    try:
+        context.suites.add(suite)
+    except Exception:
+        context.suites.add_or_update(suite)
+
+    # Use a Checkpoint + UpdateDataDocsAction so per-run validation results
+    # get WRITTEN into the Data Docs site (not just returned to our code).
+    # Without this, nginx-gx-docs serves only the shell + static assets.
+    validation = _run_with_data_docs(context, checkpoint_name, batch_def, suite, df)
 
     results, row_count = _extract_expectation_results(validation)
     total = len(results)

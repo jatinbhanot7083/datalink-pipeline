@@ -25,6 +25,7 @@ from datalink.quality import (
     PipelineControl,
     PipelineState,
     run_checkpoint,
+    seed_baselines,
 )
 from datalink.quality.checkpoint import skipped_result
 from datalink.quality.control import Severity, StateTransition
@@ -54,15 +55,26 @@ def run_checkpoint_with_hooks(
     run_id: str,
     checkpoint_name: str,
     qualified_table: str,
-    suite_builder: Callable[[], ExpectationSuite],
+    suite_builder: Callable[[], ExpectationSuite] | None = None,
+    client_id: str = "default",
     fail_threshold_pct: float | None = None,
 ) -> HookedCheckpoint:
-    """Run Pre-Val crew → GX checkpoint → (on failure) Post-Val crew → pause pipeline."""
+    """Run Pre-Val crew → GX checkpoint → (on failure) Post-Val crew → pause pipeline.
+
+    Phase 5.8: `client_id` routes to the DB-backed SuiteRegistry for the LIVE
+    expectation suite. `suite_builder` remains as an optional legacy fallback
+    so existing Phase-5 tests that pass a Python builder still work.
+    """
     gx_enabled = settings.features.gx.enabled
     agents_enabled = settings.features.agents.enabled
     control = PipelineControl(adapters.warehouse)
     control.ensure()
     control.start(pipeline_id)
+    # Idempotent seed: on very first run, populate client='default' with the
+    # 3 LIVE baselines. No-op on subsequent runs. Only when GX is enabled —
+    # no reason to seed if the whole quality layer is turned off.
+    if gx_enabled:
+        seed_baselines(adapters.warehouse)
 
     # ------------------------------------------------------------------
     # Pre-Val crew (if enabled)
@@ -93,10 +105,11 @@ def run_checkpoint_with_hooks(
         checkpoint = run_checkpoint(
             warehouse=adapters.warehouse,
             qualified_table=qualified_table,
-            suite_builder=suite_builder,
             checkpoint_name=checkpoint_name,
             pipeline_id=pipeline_id,
             run_id=run_id,
+            client_id=client_id,
+            suite_builder=suite_builder,
             fail_threshold_pct=threshold,
         )
         control.record_checkpoint(
