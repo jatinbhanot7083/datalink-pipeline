@@ -222,6 +222,26 @@ def _trigger_dag(dag_id: str, conf: dict[str, Any] | None = None) -> ProbeResult
     return _airflow(f"/api/v1/dags/{dag_id}/dagRuns", method="POST", json=body)
 
 
+def _list_clients() -> list[str]:
+    """Phase 5.8: read distinct clients from CONTROL.dq_suites so the client
+    dropdown populates automatically. Falls back to ['default'] if the
+    registry is empty (pre-first-run)."""
+    try:
+        import duckdb
+
+        conn = duckdb.connect(WAREHOUSE_PATH, read_only=True)
+        try:
+            rows = conn.execute(
+                "SELECT DISTINCT client_id FROM CONTROL.dq_suites ORDER BY client_id"
+            ).fetchall()
+            clients = [r[0] for r in rows] or ["default"]
+        finally:
+            conn.close()
+        return clients
+    except Exception:
+        return ["default"]
+
+
 # =============================================================================
 # SFTP UPLOAD
 # =============================================================================
@@ -294,7 +314,7 @@ def main() -> None:
         f"<span style='color:{_GOLD}'>Control Tower</span></h1>",
         unsafe_allow_html=True,
     )
-    col_a, col_b = st.columns([3, 1])
+    col_a, col_client, col_b = st.columns([2, 1, 1])
     with col_a:
         st.markdown(
             '<p style="color:#4a5a7e;margin:0">Single-pane-of-glass for the '
@@ -302,6 +322,21 @@ def main() -> None:
             "SQL Server + PostgreSQL — with Great Expectations + CrewAI visible end-to-end.</p>",
             unsafe_allow_html=True,
         )
+    with col_client:
+        # Phase 5.8: picks the DQ suite version each triggered DAG uses.
+        # Persisted across reruns via session_state.
+        clients = _list_clients()
+        current = st.session_state.get("client_id", "default")
+        if current not in clients:
+            current = "default"
+        sel = st.selectbox(
+            "Client",
+            options=clients,
+            index=clients.index(current),
+            help="DQ suite selection. `default` uses the baseline seeded suites; "
+            "other clients use their own LIVE (authored via /DQ_Author).",
+        )
+        st.session_state["client_id"] = sel
     with col_b:
         refreshed_at = datetime.now(UTC).strftime("%H:%M:%S UTC")
         st.markdown(
@@ -448,13 +483,17 @@ def main() -> None:
                 else:
                     st.error(r.error)
 
+    selected_client = st.session_state.get("client_id", "default")
+
     def _trigger_ui(dag_id: str, label: str, help_text: str) -> None:
         clicked = st.button(label, use_container_width=True, help=help_text)
         if clicked:
-            r = _trigger_dag(dag_id)
+            # Phase 5.8: pass the client_id to the DAG so the task reads
+            # the LIVE suite for (client_id, checkpoint_name).
+            r = _trigger_dag(dag_id, conf={"client_id": selected_client})
             if r.ok:
                 run_id = r.value.get("dag_run_id") if isinstance(r.value, dict) else "triggered"
-                st.success(f"Triggered {dag_id}\n\n`{run_id}`")
+                st.success(f"Triggered {dag_id} for client `{selected_client}`\n\n`{run_id}`")
                 st.markdown(f"[Watch in Airflow ↗]({USER_FACING['Airflow']}/dags/{dag_id}/grid)")
             else:
                 st.error(f"Trigger failed: {r.error}")
@@ -482,7 +521,10 @@ def main() -> None:
             help="Triggers a CP2 check with forced-fail config — Post-Val crew fires, Reporting agent hits webhook",
         ):
             # Runs silver pipeline with a conf flag the suite reads to inject failures.
-            r = _trigger_dag("silver_transform", conf={"inject_breach": True})
+            r = _trigger_dag(
+                "silver_transform",
+                conf={"inject_breach": True, "client_id": selected_client},
+            )
             if r.ok:
                 st.warning(
                     "Synthetic breach triggered. Watch Webhook Inbox for Reporting agent delivery."

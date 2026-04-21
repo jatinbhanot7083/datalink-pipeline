@@ -145,8 +145,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = ["N802"]                  # pytest funcs may not follow snake_case
-"docker/webhook-stub/**" = ["N802"]    # http.server requires do_GET / do_POST names
+"tests/**" = ["N802"]                              # pytest funcs may not follow snake_case
+"docker/webhook-stub/**" = ["N802", "RUF001"]      # http.server do_GET/do_POST + smart-quote HTML
+"datalink/ui/**" = ["RUF001", "RUF003"]            # UI uses emoji/unicode glyphs in labels
 
 # ------------------------------------------------------------
 # mypy

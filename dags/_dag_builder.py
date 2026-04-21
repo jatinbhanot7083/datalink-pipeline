@@ -85,8 +85,16 @@ def _make_airflow_wrapper(pipeline_id: str, task_callable, env: str):
     """Create a PythonOperator callable that builds a TaskContext and forwards."""
 
     def _wrapper(**airflow_context):
-        run_id = airflow_context.get("run_id") or airflow_context.get("dag_run").run_id  # type: ignore[union-attr]
-        ctx = TaskContext(pipeline_id=pipeline_id, run_id=run_id, env=env)
+        dag_run = airflow_context.get("dag_run")
+        run_id = airflow_context.get("run_id") or (dag_run.run_id if dag_run else "unknown")
+        # Phase 5.8: pull client_id from the DAG-run conf (passed by the
+        # Control Tower "▶ Run ..." button). Defaults to 'default' for
+        # scheduled runs or manual triggers without a client set.
+        conf: dict = {}
+        if dag_run is not None:
+            conf = getattr(dag_run, "conf", None) or {}
+        client_id = str(conf.get("client_id", "default"))
+        ctx = TaskContext(pipeline_id=pipeline_id, run_id=run_id, env=env, client_id=client_id)
         return task_callable(ctx)
 
     _wrapper.__name__ = task_callable.__name__
