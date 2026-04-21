@@ -3,25 +3,57 @@
 Matches the schema in GX_Pipeline_Control_Agentic_AI_Architecture.docx §3.4:
   - pipeline_control_state        current state per pipeline
   - pipeline_checkpoints          checkpoint markers (bronze/silver/gold)
+  - pipeline_task_progress        per-task completion markers (Phase 6)
   - pipeline_control_audit_log    immutable transition history
   - batch_quarantine              aborted batches for root-cause analysis
   - agent_reasoning_log           every agent invocation (Phase 5 addition)
 
-State transitions: RUNNING → PAUSED → RESUMING → RUNNING, or → ABORTED.
+State transitions: RUNNING -> PAUSED -> RESUMING -> RUNNING, or -> ABORTED.
 Auto-pause fires when a GX checkpoint exceeds its failure threshold (default 5%).
 Auto-abort on schema mismatch, file-format change, or orphaned Links.
+
+Phase 6 auto-resume: local_sequential + Airflow consult
+pipeline_task_progress on re-run. Tasks whose (run_id, task_name) rows
+already exist with status='SUCCESS' are SKIPPED_RESUMED -- the pipeline
+resumes from the first un-recorded task rather than restarting from scratch.
+
+Phase 6 fail-safe: FatalPipelineError transitions state to ABORTED
+(terminal) and exits. Non-fatal exceptions HALT; the run can be
+resumed once the operator fixes the root cause.
 """
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
-from typing import ClassVar
+from typing import Any, ClassVar
 
 from datalink.adapters.protocols import Warehouse
 from datalink.logging import get_logger
+
+
+class FatalPipelineError(Exception):
+    """Raise to signal a terminal pipeline failure.
+
+    Local_sequential + Airflow callbacks catch this, transition the pipeline
+    state to ABORTED, and stop all downstream work. The run CANNOT be
+    auto-resumed -- an operator must investigate, quarantine the batch, and
+    start a fresh run_id.
+
+    Good fits: schema drift, file-format change, PHI leak detected in
+    agent output, warehouse schema corruption. Bad fits (use plain
+    exceptions for these): transient DB timeouts, disk-full errors,
+    one-off row-validation failures.
+    """
+
+    def __init__(self, reason: str, *, severity: str = "CRITICAL") -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.severity = severity
+
 
 _log = get_logger(__name__)
 
@@ -78,6 +110,26 @@ _DDL = [
         fail_pct        DECIMAL(5,2),
         status          VARCHAR,
         PRIMARY KEY (run_id, checkpoint_name)
+    )
+    """,
+    # Phase 6 auto-resume: per-task completion markers. One row per
+    # (run_id, task_name). A re-run with the SAME run_id consults this
+    # table to skip tasks already SUCCESSFUL and resume from the first
+    # un-recorded task. `output_json` stores the task's return dict so
+    # downstream tasks that were skipped on resume still have upstream
+    # context available.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.pipeline_task_progress (
+        run_id          VARCHAR NOT NULL,
+        pipeline_id     VARCHAR NOT NULL,
+        task_name       VARCHAR NOT NULL,
+        status          VARCHAR NOT NULL,
+        started_at      TIMESTAMP,
+        completed_at    TIMESTAMP,
+        duration_ms     INTEGER,
+        output_json     VARCHAR,
+        error           VARCHAR,
+        PRIMARY KEY (run_id, task_name)
     )
     """,
     # Immutable transition history
@@ -333,3 +385,138 @@ class PipelineControl:
                 "sv": t.severity.value,
             },
         )
+
+
+# ----------------------------------------------------------------------------
+# Phase 6: Auto-resume task-progress tracker
+# ----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TaskProgress:
+    """Immutable snapshot of a single task's progress row."""
+
+    run_id: str
+    pipeline_id: str
+    task_name: str
+    status: str  # "SUCCESS" | "FAILED" | "RUNNING"
+    started_at: datetime | None
+    completed_at: datetime | None
+    duration_ms: int | None
+    output: dict[str, Any]
+    error: str | None
+
+
+class TaskProgressTracker:
+    """Records per-task completion for auto-resume.
+
+    Every task callable wraps its work between `mark_started` and
+    `mark_done` (or `mark_failed`). On re-run with the same run_id,
+    the orchestrator queries `completed_tasks(run_id)` and skips
+    anything already recorded SUCCESSFUL. The stored `output_json`
+    is re-hydrated into the TaskContext so downstream tasks see the
+    same upstream state as the original run.
+
+    Thread-safety: safe as long as each run_id is owned by one
+    orchestrator process. Airflow LocalExecutor + our single-instance
+    local_sequential both satisfy this.
+    """
+
+    def __init__(self, warehouse: Warehouse) -> None:
+        self._wh = warehouse
+
+    def completed_tasks(self, run_id: str) -> dict[str, TaskProgress]:
+        """Map task_name -> TaskProgress for every SUCCESSFUL task in run_id."""
+        rows = self._wh.query(
+            f"SELECT * FROM {CONTROL_SCHEMA}.pipeline_task_progress "
+            "WHERE run_id = $r AND status = 'SUCCESS' "
+            "ORDER BY completed_at ASC",
+            {"r": run_id},
+        )
+        return {r["task_name"]: _row_to_progress(r) for r in rows}
+
+    def mark_started(self, run_id: str, pipeline_id: str, task_name: str) -> None:
+        """Record that a task has begun. Safe to call multiple times (INSERT OR REPLACE)."""
+        self._wh.execute(
+            f"INSERT OR REPLACE INTO {CONTROL_SCHEMA}.pipeline_task_progress "
+            "(run_id, pipeline_id, task_name, status, started_at) "
+            "VALUES ($r, $p, $t, $s, $ts)",
+            {
+                "r": run_id,
+                "p": pipeline_id,
+                "t": task_name,
+                "s": "RUNNING",
+                "ts": datetime.now(UTC),
+            },
+        )
+
+    def mark_done(
+        self,
+        run_id: str,
+        pipeline_id: str,
+        task_name: str,
+        output: dict[str, Any],
+        duration_ms: int,
+    ) -> None:
+        """Record task SUCCESS. On auto-resume this row causes the task to be skipped."""
+        self._wh.execute(
+            f"INSERT OR REPLACE INTO {CONTROL_SCHEMA}.pipeline_task_progress "
+            "(run_id, pipeline_id, task_name, status, started_at, completed_at, "
+            " duration_ms, output_json) "
+            "VALUES ($r, $p, $t, $s, $st, $ct, $d, $o)",
+            {
+                "r": run_id,
+                "p": pipeline_id,
+                "t": task_name,
+                "s": "SUCCESS",
+                "st": datetime.now(UTC),
+                "ct": datetime.now(UTC),
+                "d": duration_ms,
+                "o": json.dumps(output, default=str),
+            },
+        )
+
+    def mark_failed(
+        self,
+        run_id: str,
+        pipeline_id: str,
+        task_name: str,
+        error: str,
+        duration_ms: int,
+    ) -> None:
+        """Record task FAILURE. Row is overwritten on a resume-retry."""
+        self._wh.execute(
+            f"INSERT OR REPLACE INTO {CONTROL_SCHEMA}.pipeline_task_progress "
+            "(run_id, pipeline_id, task_name, status, started_at, completed_at, "
+            " duration_ms, error) "
+            "VALUES ($r, $p, $t, $s, $st, $ct, $d, $e)",
+            {
+                "r": run_id,
+                "p": pipeline_id,
+                "t": task_name,
+                "s": "FAILED",
+                "st": datetime.now(UTC),
+                "ct": datetime.now(UTC),
+                "d": duration_ms,
+                "e": error[:4000],  # truncate huge stack traces
+            },
+        )
+
+
+def _row_to_progress(row: dict[str, Any]) -> TaskProgress:
+    raw_output = row.get("output_json")
+    try:
+        output = json.loads(raw_output) if raw_output else {}
+    except json.JSONDecodeError:
+        output = {}
+    return TaskProgress(
+        run_id=row["run_id"],
+        pipeline_id=row["pipeline_id"],
+        task_name=row["task_name"],
+        status=row["status"],
+        started_at=row.get("started_at"),
+        completed_at=row.get("completed_at"),
+        duration_ms=row.get("duration_ms"),
+        output=output,
+        error=row.get("error"),
+    )

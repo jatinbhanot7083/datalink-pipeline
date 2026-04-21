@@ -17,8 +17,11 @@ from datalink.quality.checkpoint import (
     run_checkpoint,
 )
 from datalink.quality.control import (
+    FatalPipelineError,
     PipelineControl,
     PipelineState,
+    TaskProgress,
+    TaskProgressTracker,
     create_control_tables,
 )
 from datalink.quality.registry import (
@@ -36,6 +39,7 @@ __all__ = [
     "CheckpointStatus",
     "DqDimension",
     "ExpectationResult",
+    "FatalPipelineError",
     "PipelineControl",
     "PipelineState",
     "SuiteDraft",
@@ -43,6 +47,8 @@ __all__ = [
     "SuiteSource",
     "SuiteStatus",
     "SuiteVersion",
+    "TaskProgress",
+    "TaskProgressTracker",
     "create_control_tables",
     "run_checkpoint",
     "seed_baselines",

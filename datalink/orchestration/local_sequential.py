@@ -42,7 +42,8 @@ _log = get_logger(__name__)
 @dataclass
 class TaskResult:
     name: str
-    status: str  # "SUCCESS" | "FAILED" | "SKIPPED_PAUSED" | "SKIPPED_ABORTED"
+    # "SUCCESS" | "FAILED" | "SKIPPED_PAUSED" | "SKIPPED_ABORTED" | "SKIPPED_RESUMED"
+    status: str
     duration_ms: int
     output: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
@@ -104,6 +105,22 @@ class LocalSequentialRunner:
         # Every subsequent state check opens its own short-lived connection.
         self._bootstrap_control_state(env, pipeline.pipeline_id)
 
+        # Phase 6 auto-resume: load completed-task snapshots for this run_id.
+        # If re-invoked with the same run_id (common after an operator fixes
+        # a transient fault and clears the PAUSED state), we skip tasks that
+        # already completed and re-hydrate ctx.upstream so downstream tasks
+        # see identical inputs to the original run.
+        completed = self._load_completed_tasks(env, run_id)
+        if completed:
+            _log.info(
+                "local_sequential.resume.detected",
+                run_id=run_id,
+                completed_task_count=len(completed),
+                completed=list(completed),
+            )
+            for task_name, prog in completed.items():
+                ctx.upstream[task_name] = prog.output
+
         result = RunResult(pipeline_id=pipeline.pipeline_id, run_id=run_id, status="SUCCESS")
         _log.info(
             "local_sequential.run.start",
@@ -111,15 +128,36 @@ class LocalSequentialRunner:
             run_id=run_id,
             env=env,
             task_count=len(pipeline.tasks),
+            resuming=bool(completed),
         )
 
         halted = False
+        aborted = False
         for task in pipeline.topo_sorted():
+            # Auto-resume: if this task already succeeded in this run_id, skip.
+            if task.name in completed:
+                result.task_results.append(
+                    TaskResult(
+                        name=task.name,
+                        status="SKIPPED_RESUMED",
+                        duration_ms=0,
+                        output=completed[task.name].output,
+                    )
+                )
+                _log.info(
+                    "local_sequential.task.skipped",
+                    task=task.name,
+                    reason="SKIPPED_RESUMED",
+                )
+                continue
+
             # Sensor check — identical semantics to Airflow's PipelineControlStateSensor.
             # Short-lived connection so dbt subprocesses can grab the file lock.
             state_value = self._check_state(env, pipeline.pipeline_id)
-            if halted or state_value in {"PAUSED", "ABORTED"}:
-                skip_status = "SKIPPED_ABORTED" if state_value == "ABORTED" else "SKIPPED_PAUSED"
+            if aborted or halted or state_value in {"PAUSED", "ABORTED"}:
+                skip_status = (
+                    "SKIPPED_ABORTED" if (aborted or state_value == "ABORTED") else "SKIPPED_PAUSED"
+                )
                 result.task_results.append(
                     TaskResult(name=task.name, status=skip_status, duration_ms=0)
                 )
@@ -130,11 +168,18 @@ class LocalSequentialRunner:
                 )
                 continue
 
-            tr = self._run_task(task, ctx)
+            tr = self._run_task(task, ctx, run_id=run_id, pipeline_id=pipeline.pipeline_id)
             result.task_results.append(tr)
             if tr.status == "SUCCESS":
                 ctx.upstream[task.name] = tr.output
-            else:
+            elif tr.status == "FATAL":
+                # FatalPipelineError short-circuits everything: transition to
+                # ABORTED, skip every downstream task, return FAILED.
+                aborted = True
+                halted = True
+                result.status = "FAILED"
+                self._abort_pipeline(env, pipeline.pipeline_id, tr.error or "fatal error")
+            else:  # FAILED
                 if self.stop_on_error:
                     halted = True
                     result.status = "FAILED"
@@ -205,7 +250,97 @@ class LocalSequentialRunner:
             if callable(close):
                 close()
 
-    def _run_task(self, task: Task, ctx: TaskContext) -> TaskResult:
+    @staticmethod
+    def _load_completed_tasks(env: str, run_id: str) -> dict[str, Any]:
+        """Return map of task_name -> TaskProgress for already-successful tasks.
+
+        Short-lived warehouse connection — dbt subprocesses need the
+        DuckDB file lock afterwards.
+        """
+        from datalink.adapters.factory import build_adapters
+        from datalink.config.loader import load_settings
+        from datalink.quality import TaskProgressTracker
+
+        settings = load_settings(env=env)
+        adapters = build_adapters(settings)
+        try:
+            tracker = TaskProgressTracker(adapters.warehouse)
+            return dict(tracker.completed_tasks(run_id))
+        finally:
+            close = getattr(adapters.warehouse, "close", None)
+            if callable(close):
+                close()
+
+    @staticmethod
+    def _record_task_progress(
+        env: str,
+        run_id: str,
+        pipeline_id: str,
+        task_name: str,
+        status: str,
+        duration_ms: int,
+        output: dict[str, Any] | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Persist task-level progress. Short-lived connection."""
+        from datalink.adapters.factory import build_adapters
+        from datalink.config.loader import load_settings
+        from datalink.quality import TaskProgressTracker, create_control_tables
+
+        settings = load_settings(env=env)
+        adapters = build_adapters(settings)
+        try:
+            create_control_tables(adapters.warehouse)  # idempotent; covers first call
+            tracker = TaskProgressTracker(adapters.warehouse)
+            if status == "SUCCESS":
+                tracker.mark_done(run_id, pipeline_id, task_name, output or {}, duration_ms)
+            else:
+                tracker.mark_failed(run_id, pipeline_id, task_name, error or "", duration_ms)
+        finally:
+            close = getattr(adapters.warehouse, "close", None)
+            if callable(close):
+                close()
+
+    @staticmethod
+    def _abort_pipeline(env: str, pipeline_id: str, reason: str) -> None:
+        """FatalPipelineError -> transition to ABORTED (terminal state)."""
+        from datalink.adapters.factory import build_adapters
+        from datalink.config.loader import load_settings
+        from datalink.quality import PipelineControl, PipelineState
+        from datalink.quality.control import Severity, StateTransition
+
+        settings = load_settings(env=env)
+        adapters = build_adapters(settings)
+        try:
+            control = PipelineControl(adapters.warehouse)
+            current = control.current(pipeline_id) or PipelineState.RUNNING
+            if current is PipelineState.ABORTED:
+                return  # already terminal; nothing to do
+            control.transition(
+                StateTransition(
+                    pipeline_id=pipeline_id,
+                    from_state=current,
+                    to_state=PipelineState.ABORTED,
+                    actor="system:fatal_error",
+                    reason=reason[:1000],
+                    severity=Severity.CRITICAL,
+                )
+            )
+        finally:
+            close = getattr(adapters.warehouse, "close", None)
+            if callable(close):
+                close()
+
+    def _run_task(
+        self,
+        task: Task,
+        ctx: TaskContext,
+        *,
+        run_id: str,
+        pipeline_id: str,
+    ) -> TaskResult:
+        from datalink.quality.control import FatalPipelineError
+
         start = time.monotonic()
         try:
             out = task.callable(ctx) or {}
@@ -215,11 +350,52 @@ class LocalSequentialRunner:
                 task=task.name,
                 duration_ms=duration_ms,
             )
+            # Close the warehouse before recording progress so our short-lived
+            # tracker connection doesn't contend with the task's own handle.
+            if ctx._adapters is not None:
+                close = getattr(ctx._adapters.warehouse, "close", None)
+                if callable(close):
+                    with contextlib.suppress(Exception):
+                        close()
+                ctx._adapters = None
+            self._record_task_progress(
+                ctx.env, run_id, pipeline_id, task.name, "SUCCESS", duration_ms, output=out
+            )
             return TaskResult(
                 name=task.name,
                 status="SUCCESS",
                 duration_ms=duration_ms,
                 output=out,
+            )
+        except FatalPipelineError as fatal:
+            duration_ms = int((time.monotonic() - start) * 1000)
+            _log.error(
+                "local_sequential.task.fatal",
+                task=task.name,
+                duration_ms=duration_ms,
+                reason=fatal.reason,
+                severity=fatal.severity,
+            )
+            if ctx._adapters is not None:
+                close = getattr(ctx._adapters.warehouse, "close", None)
+                if callable(close):
+                    with contextlib.suppress(Exception):
+                        close()
+                ctx._adapters = None
+            self._record_task_progress(
+                ctx.env,
+                run_id,
+                pipeline_id,
+                task.name,
+                "FAILED",
+                duration_ms,
+                error=fatal.reason,
+            )
+            return TaskResult(
+                name=task.name,
+                status="FATAL",
+                duration_ms=duration_ms,
+                error=fatal.reason,
             )
         except Exception as exc:
             duration_ms = int((time.monotonic() - start) * 1000)
@@ -229,6 +405,15 @@ class LocalSequentialRunner:
                 duration_ms=duration_ms,
                 error=str(exc),
                 trace=traceback.format_exc(limit=3),
+            )
+            if ctx._adapters is not None:
+                close = getattr(ctx._adapters.warehouse, "close", None)
+                if callable(close):
+                    with contextlib.suppress(Exception):
+                        close()
+                ctx._adapters = None
+            self._record_task_progress(
+                ctx.env, run_id, pipeline_id, task.name, "FAILED", duration_ms, error=str(exc)
             )
             return TaskResult(
                 name=task.name,
@@ -257,7 +442,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     print(f" status={result.status}")
     print("=" * 70)
     for tr in result.task_results:
-        marker = "OK " if tr.status == "SUCCESS" else tr.status
+        if tr.status == "SUCCESS":
+            marker = "OK "
+        elif tr.status == "SKIPPED_RESUMED":
+            marker = "RESUMED"
+        else:
+            marker = tr.status
         print(f"  [{marker:>14}]  {tr.name:24}  {tr.duration_ms:>5}ms")
     print("=" * 70)
 
