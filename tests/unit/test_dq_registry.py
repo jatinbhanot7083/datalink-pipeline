@@ -354,6 +354,50 @@ def test_seed_baselines_is_idempotent(wh) -> None:
 
 
 @pytest.mark.unit
+def test_seed_all_real_clients_produces_84_suites(wh, reg: SuiteRegistry) -> None:
+    """Phase 6: 7 clients (default + 6 real payer tenants) x 12 suites = 84.
+
+    The 6 real tenants are AETNA / CARESOURCE / AFFINITY / COACCESS /
+    DHMP / HCSC — the production payer list Jatin confirmed.
+    """
+    from datalink.quality.baseline_seeder import REAL_CLIENTS, seed_all_real_clients
+
+    assert REAL_CLIENTS == ("aetna", "caresource", "affinity", "coaccess", "dhmp", "hcsc")
+
+    result = seed_all_real_clients(wh)
+    assert set(result.keys()) == {"default", *REAL_CLIENTS}
+    assert all(n == 12 for n in result.values()), f"expected 12 per client, got {result}"
+
+    # Every real tenant must have its full set of 9 per-source suites LIVE.
+    for client in REAL_CLIENTS:
+        for suite_name in [
+            "bronze_claims",
+            "bronze_membership",
+            "bronze_provider",
+            "silver_claims",
+            "silver_membership",
+            "silver_provider",
+            "gold_claims",
+            "gold_membership",
+            "gold_provider",
+        ]:
+            live = reg.get_live(client, suite_name)
+            assert live is not None, f"{client} / {suite_name} missing"
+            assert live.status.value == "LIVE"
+
+
+@pytest.mark.unit
+def test_seed_all_real_clients_is_idempotent(wh) -> None:
+    """Re-running the seeder returns 0 per client on the second call."""
+    from datalink.quality.baseline_seeder import seed_all_real_clients
+
+    first = seed_all_real_clients(wh)
+    assert sum(first.values()) == 7 * 12  # 84 suites
+    second = seed_all_real_clients(wh)
+    assert all(n == 0 for n in second.values())
+
+
+@pytest.mark.unit
 def test_audit_log_captures_transitions(wh, reg: SuiteRegistry) -> None:
     sid = reg.create_draft(
         SuiteDraft(client_id="default", suite_name="s", expectations=[], created_by="alice")

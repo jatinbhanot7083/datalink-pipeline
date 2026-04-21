@@ -82,27 +82,47 @@ class TaskContext:
 
 
 def task_bronze_ingest(ctx: TaskContext) -> dict[str, Any]:
-    """Ingest all 3 sample CSVs (claims / membership / provider) from SFTP → Bronze."""
+    """Ingest all 3 sample CSVs (claims / membership / provider) from SFTP → Bronze.
+
+    Phase 6: each uploaded file is renamed to include the CLIENT + a
+    UTC timestamp so the `_source_file` audit column in Bronze is
+    self-describing: e.g.  claims_AETNA_20260421_213045.csv. The
+    original sample file on disk is untouched — only the destination
+    name changes. This is how production SFTP drops naturally arrive
+    (payer_source_yyyymmdd_hhmmss.csv).
+    """
+    import posixpath
+    from datetime import UTC, datetime
+
     from datalink.adapters.sftp.atmoz import AtmozSftpSource
     from datalink.pipeline.bronze import ingest_file
 
     sample_dir = Path(__file__).resolve().parents[2] / "data" / "sample"
-    uploads = [
+    sources = [
         ("PROVIDER", "provider_sample.csv"),
         ("MEMBERSHIP", "membership_sample.csv"),
         ("CLAIMS", "claims_sample.csv"),
     ]
+    client_tag = ctx.client_id.upper()
+    ts_tag = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+    # Build per-source timestamped remote filenames:  claims_AETNA_20260421_213045.csv
+    uploads = [
+        (source_type, local_fn, f"{source_type.lower()}_{client_tag}_{ts_tag}.csv")
+        for source_type, local_fn in sources
+    ]
+
     sftp = ctx.adapters.sftp
+    base_dir = ctx.settings.adapters.sftp.remote_base_dir
     # Ensure files are on the SFTP drop — upload helper is AtmozSftpSource-specific.
     if isinstance(sftp, AtmozSftpSource):
-        for _, fn in uploads:
-            local = sample_dir / fn
+        for _, local_fn, remote_fn in uploads:
+            local = sample_dir / local_fn
             if local.exists():
-                sftp.upload(local)
+                sftp.upload(local, posixpath.join(base_dir, remote_fn))
 
     results: dict[str, Any] = {}
-    for source_type, fn in uploads:
-        remote = f"{ctx.settings.adapters.sftp.remote_base_dir}/{fn}"
+    for source_type, _local_fn, remote_fn in uploads:
+        remote = posixpath.join(base_dir, remote_fn)
         # Phase 6: per-source delimiter / format config (defaults to CSV).
         source_fmt = ctx.settings.sources.for_source(source_type)
         r = ingest_file(
@@ -117,29 +137,67 @@ def task_bronze_ingest(ctx: TaskContext) -> dict[str, Any]:
             "rows_in_source": r.rows_in_source,
             "rows_in_target_after": r.rows_in_target_after,
             "batch_id": r.batch_id,
+            "source_file": remote_fn,  # what landed in the audit column
+            "client_id": ctx.client_id,
+            "timestamp": ts_tag,
         }
     _log.info(
-        "task.bronze_ingest.done", **{k: v["rows_in_target_after"] for k, v in results.items()}
+        "task.bronze_ingest.done",
+        client_id=ctx.client_id,
+        timestamp=ts_tag,
+        **{k: v["rows_in_target_after"] for k, v in results.items()},
     )
-    return {"ingested": results}
+    return {"ingested": results, "client_id": ctx.client_id, "timestamp": ts_tag}
 
 
 def task_bronze_checkpoint(ctx: TaskContext) -> dict[str, Any]:
-    """CP1 Bronze structural checkpoint via the Phase-5 hooks module."""
+    """CP1 Bronze structural checkpoint — runs per (client, source_type).
+
+    Phase 6: loops CLAIMS / MEMBERSHIP / PROVIDER. Each source's dedicated
+    suite (e.g. bronze_claims, bronze_membership, bronze_provider) is
+    looked up in the DB registry. Per-source results are aggregated into
+    a single task output; dashboards drill into each via source_type.
+
+    Falls back to the legacy aggregate 'bronze_structural' suite if a
+    per-source suite isn't found — keeps Phase-5.x test harnesses working.
+    """
     from datalink.pipeline.hooks import run_checkpoint_with_hooks
     from datalink.quality.suites import BRONZE_STRUCTURAL, build_bronze_suite
 
-    hc = run_checkpoint_with_hooks(
+    bronze_schema = schema_for(ctx.client_id, Layer.BRONZE)
+    source_targets = [
+        ("CLAIMS", "bronze_claims", f"{bronze_schema}.RAW_CLAIMS"),
+        ("MEMBERSHIP", "bronze_membership", f"{bronze_schema}.RAW_MEMBERSHIP"),
+        ("PROVIDER", "bronze_provider", f"{bronze_schema}.RAW_PROVIDER"),
+    ]
+    per_source: dict[str, Any] = {}
+    for source_type, suite_name, table in source_targets:
+        # Use per-source suite as primary; legacy aggregate as fallback.
+        hc = run_checkpoint_with_hooks(
+            adapters=ctx.adapters,
+            settings=ctx.settings,
+            pipeline_id=ctx.pipeline_id,
+            run_id=f"{ctx.run_id}__{source_type.lower()}",
+            client_id=ctx.client_id,
+            source_type=source_type,
+            checkpoint_name=suite_name,
+            qualified_table=table,
+            suite_builder=build_bronze_suite,
+        )
+        per_source[source_type] = _checkpoint_summary(hc, suite_name)
+    # Legacy aggregate write — keeps Phase-5.x demo scripts green.
+    hc_legacy = run_checkpoint_with_hooks(
         adapters=ctx.adapters,
         settings=ctx.settings,
         pipeline_id=ctx.pipeline_id,
         run_id=ctx.run_id,
         client_id=ctx.client_id,
+        source_type="CLAIMS",
         checkpoint_name=BRONZE_STRUCTURAL,
-        qualified_table=f"{schema_for(ctx.client_id, Layer.BRONZE)}.RAW_CLAIMS",
+        qualified_table=f"{bronze_schema}.RAW_CLAIMS",
         suite_builder=build_bronze_suite,
     )
-    return _checkpoint_summary(hc, BRONZE_STRUCTURAL)
+    return {"per_source": per_source, "legacy": _checkpoint_summary(hc_legacy, BRONZE_STRUCTURAL)}
 
 
 # ----------------------------------------------------------------------------
@@ -158,21 +216,49 @@ def task_dbt_test_silver(ctx: TaskContext) -> dict[str, Any]:
 
 
 def task_silver_checkpoint(ctx: TaskContext) -> dict[str, Any]:
-    """CP2 Silver clinical checkpoint."""
+    """CP2 Silver clinical checkpoint — per (client, source_type).
+
+    Phase 6: each source_type validates its own satellite:
+      CLAIMS      -> sat_claim_details       (suite: silver_claims)
+      MEMBERSHIP  -> sat_member_demographics (suite: silver_membership)
+      PROVIDER    -> sat_provider_info       (suite: silver_provider)
+    Legacy aggregate (silver_clinical) runs last for Phase-5.x compat.
+    """
     from datalink.pipeline.hooks import run_checkpoint_with_hooks
     from datalink.quality.suites import SILVER_CLINICAL, build_silver_suite
 
-    hc = run_checkpoint_with_hooks(
+    silver_schema = schema_for(ctx.client_id, Layer.SILVER_DV)
+    source_targets = [
+        ("CLAIMS", "silver_claims", f"{silver_schema}.sat_claim_details"),
+        ("MEMBERSHIP", "silver_membership", f"{silver_schema}.sat_member_demographics"),
+        ("PROVIDER", "silver_provider", f"{silver_schema}.sat_provider_info"),
+    ]
+    per_source: dict[str, Any] = {}
+    for source_type, suite_name, table in source_targets:
+        hc = run_checkpoint_with_hooks(
+            adapters=ctx.adapters,
+            settings=ctx.settings,
+            pipeline_id=ctx.pipeline_id,
+            run_id=f"{ctx.run_id}__{source_type.lower()}",
+            client_id=ctx.client_id,
+            source_type=source_type,
+            checkpoint_name=suite_name,
+            qualified_table=table,
+            suite_builder=build_silver_suite,
+        )
+        per_source[source_type] = _checkpoint_summary(hc, suite_name)
+    hc_legacy = run_checkpoint_with_hooks(
         adapters=ctx.adapters,
         settings=ctx.settings,
         pipeline_id=ctx.pipeline_id,
         run_id=ctx.run_id,
         client_id=ctx.client_id,
+        source_type="CLAIMS",
         checkpoint_name=SILVER_CLINICAL,
-        qualified_table=f"{schema_for(ctx.client_id, Layer.SILVER_DV)}.sat_claim_details",
+        qualified_table=f"{silver_schema}.sat_claim_details",
         suite_builder=build_silver_suite,
     )
-    return _checkpoint_summary(hc, SILVER_CLINICAL)
+    return {"per_source": per_source, "legacy": _checkpoint_summary(hc_legacy, SILVER_CLINICAL)}
 
 
 # ----------------------------------------------------------------------------
@@ -196,21 +282,49 @@ def task_dbt_test_gold(ctx: TaskContext) -> dict[str, Any]:
 
 
 def task_gold_checkpoint(ctx: TaskContext) -> dict[str, Any]:
-    """CP3 Gold business-rule checkpoint."""
+    """CP3 Gold business-rule checkpoint — per (client, source_type).
+
+    Phase 6: Gold UM consolidates all 3 sources into auth-centric tables.
+    Per-source suites validate the aspect each source is responsible for,
+    all targeting gold_patient_auth (the join point). Legacy aggregate
+    (gold_business) runs last for Phase-5.x compat.
+    """
     from datalink.pipeline.hooks import run_checkpoint_with_hooks
     from datalink.quality.suites import GOLD_BUSINESS, build_gold_suite
 
-    hc = run_checkpoint_with_hooks(
+    gold_schema = schema_for(ctx.client_id, Layer.GOLD_UM)
+    auth_table = f"{gold_schema}.gold_patient_auth"
+    source_suites = [
+        ("CLAIMS", "gold_claims"),
+        ("MEMBERSHIP", "gold_membership"),
+        ("PROVIDER", "gold_provider"),
+    ]
+    per_source: dict[str, Any] = {}
+    for source_type, suite_name in source_suites:
+        hc = run_checkpoint_with_hooks(
+            adapters=ctx.adapters,
+            settings=ctx.settings,
+            pipeline_id=ctx.pipeline_id,
+            run_id=f"{ctx.run_id}__{source_type.lower()}",
+            client_id=ctx.client_id,
+            source_type=source_type,
+            checkpoint_name=suite_name,
+            qualified_table=auth_table,
+            suite_builder=build_gold_suite,
+        )
+        per_source[source_type] = _checkpoint_summary(hc, suite_name)
+    hc_legacy = run_checkpoint_with_hooks(
         adapters=ctx.adapters,
         settings=ctx.settings,
         pipeline_id=ctx.pipeline_id,
         run_id=ctx.run_id,
         client_id=ctx.client_id,
+        source_type="CLAIMS",
         checkpoint_name=GOLD_BUSINESS,
-        qualified_table=f"{schema_for(ctx.client_id, Layer.GOLD_UM)}.gold_patient_auth",
+        qualified_table=auth_table,
         suite_builder=build_gold_suite,
     )
-    return _checkpoint_summary(hc, GOLD_BUSINESS)
+    return {"per_source": per_source, "legacy": _checkpoint_summary(hc_legacy, GOLD_BUSINESS)}
 
 
 def task_router_push(ctx: TaskContext) -> dict[str, Any]:

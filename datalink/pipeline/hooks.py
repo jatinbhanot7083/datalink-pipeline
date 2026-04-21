@@ -58,6 +58,7 @@ def run_checkpoint_with_hooks(
     suite_builder: Callable[[], ExpectationSuite] | None = None,
     client_id: str = "default",
     fail_threshold_pct: float | None = None,
+    source_type: str | None = None,
 ) -> HookedCheckpoint:
     """Run Pre-Val crew → GX checkpoint → (on failure) Post-Val crew → pause pipeline.
 
@@ -119,6 +120,7 @@ def run_checkpoint_with_hooks(
             client_id=client_id,
             suite_builder=suite_builder,
             fail_threshold_pct=threshold,
+            source_type=source_type,
         )
         control.record_checkpoint(
             run_id=run_id,
@@ -127,6 +129,8 @@ def run_checkpoint_with_hooks(
             row_count=checkpoint.row_count,
             fail_pct=checkpoint.fail_pct,
             status=checkpoint.status.value,
+            client_id=client_id,
+            source_type=source_type,
         )
     else:
         _log.info("hooks.gx.disabled")

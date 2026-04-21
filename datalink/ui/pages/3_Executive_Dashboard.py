@@ -164,10 +164,8 @@ def _render_kpis() -> None:
     clients_count_df = _try_query("SELECT COUNT(DISTINCT client_id) AS n FROM CONTROL.dq_suites")
     total_clients = int(clients_count_df["n"].iloc[0]) if not clients_count_df.empty else 0
 
-    # Count distinct run_ids across BOTH orchestration paths:
-    #   - pipeline_task_progress (local_sequential runner, Phase 6.3)
-    #   - pipeline_checkpoints   (Airflow + local_sequential, Phase 5+)
-    # UNION so the KPI is correct regardless of which orchestrator fired the run.
+    # Phase 6: every KPI honors the sidebar client filter now that
+    # client_id is persisted on pipeline_checkpoints + gx_validation_results.
     runs_df = _try_query(
         f"""
         SELECT COUNT(DISTINCT run_id) AS n FROM (
@@ -176,8 +174,10 @@ def _render_kpis() -> None:
           UNION ALL
           SELECT run_id FROM CONTROL.pipeline_checkpoints
             WHERE completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+            {client_filter_sql}
         )
-        """
+        """,
+        client_params,
     )
     total_runs = int(runs_df["n"].iloc[0]) if not runs_df.empty else 0
 
@@ -188,7 +188,9 @@ def _render_kpis() -> None:
           SUM(CASE WHEN success THEN 1 ELSE 0 END) AS n_pass
         FROM CONTROL.gx_validation_results
         WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
-        """
+          {client_filter_sql}
+        """,
+        client_params,
     )
     if not dq_df.empty and dq_df["n_all"].iloc[0]:
         dq_pass_pct = 100.0 * float(dq_df["n_pass"].iloc[0]) / float(dq_df["n_all"].iloc[0])
@@ -200,7 +202,9 @@ def _render_kpis() -> None:
         SELECT COALESCE(SUM(row_count), 0) AS rows_total
         FROM CONTROL.pipeline_checkpoints
         WHERE completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
-        """
+          {client_filter_sql}
+        """,
+        client_params,
     )
     rows_total = int(rows_df["rows_total"].iloc[0]) if not rows_df.empty else 0
 
@@ -227,22 +231,21 @@ st.markdown("---")
 col_left, col_right = st.columns(2)
 
 with col_left:
-    st.subheader("Rows processed per pipeline / checkpoint")
-    # pipeline_checkpoints.pipeline_id is the PIPELINE name
-    # (bronze_ingest / silver_transform / gold_um_push). Per-client row
-    # counts require a schema change (add client_id to pipeline_checkpoints)
-    # — deferred to Phase 7. For now show per-checkpoint breakdown which
-    # is still the most-requested exec-level view.
+    st.subheader("Rows processed per checkpoint")
+    # Phase 6: pipeline_checkpoints now has client_id + source_type so the
+    # sidebar filter genuinely narrows results. Shows per-checkpoint row
+    # counts scoped to the selected client (or <all>).
     rpc_sql = f"""
         SELECT checkpoint_name,
                SUM(row_count) AS rows_total
         FROM CONTROL.pipeline_checkpoints
         WHERE completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+          {client_filter_sql}
         GROUP BY checkpoint_name
         ORDER BY rows_total DESC
         LIMIT 20
     """
-    rpc_df = _try_query(rpc_sql)
+    rpc_df = _try_query(rpc_sql, client_params)
     if rpc_df.empty:
         st.markdown(
             '<div class="empty-state">No rows processed yet in this window.<br>'
@@ -263,20 +266,21 @@ with col_left:
 
 with col_right:
     st.subheader("DQ pass rate by dimension")
+    # Phase 6: gx_validation_results.dq_dimension is populated at write time
+    # by checkpoint._record_results using datalink.quality.dimensions.
+    # No more JSON extraction — direct column read.
     dim_sql = f"""
         SELECT
-          COALESCE(NULLIF(TRIM(json_extract_string(meta, '$.dq_dimension')), ''),
-                   'Unclassified') AS dimension,
+          COALESCE(NULLIF(TRIM(dq_dimension), ''), 'Unclassified') AS dimension,
           COUNT(*) AS n_all,
           SUM(CASE WHEN success THEN 1 ELSE 0 END) AS n_pass
-        FROM (
-          SELECT CAST(details AS JSON) AS meta, success
-          FROM CONTROL.gx_validation_results
-          WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
-        )
+        FROM CONTROL.gx_validation_results
+        WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+          {client_filter_sql}
         GROUP BY dimension
+        ORDER BY n_all DESC
     """
-    dim_df = _try_query(dim_sql)
+    dim_df = _try_query(dim_sql, client_params)
     if dim_df.empty or dim_df["n_all"].sum() == 0:
         st.markdown(
             '<div class="empty-state">No GX validations in window.<br>'
@@ -308,13 +312,14 @@ with col_a:
     fail_sql = f"""
         SELECT checkpoint_name, COUNT(*) AS fails
         FROM CONTROL.pipeline_checkpoints
-        WHERE status = 'BREACH'
+        WHERE status IN ('BREACH', 'BREACHED', 'FAILED')
           AND completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+          {client_filter_sql}
         GROUP BY checkpoint_name
         ORDER BY fails DESC
         LIMIT 10
     """
-    fail_df = _try_query(fail_sql)
+    fail_df = _try_query(fail_sql, client_params)
     if fail_df.empty:
         st.markdown(
             '<div class="empty-state">Zero BREACH events — pipelines are all green.</div>',
@@ -342,9 +347,10 @@ with col_b:
         WITH all_runs AS (
           SELECT completed_at,
                  CASE WHEN status IN ('PASSED','SUCCESS') THEN 1 ELSE 0 END AS ok,
-                 CASE WHEN status IN ('BREACH','FAILED')  THEN 1 ELSE 0 END AS bad
+                 CASE WHEN status IN ('BREACH','BREACHED','FAILED') THEN 1 ELSE 0 END AS bad
             FROM CONTROL.pipeline_checkpoints
            WHERE completed_at >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+             {client_filter_sql}
           UNION ALL
           SELECT completed_at,
                  CASE WHEN status = 'SUCCESS' THEN 1 ELSE 0 END AS ok,
@@ -359,7 +365,7 @@ with col_b:
          GROUP BY d
          ORDER BY d
     """
-    runs_df = _try_query(runs_sql)
+    runs_df = _try_query(runs_sql, client_params)
     if runs_df.empty:
         st.markdown(
             '<div class="empty-state">No run history in this window.</div>',

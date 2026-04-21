@@ -46,6 +46,20 @@ SOURCE_MEMBERSHIP = "MEMBERSHIP"
 SOURCE_PROVIDER = "PROVIDER"
 ALL_SOURCES = (SOURCE_CLAIMS, SOURCE_MEMBERSHIP, SOURCE_PROVIDER)
 
+# Phase 6 production clients - the 6 real payer tenants Jatin flagged.
+# Seeding these on first boot means the Control Tower client-dropdown
+# is populated out of the box (no manual onboarding step for demo). Each
+# client gets the full 9 per-source + 3 legacy baseline suite set = 12
+# suites per client * 6 clients = 72 tenant suites + 12 for 'default' = 84 total.
+REAL_CLIENTS: tuple[str, ...] = (
+    "aetna",
+    "caresource",
+    "affinity",
+    "coaccess",
+    "dhmp",
+    "hcsc",
+)
+
 
 # ============================================================================
 # BRONZE baselines — structural checks on RAW_<SOURCE> tables.
@@ -394,3 +408,22 @@ SILVER_CLINICAL_BASELINE = SILVER_CLAIMS_BASELINE
 GOLD_BUSINESS_BASELINE = GOLD_CLAIMS_BASELINE
 
 BASELINES = LEGACY_BASELINES  # historical name
+
+
+# ----------------------------------------------------------------------------
+# Phase 6: seed every real client on first boot so dashboards + client
+# dropdowns show a populated tenant list.
+# ----------------------------------------------------------------------------
+
+
+def seed_all_real_clients(warehouse: Warehouse) -> dict[str, int]:
+    """Seed the 6 production payer tenants with baseline suites.
+
+    Idempotent — each client gets its 12 suites on first call, 0 on
+    subsequent calls. Returns map of client_id -> suites_seeded.
+    """
+    result: dict[str, int] = {DEFAULT_CLIENT: seed_baselines(warehouse, DEFAULT_CLIENT)}
+    for client in REAL_CLIENTS:
+        result[client] = seed_baselines(warehouse, client)
+    _log.info("dq_suite.all_real_clients_seeded", result=result)
+    return result

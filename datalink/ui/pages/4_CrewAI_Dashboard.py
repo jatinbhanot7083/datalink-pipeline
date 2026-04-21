@@ -233,30 +233,56 @@ with col_left:
         st.plotly_chart(fig, use_container_width=True)
 
 with col_right:
-    st.subheader("Token spend by agent")
+    # Smart header: show tokens if any were spent, else fall back to
+    # total duration (ms) so the chart is always informative regardless
+    # of whether the StubLlm (0 tokens) or AnthropicLlm is active.
     tok_df = _try_query(
         f"""
-        SELECT agent_name, COALESCE(SUM(tokens_used), 0) AS tokens
+        SELECT agent_name,
+               COALESCE(SUM(tokens_used), 0) AS tokens,
+               COALESCE(SUM(duration_ms), 0) AS duration_ms,
+               COUNT(*) AS invocations
         FROM CONTROL.agent_reasoning_log
         WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
           {crew_filter}
-          AND tokens_used IS NOT NULL
         GROUP BY agent_name
-        ORDER BY tokens DESC
+        ORDER BY tokens DESC, duration_ms DESC
         """,
         crew_params,
     )
-    if tok_df.empty or tok_df["tokens"].sum() == 0:
+    total_tokens = int(tok_df["tokens"].sum()) if not tok_df.empty else 0
+
+    if tok_df.empty:
+        st.subheader("Token spend by agent")
         st.markdown(
-            '<div class="empty-state">No token spend tracked yet.<br>'
-            "Enable the anthropic LLM adapter to see live cost.</div>",
+            '<div class="empty-state">No agent invocations yet.</div>',
             unsafe_allow_html=True,
         )
+    elif total_tokens > 0:
+        st.subheader("Token spend by agent")
+        fig = px.pie(
+            tok_df[tok_df["tokens"] > 0],
+            names="agent_name",
+            values="tokens",
+            color_discrete_sequence=_AI_PALETTE,
+            hole=0.5,
+        )
+        fig.update_traces(textinfo="label+percent")
+        fig.update_layout(height=400, margin=dict(t=10, b=10))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption(f"Total tokens: {total_tokens:,}")
     else:
+        # Stub LLM path — show duration instead of tokens so the chart
+        # still lights up and operators can see cost-proxy data.
+        st.subheader("Compute by agent (ms)")
+        st.caption(
+            "StubLlm in use (0 tokens). Showing total duration per agent as a "
+            "cost proxy. Switch to Anthropic adapter to see live token spend."
+        )
         fig = px.pie(
             tok_df,
             names="agent_name",
-            values="tokens",
+            values="duration_ms",
             color_discrete_sequence=_AI_PALETTE,
             hole=0.5,
         )

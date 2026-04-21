@@ -269,6 +269,7 @@ def run_checkpoint(
     suite_builder: Callable[[], ExpectationSuite] | None = None,
     fail_threshold_pct: float = 5.0,
     record_results: bool = True,
+    source_type: str | None = None,
 ) -> CheckpointResult:
     """Load the table into a pandas DataFrame, evaluate the suite, record results.
 
@@ -359,7 +360,14 @@ def run_checkpoint(
         status = CheckpointStatus.FAILED
 
     if record_results:
-        _record_results(warehouse, checkpoint_name, run_id, results)
+        _record_results(
+            warehouse,
+            checkpoint_name,
+            run_id,
+            results,
+            client_id=client_id,
+            source_type=source_type,
+        )
 
     cr = CheckpointResult(
         checkpoint_name=checkpoint_name,
@@ -390,18 +398,31 @@ def _record_results(
     checkpoint_name: str,
     run_id: str,
     results: list[ExpectationResult],
+    client_id: str | None = None,
+    source_type: str | None = None,
 ) -> None:
-    """Persist per-expectation detail to CONTROL.gx_validation_results."""
+    """Persist per-expectation detail to CONTROL.gx_validation_results.
+
+    Phase 6: each row is tagged with client_id + source_type + dq_dimension
+    so the DQ Dashboard can slice without re-parsing expectation meta at
+    query time. Dimension is computed via datalink.quality.dimensions.
+    """
+    from datalink.quality.dimensions import dimension_for
+
     for r in results:
         warehouse.execute(
             f"INSERT INTO {CONTROL_SCHEMA}.gx_validation_results "
-            "(validation_id, run_id, checkpoint_name, expectation, column_name, "
+            "(validation_id, run_id, checkpoint_name, client_id, source_type, "
+            " dq_dimension, expectation, column_name, "
             " success, unexpected_count, unexpected_pct, details, ts) "
-            "VALUES ($v, $r, $c, $e, $col, $s, $uc, $up, $d, $t)",
+            "VALUES ($v, $r, $c, $ci, $src, $dim, $e, $col, $s, $uc, $up, $d, $t)",
             {
                 "v": str(uuid.uuid4()),
                 "r": run_id,
                 "c": checkpoint_name,
+                "ci": client_id,
+                "src": source_type,
+                "dim": dimension_for(r.expectation_type),
                 "e": r.expectation_type,
                 "col": r.column,
                 "s": r.success,

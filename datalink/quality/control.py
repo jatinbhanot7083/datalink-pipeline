@@ -99,12 +99,17 @@ _DDL = [
         updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
-    # Checkpoint markers (one row per pipeline run x checkpoint)
+    # Checkpoint markers (one row per pipeline run x checkpoint).
+    # Phase 6: client_id + source_type added so dashboards can slice by tenant
+    # and by CLAIMS/MEMBERSHIP/PROVIDER. Both nullable for Phase-5.x back-compat;
+    # forward-migration ALTER TABLE below fills them for existing DBs.
     f"""
     CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.pipeline_checkpoints (
         run_id          VARCHAR,
         pipeline_id     VARCHAR,
         checkpoint_name VARCHAR,
+        client_id       VARCHAR,
+        source_type     VARCHAR,
         completed_at    TIMESTAMP,
         row_count       INTEGER,
         fail_pct        DECIMAL(5,2),
@@ -145,12 +150,17 @@ _DDL = [
         severity        VARCHAR
     )
     """,
-    # Per-expectation detail from GX checkpoints (Phase 5)
+    # Per-expectation detail from GX checkpoints (Phase 5).
+    # Phase 6: client_id + source_type + dq_dimension added so the dedicated
+    # DQ Dashboard can filter by tenant and show per-dimension pass rates.
     f"""
     CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.gx_validation_results (
         validation_id   VARCHAR PRIMARY KEY,
         run_id          VARCHAR,
         checkpoint_name VARCHAR,
+        client_id       VARCHAR,
+        source_type     VARCHAR,
+        dq_dimension    VARCHAR,
         expectation     VARCHAR,
         column_name     VARCHAR,
         success         BOOLEAN,
@@ -244,15 +254,24 @@ def create_control_tables(warehouse: Warehouse) -> None:
         helper(CONTROL_SCHEMA)
     for stmt in _DDL:
         warehouse.execute(stmt)
-    # Forward-migration: Phase 6 adds `source_type` to dq_suites. On DBs that
-    # were created by Phase 5.8 the column is missing; try to add it, ignore
-    # the "already exists" error so the function stays idempotent.
-    try:
-        warehouse.execute(f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN source_type VARCHAR")
-    except Exception as exc:
-        msg = str(exc).lower()
-        if "already exists" not in msg and "duplicate column" not in msg:
-            raise
+    # Forward-migrations: Phase 6 adds columns to three tables. DuckDB has
+    # no IF NOT EXISTS for ADD COLUMN, so wrap each in try/except that
+    # swallows only the "already exists" error.
+    _migrations = [
+        f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN source_type VARCHAR",
+        f"ALTER TABLE {CONTROL_SCHEMA}.pipeline_checkpoints ADD COLUMN client_id VARCHAR",
+        f"ALTER TABLE {CONTROL_SCHEMA}.pipeline_checkpoints ADD COLUMN source_type VARCHAR",
+        f"ALTER TABLE {CONTROL_SCHEMA}.gx_validation_results ADD COLUMN client_id VARCHAR",
+        f"ALTER TABLE {CONTROL_SCHEMA}.gx_validation_results ADD COLUMN source_type VARCHAR",
+        f"ALTER TABLE {CONTROL_SCHEMA}.gx_validation_results ADD COLUMN dq_dimension VARCHAR",
+    ]
+    for stmt in _migrations:
+        try:
+            warehouse.execute(stmt)
+        except Exception as exc:
+            msg = str(exc).lower()
+            if "already exists" not in msg and "duplicate column" not in msg:
+                raise
 
 
 class PipelineControl:
@@ -354,15 +373,26 @@ class PipelineControl:
         row_count: int,
         fail_pct: float,
         status: str,
+        client_id: str | None = None,
+        source_type: str | None = None,
     ) -> None:
+        """Persist a checkpoint completion marker.
+
+        Phase 6: `client_id` + `source_type` capture tenant and CLAIMS/
+        MEMBERSHIP/PROVIDER so dashboards can slice per-(client, source).
+        Both optional for Phase-5.x back-compat.
+        """
         self._wh.execute(
             f"INSERT OR REPLACE INTO {CONTROL_SCHEMA}.pipeline_checkpoints "
-            "(run_id, pipeline_id, checkpoint_name, completed_at, row_count, fail_pct, status) "
-            "VALUES ($r, $p, $c, $t, $rc, $fp, $s)",
+            "(run_id, pipeline_id, checkpoint_name, client_id, source_type, "
+            " completed_at, row_count, fail_pct, status) "
+            "VALUES ($r, $p, $c, $ci, $src, $t, $rc, $fp, $s)",
             {
                 "r": run_id,
                 "p": pipeline_id,
                 "c": checkpoint_name,
+                "ci": client_id,
+                "src": source_type,
                 "t": datetime.now(UTC),
                 "rc": row_count,
                 "fp": fail_pct,

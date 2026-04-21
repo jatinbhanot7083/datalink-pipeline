@@ -88,6 +88,18 @@ def ensure_warehouse_exists(path: str) -> None:
                         self._c.execute(f"CREATE SCHEMA IF NOT EXISTS {schema}")
 
                 create_control_tables(_Shim(conn))  # type: ignore[arg-type]
+                # Phase 6: seed all 7 clients (default + 6 real payer
+                # tenants) on first boot so dashboards and the client
+                # dropdown are populated out of the box. Idempotent —
+                # returns 0-per-client on subsequent boots.
+                try:
+                    from datalink.quality.baseline_seeder import seed_all_real_clients
+
+                    seed_all_real_clients(_Shim(conn))  # type: ignore[arg-type]
+                except Exception:
+                    # Seeder failure shouldn't crash bootstrap. Dashboards
+                    # still render; operator can trigger seeding later.
+                    pass
             except Exception:
                 # datalink isn't importable (e.g. entrypoint.sh pre-install).
                 # Fall back to a minimal CREATE SCHEMA so read-only opens succeed.
