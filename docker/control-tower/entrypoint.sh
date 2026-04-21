@@ -3,9 +3,21 @@
 # abort the whole entrypoint. Each step handles its own failure.
 
 # Install datalink editable from the bind-mount so code edits are live.
-echo "[entrypoint] installing datalink (editable)..."
+# hatchling pre-installed in the image so this step doesn't fetch anything.
+# Timeout cap at 60s — if it hangs longer than that something is
+# genuinely broken and we'd rather fail visibly than wait forever.
+echo "[entrypoint] installing datalink (editable, max 60s)..."
 if [ -f /opt/datalink/pyproject.toml ]; then
-    pip install --no-deps -e /opt/datalink || echo "[entrypoint] WARN: pip install failed, datalink imports may fail"
+    timeout 60 pip install --no-deps --no-build-isolation -e /opt/datalink 2>&1 \
+        | sed 's/^/[entrypoint pip] /'
+    rc=${PIPESTATUS[0]}
+    if [ "$rc" -eq 0 ]; then
+        echo "[entrypoint] datalink editable install OK"
+    elif [ "$rc" -eq 124 ]; then
+        echo "[entrypoint] ERROR: pip install timed out after 60s"
+    else
+        echo "[entrypoint] WARN: pip install exit $rc — datalink imports may fail"
+    fi
 else
     echo "[entrypoint] ERROR: /opt/datalink/pyproject.toml not found — bind mount broken?"
 fi

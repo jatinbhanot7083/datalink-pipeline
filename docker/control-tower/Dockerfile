@@ -33,6 +33,9 @@ RUN apt-get update \
 # Python deps for the Control Tower. datalink is bind-mounted + installed
 # editable at container start via the entrypoint.
 # Phase 6: plotly added for Executive + CrewAI dashboard charts.
+# Also pre-install `hatchling` so the entrypoint's `pip install -e` for
+# the bind-mounted datalink package doesn't have to fetch the build
+# backend over the network at container start (which hung the bootstrap).
 RUN pip install \
     "streamlit>=1.40,<2.0" \
     "streamlit-extras>=0.5,<1.0" \
@@ -48,7 +51,8 @@ RUN pip install \
     "pyyaml>=6.0,<7.0" \
     "structlog>=24.1,<25.0" \
     "click>=8.1,<9.0" \
-    "python-dotenv>=1.0,<2.0"
+    "python-dotenv>=1.0,<2.0" \
+    "hatchling>=1.24,<2.0"
 
 WORKDIR /opt/datalink
 
