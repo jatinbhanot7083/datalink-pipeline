@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from typing import Any
 
 import duckdb
@@ -88,18 +89,24 @@ class _DuckAdapter:
             self._conn.execute(sql)
 
 
-def _registry_read() -> SuiteRegistry:
-    """Read-only registry handle. DuckDB is single-writer across processes,
-    so reads need read_only=True while Airflow has the write lock."""
-    conn = duckdb.connect(WAREHOUSE_PATH, read_only=True)
-    return SuiteRegistry(_DuckAdapter(conn))  # type: ignore[arg-type]
+from collections.abc import Iterator  # noqa: E402
 
 
-def _registry_write() -> SuiteRegistry:
-    """Writer handle — briefly acquires the file lock. Never call from a
-    Streamlit callback that might take > 1 second; the scheduler starves."""
-    conn = duckdb.connect(WAREHOUSE_PATH, read_only=False)
-    return SuiteRegistry(_DuckAdapter(conn))  # type: ignore[arg-type]
+@contextmanager
+def _registry(*, readonly: bool = True) -> Iterator[SuiteRegistry]:
+    """Yield a fresh SuiteRegistry bound to a short-lived DuckDB connection.
+
+    DuckDB disallows multiple connections to the same file from the same
+    process when they differ in read-only vs read-write mode — Streamlit
+    scripts re-execute top-to-bottom and would otherwise leak a read-only
+    handle that blocks the writer. Context-manager pattern guarantees we
+    close every handle before the next request can open one.
+    """
+    conn = duckdb.connect(WAREHOUSE_PATH, read_only=readonly)
+    try:
+        yield SuiteRegistry(_DuckAdapter(conn))  # type: ignore[arg-type]
+    finally:
+        conn.close()
 
 
 def _df_to_expectations(df: pd.DataFrame) -> list[dict[str, Any]]:
@@ -156,8 +163,8 @@ st.markdown(
 # ----------------------------------------------------------------------------
 
 try:
-    reg_r = _registry_read()
-    clients = reg_r.list_clients()
+    with _registry(readonly=True) as reg:
+        clients = reg.list_clients()
 except Exception as e:
     st.error(f"Can't reach the warehouse: {e}. Is `docker compose ps` showing everything healthy?")
     st.stop()
@@ -186,8 +193,11 @@ with col_client:
     else:
         client_id = st.selectbox("Client", options=clients, index=0)
 
+# Fetch suite-names + versions in a single short-lived read connection.
+with _registry(readonly=True) as reg:
+    suite_names = reg.list_suite_names(client_id) or reg.list_suite_names("default")
+
 with col_suite:
-    suite_names = reg_r.list_suite_names(client_id) or reg_r.list_suite_names("default")
     if not suite_names:
         st.error("No suites exist for this client. Contact your admin.")
         st.stop()
@@ -208,36 +218,36 @@ with col_new:
 # VERSION HISTORY
 # ----------------------------------------------------------------------------
 
-versions = reg_r.list_versions(client_id, suite_name)
-
-if not versions:
-    # Client has no versions yet — fallback to default.
-    st.info(
-        f"`{client_id}` has no suites for `{suite_name}` yet. "
-        f"Falling back to `default`'s LIVE until you author one here."
-    )
-    default_versions = reg_r.list_versions("default", suite_name)
-    versions = default_versions
+with _registry(readonly=True) as reg:
+    versions = reg.list_versions(client_id, suite_name)
+    if not versions:
+        st.info(
+            f"`{client_id}` has no suites for `{suite_name}` yet. "
+            f"Falling back to `default`'s LIVE until you author one here."
+        )
+        versions = reg.list_versions("default", suite_name)
 
 live = next((v for v in versions if v.status is SuiteStatus.LIVE), None)
 latest_draft = next(
     (v for v in versions if v.status is SuiteStatus.DRAFT and v.client_id == client_id), None
 )
 
-# Handle the clone action
+# Handle the clone action — open a fresh WRITE connection ONLY for the clone.
+# Every prior read handle is already closed by the `with _registry(...)` blocks
+# above, so DuckDB's "same config" constraint is satisfied.
 if clone_from_live and live:
     with st.spinner("Cloning..."):
         try:
-            reg_w = _registry_write()
-            draft = SuiteDraft(
-                client_id=client_id,
-                suite_name=suite_name,
-                expectations=[dict(e) for e in live.expectations],
-                dq_dimensions=list(live.dq_dimensions),
-                created_by=st.session_state.get("user", "anonymous@local"),
-                source=SuiteSource.UI,
-            )
-            new_id = reg_w.create_draft(draft)
+            with _registry(readonly=False) as reg:
+                draft = SuiteDraft(
+                    client_id=client_id,
+                    suite_name=suite_name,
+                    expectations=[dict(e) for e in live.expectations],
+                    dq_dimensions=list(live.dq_dimensions),
+                    created_by=st.session_state.get("user", "anonymous@local"),
+                    source=SuiteSource.UI,
+                )
+                new_id = reg.create_draft(draft)
             st.success(
                 f"Cloned v{live.version} → new DRAFT (id={new_id[:8]}). Scroll down to edit."
             )
@@ -289,7 +299,11 @@ st.markdown("## Edit DRAFT")
 
 # Pick or create the active draft
 active_id = st.session_state.get("active_draft_id")
-active = reg_r.get_by_id(active_id) if active_id else latest_draft
+if active_id:
+    with _registry(readonly=True) as reg:
+        active = reg.get_by_id(active_id)
+else:
+    active = latest_draft
 
 if active is None:
     st.info(
@@ -395,8 +409,8 @@ else:
                             if e.get("meta", {}).get("dq_dimension")
                         }
                     )
-                    reg_w = _registry_write()
-                    reg_w.update_draft(active.suite_id, new_exps, list(dims), actor=actor)
+                    with _registry(readonly=False) as reg:
+                        reg.update_draft(active.suite_id, new_exps, list(dims), actor=actor)
                     st.success(f"Saved — {len(new_exps)} expectations.")
                     st.rerun()
                 except Exception as e:
@@ -413,9 +427,9 @@ else:
                             if e.get("meta", {}).get("dq_dimension")
                         }
                     )
-                    reg_w = _registry_write()
-                    reg_w.update_draft(active.suite_id, new_exps, list(dims), actor=actor)
-                    reg_w.submit_for_review(active.suite_id, actor=actor)
+                    with _registry(readonly=False) as reg:
+                        reg.update_draft(active.suite_id, new_exps, list(dims), actor=actor)
+                        reg.submit_for_review(active.suite_id, actor=actor)
                     st.success(
                         f"Submitted for review. A reviewer will pick it up at "
                         f"[DQ Review](/DQ_Review). Draft id: `{active.suite_id[:8]}`."

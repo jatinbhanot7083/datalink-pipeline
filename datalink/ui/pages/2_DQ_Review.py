@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+from contextlib import contextmanager
 from typing import Any
 
 import duckdb
@@ -79,14 +80,19 @@ class _DuckAdapter:
             self._conn.execute(sql)
 
 
-def _registry_read() -> SuiteRegistry:
-    conn = duckdb.connect(WAREHOUSE_PATH, read_only=True)
-    return SuiteRegistry(_DuckAdapter(conn))  # type: ignore[arg-type]
+from collections.abc import Iterator  # noqa: E402
 
 
-def _registry_write() -> SuiteRegistry:
-    conn = duckdb.connect(WAREHOUSE_PATH, read_only=False)
-    return SuiteRegistry(_DuckAdapter(conn))  # type: ignore[arg-type]
+@contextmanager
+def _registry(*, readonly: bool = True) -> Iterator[SuiteRegistry]:
+    """Open + close a fresh SuiteRegistry connection per operation. DuckDB
+    disallows mixed read-only / read-write handles to the same file within
+    one process; this pattern guarantees no handle outlives its use."""
+    conn = duckdb.connect(WAREHOUSE_PATH, read_only=readonly)
+    try:
+        yield SuiteRegistry(_DuckAdapter(conn))  # type: ignore[arg-type]
+    finally:
+        conn.close()
 
 
 # ============================================================================
@@ -145,11 +151,13 @@ def _exp_row(e: dict[str, Any]) -> str:
 # ============================================================================
 
 
-def _render_review_panel(reg_r: SuiteRegistry, selected: SuiteVersion) -> None:
+def _render_review_panel(selected: SuiteVersion) -> None:
     """The bottom half of the page — diff + action buttons for the picked suite."""
     st.markdown(f"## Review: `{selected.client_id}` / `{selected.suite_name}` v{selected.version}")
 
-    live = reg_r.get_live(selected.client_id, selected.suite_name)
+    # Open a fresh read connection just for this panel's reads.
+    with _registry(readonly=True) as reg:
+        live = reg.get_live(selected.client_id, selected.suite_name)
     live_exps = live.expectations if live else []
 
     diff = _diff_suites(live_exps, selected.expectations)
@@ -211,9 +219,9 @@ def _render_review_panel(reg_r: SuiteRegistry, selected: SuiteVersion) -> None:
             key=f"approve_{selected.suite_id}",
         ):
             try:
-                reg_w = _registry_write()
-                reg_w.approve(selected.suite_id, actor=actor, notes=notes)
-                reg_w.activate(selected.suite_id, actor=actor)
+                with _registry(readonly=False) as reg:
+                    reg.approve(selected.suite_id, actor=actor, notes=notes)
+                    reg.activate(selected.suite_id, actor=actor)
                 st.success(
                     f"Activated v{selected.version} as LIVE for "
                     f"`{selected.client_id}`/`{selected.suite_name}`. "
@@ -232,8 +240,8 @@ def _render_review_panel(reg_r: SuiteRegistry, selected: SuiteVersion) -> None:
                 st.error("Please leave review notes explaining what to change.")
             else:
                 try:
-                    reg_w = _registry_write()
-                    reg_w.request_changes(selected.suite_id, actor=actor, notes=notes)
+                    with _registry(readonly=False) as reg:
+                        reg.request_changes(selected.suite_id, actor=actor, notes=notes)
                     st.success("Sent back to DRAFT for author revisions.")
                     st.rerun()
                 except Exception as e:
@@ -246,8 +254,8 @@ def _render_review_panel(reg_r: SuiteRegistry, selected: SuiteVersion) -> None:
                 st.error("Please leave review notes explaining the rejection.")
             else:
                 try:
-                    reg_w = _registry_write()
-                    reg_w.reject(selected.suite_id, actor=actor, notes=notes)
+                    with _registry(readonly=False) as reg:
+                        reg.reject(selected.suite_id, actor=actor, notes=notes)
                     st.success("Rejected. A new draft will need to be started from scratch.")
                     st.rerun()
                 except Exception as e:
@@ -295,8 +303,8 @@ st.markdown(
 )
 
 try:
-    reg_r = _registry_read()
-    queue = reg_r.list_pending_reviews()
+    with _registry(readonly=True) as reg:
+        queue = reg.list_pending_reviews()
 except Exception as e:
     st.error(f"Can't reach the warehouse: {e}")
     st.stop()
@@ -338,4 +346,4 @@ else:
     selected = next((v for v in queue if v.suite_id.startswith(selected_id)), None)
 
     if selected is not None:
-        _render_review_panel(reg_r, selected)
+        _render_review_panel(selected)

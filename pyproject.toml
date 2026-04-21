@@ -172,9 +172,10 @@ ignore_missing_imports = true
 
 # GX 1.x's great_expectations.expectations namespace does not re-export its
 # concrete classes via __all__. Our suites import them directly (they work at
-# runtime) — disable the attr-defined error specifically for the suite modules.
+# runtime) — disable the attr-defined error specifically for the suite modules
+# and for checkpoint.py which imports UpdateDataDocsAction for Data Docs.
 [[tool.mypy.overrides]]
-module = ["datalink.quality.suites.*"]
+module = ["datalink.quality.suites.*", "datalink.quality.checkpoint"]
 disable_error_code = ["attr-defined"]
 
 # ------------------------------------------------------------
