@@ -219,20 +219,27 @@ def step_airflow_contracts(result: SmokeResult) -> None:
         err,
     )
 
-    # Regression guard: airflow must be able to mkdir under data/generated.
-    # Raised PermissionError in Phase 6 because the host bind-mount dir
-    # was owned by uid 1000 (dev user) with restrictive perms.
-    rc, _, err = _dc_python(
-        "airflow_scheduler",
-        "from pathlib import Path; "
-        "p = Path('/opt/datalink/data/generated/_smoke_probe'); "
-        "p.mkdir(parents=True, exist_ok=True); p.rmdir()",
-    )
-    result.check(
-        "airflow can mkdir under /opt/datalink/data/generated (uid 50000 write perm)",
-        rc == 0,
-        err,
-    )
+    # Regression guards: airflow must be able to mkdir under every
+    # bind-mount dir it writes to. Each failure here is a real Phase 6 bug:
+    #   data/generated -> PermissionError in task_bronze_ingest generator
+    #   dbt/logs       -> silent dbt exit 2 (dbt swallows startup errors)
+    #   dbt/target     -> dbt run fails writing compiled SQL + manifest
+    for writable_path in (
+        "/opt/datalink/data/generated",
+        "/opt/datalink/dbt/logs",
+        "/opt/datalink/dbt/target",
+    ):
+        rc, _, err = _dc_python(
+            "airflow_scheduler",
+            "from pathlib import Path; "
+            f"p = Path('{writable_path}') / '_smoke_probe'; "
+            "p.mkdir(parents=True, exist_ok=True); p.rmdir()",
+        )
+        result.check(
+            f"airflow can mkdir under {writable_path}",
+            rc == 0,
+            err,
+        )
 
 
 def step_seeded_baselines(result: SmokeResult) -> None:

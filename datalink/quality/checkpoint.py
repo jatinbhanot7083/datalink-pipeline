@@ -286,7 +286,9 @@ def _json_to_suite(
                 expectation_type=exp_type,
                 error=str(e),
             )
-    return suite
+    from typing import cast
+
+    return cast(ExpectationSuite, suite)
 
 
 def run_checkpoint(

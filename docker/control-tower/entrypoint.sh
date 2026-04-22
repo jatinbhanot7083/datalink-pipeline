@@ -11,14 +11,24 @@ echo "[entrypoint] verifying datalink is importable..."
 python -c "import datalink, sys; print('[entrypoint] datalink OK, from', datalink.__file__)" \
     || echo "[entrypoint] ERROR: datalink NOT importable — bind mount broken?"
 
-# Phase 6 fix: pre-create data/generated/ with 0o777 so the Airflow
-# worker (uid 50000, different from control-tower's root uid 0) can
-# create per-client subdirs when task_bronze_ingest generates the
-# synthetic CSVs. Without this, airflow hits:
-#     PermissionError: [Errno 13] Permission denied: '/opt/datalink/data/generated'
-echo "[entrypoint] ensuring /opt/datalink/data/generated is world-writable..."
-mkdir -p /opt/datalink/data/generated && chmod 0777 /opt/datalink/data/generated \
-    || echo "[entrypoint] WARN: could not chmod data/generated — airflow writes may fail"
+# Phase 6 fix: pre-create every dir Airflow (uid 50000) needs to write
+# into BUT which lives on the host bind-mount (owned by the dev user, uid
+# 1000 in dev, whatever in prod). Without chmod 0o777 here Airflow hits:
+#     PermissionError: [Errno 13] Permission denied: '/opt/datalink/<dir>'
+# for each write. control_tower runs as root so it can chmod the bind-mount
+# host-side, which persists across container restarts (but NOT across
+# `docker compose down -v` + host rm — the host rm wipes the perms).
+echo "[entrypoint] ensuring host bind-mount dirs are writable by airflow..."
+for dir in \
+    /opt/datalink/data/generated \
+    /opt/datalink/dbt \
+    /opt/datalink/dbt/logs \
+    /opt/datalink/dbt/target \
+    /opt/datalink/gx/uncommitted; do
+    mkdir -p "$dir" && chmod 0777 "$dir" \
+        && echo "[entrypoint]   OK $dir (0o777)" \
+        || echo "[entrypoint]   WARN could not chmod $dir"
+done
 
 # Optional editable install, skipped if it hangs or errors. Pages work
 # without it thanks to PYTHONPATH.

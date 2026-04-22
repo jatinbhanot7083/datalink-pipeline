@@ -210,16 +210,33 @@ class TestAirflowContract:
         because airflow (uid 50000) couldn't create the per-client subdir.
         control_tower entrypoint must pre-create /opt/datalink/data/generated
         with 0o777 so airflow can mkdir client subdirs inside it."""
+        self._assert_airflow_can_write("/opt/datalink/data/generated")
+
+    def test_airflow_can_write_dbt_logs(self) -> None:
+        """Regression: dbt run --select silver exited 2 with EMPTY stdout/stderr
+        because dbt couldn't create /opt/datalink/dbt/logs/dbt.log
+        (host bind-mount dir not writable by airflow uid 50000).
+        Entrypoint must chmod 0777 the whole dbt/ tree."""
+        self._assert_airflow_can_write("/opt/datalink/dbt/logs")
+
+    def test_airflow_can_write_dbt_target(self) -> None:
+        """dbt writes its compiled SQL + manifest.json to dbt/target/.
+        Same perm story as dbt/logs."""
+        self._assert_airflow_can_write("/opt/datalink/dbt/target")
+
+    @staticmethod
+    def _assert_airflow_can_write(path: str) -> None:
+        """Shared probe: try to create + remove a subdir as the airflow user."""
         rc, _, err = _python(
             "airflow_scheduler",
             "from pathlib import Path; "
-            "p = Path('/opt/datalink/data/generated/_contract_probe'); "
+            f"p = Path('{path}') / '_contract_probe'; "
             "p.mkdir(parents=True, exist_ok=True); "
             "p.rmdir()",
         )
         assert rc == 0, (
-            f"airflow cannot mkdir under /opt/datalink/data/generated:\n{err}\n"
-            f"Regression: control_tower entrypoint must chmod 0777 the dir."
+            f"airflow cannot mkdir under {path}:\n{err}\n"
+            f"Regression: control_tower entrypoint must chmod 0777 {path}."
         )
 
     def test_all_3_dags_parse_cleanly(self) -> None:
