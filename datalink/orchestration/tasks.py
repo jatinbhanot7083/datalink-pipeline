@@ -91,7 +91,7 @@ def task_bronze_ingest(ctx: TaskContext) -> dict[str, Any]:
 
     Data is generated ONCE per client (cached at data/generated/{client}/)
     using the deterministic-per-client generator in
-    scripts/generate_client_data.py. First run for a new client takes
+    datalink.data_gen.client_data. First run for a new client takes
     ~30-60 s to generate + ingest; subsequent runs reuse the cached CSVs.
 
     Uploaded files are renamed per-client with UTC timestamp so the
@@ -102,11 +102,11 @@ def task_bronze_ingest(ctx: TaskContext) -> dict[str, Any]:
     from datetime import UTC, datetime
 
     from datalink.adapters.sftp.atmoz import AtmozSftpSource
-    from datalink.pipeline.bronze import ingest_file
 
     # Import the generator lazily — keeps test-time imports fast, and
     # generator depends on numpy which is already in the Airflow image.
-    from scripts.generate_client_data import generate_for_client
+    from datalink.data_gen.client_data import generate_for_client
+    from datalink.pipeline.bronze import ingest_file
 
     repo_root = Path(__file__).resolve().parents[2]
     generated_dir = repo_root / "data" / "generated" / ctx.client_id

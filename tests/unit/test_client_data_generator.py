@@ -18,7 +18,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from scripts.generate_client_data import (
+from datalink.data_gen.client_data import (
     ALL_CLIENTS,
     generate_for_client,
 )

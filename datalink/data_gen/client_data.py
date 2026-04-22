@@ -24,12 +24,12 @@ Design
 Usage
 -----
 CLI:
-    python -m scripts.generate_client_data --client aetna
-    python -m scripts.generate_client_data --all --out data/generated
-    python -m scripts.generate_client_data --client aetna --claims 100000  # smaller for dev
+    python -m datalink.data_gen.client_data --client aetna
+    python -m datalink.data_gen.client_data --all --out data/generated
+    python -m datalink.data_gen.client_data --client aetna --claims 100000  # dev
 
 Library:
-    from scripts.generate_client_data import generate_for_client
+    from datalink.data_gen.client_data import generate_for_client
     paths = generate_for_client("aetna", Path("data/generated/aetna"))
 
 Output
