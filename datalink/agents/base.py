@@ -69,6 +69,10 @@ class AgentBase(ABC):
         payload: dict[str, Any] = {}
         success = False
         error: str | None = None
+        # Reset per-invocation token counter. _ask_llm accumulates into this
+        # so a single agent call that makes multiple LLM requests aggregates
+        # its full spend.
+        self._tokens_this_run = 0
         try:
             payload = self.execute(context)
             success = True
@@ -86,6 +90,7 @@ class AgentBase(ABC):
             context=context,
             payload=payload,
             duration_ms=duration_ms,
+            tokens_used=self._tokens_this_run,
             success=success,
             error=error,
         )
@@ -93,6 +98,7 @@ class AgentBase(ABC):
             agent_name=self.__class__.__name__,
             success=success,
             payload=payload,
+            tokens_used=self._tokens_this_run,
             duration_ms=duration_ms,
             error=error,
         )
@@ -103,7 +109,11 @@ class AgentBase(ABC):
         self, instruction: str, safe_payload: dict[str, Any], max_tokens: int = 1024
     ) -> str:
         """Send `instruction` + `safe_payload` to the LLM. Raises
-        PhiBoundaryViolationError if the payload tries to smuggle PHI."""
+        PhiBoundaryViolationError if the payload tries to smuggle PHI.
+
+        Phase 6: accumulates input_tokens + output_tokens on self._tokens_this_run
+        so AgentBase.run() can persist the total to agent_reasoning_log.tokens_used.
+        """
         self._phi.assert_clean(safe_payload)
         from datalink.adapters.protocols import LlmMessage
 
@@ -116,6 +126,8 @@ class AgentBase(ABC):
             ),
         ]
         completion = self._llm.complete(messages, max_tokens=max_tokens)
+        # Accumulate tokens — multiple _ask_llm calls in one execute() sum up.
+        self._tokens_this_run += int(completion.input_tokens) + int(completion.output_tokens)
         return completion.content
 
     # --- audit log --------------------------------------------------------
@@ -127,6 +139,7 @@ class AgentBase(ABC):
         context: dict[str, Any],
         payload: dict[str, Any],
         duration_ms: int,
+        tokens_used: int,
         success: bool,
         error: str | None,
     ) -> None:
@@ -149,7 +162,9 @@ class AgentBase(ABC):
                     "t": datetime.now(UTC),
                     "ip": input_preview,
                     "op": preview,
-                    "tk": 0,  # populated by concrete agents when they know token counts
+                    # Phase 6: real token count propagated from _ask_llm calls.
+                    # StubLlm: char/4 estimate. AnthropicLlm: real usage.
+                    "tk": int(tokens_used or 0),
                     "d": duration_ms,
                     "p": "clean" if success else f"error: {error}",
                 },
