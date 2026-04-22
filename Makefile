@@ -436,3 +436,25 @@ up-airflow: ## Create kind cluster + install Airflow via Helm (opt-in)
 .PHONY: down-airflow
 down-airflow: ## Delete the Airflow kind cluster
 	@command -v kind >/dev/null && kind delete cluster --name $(KIND_CLUSTER) || echo "kind not installed; nothing to do"
+
+# =============================================================================
+# Phase 6 smoke — THE regression safety net.
+# Catches the class of bug that passes unit tests but fails in containers.
+# =============================================================================
+
+.PHONY: verify-phase-6-containers
+verify-phase-6-containers: ## Phase 6 container-contract tests (requires stack running)
+	@echo '--- Phase 6 container contracts ---'
+	@.venv/bin/python -m pytest tests/integration/test_container_contracts.py -v -m integration
+
+.PHONY: smoke-phase-6
+smoke-phase-6: ## Phase 6 E2E smoke — assumes stack is already up
+	@.venv/bin/python scripts/smoke_phase_6.py --skip-pipeline
+
+.PHONY: smoke-phase-6-full
+smoke-phase-6-full: ## Phase 6 E2E smoke with bronze_ingest for aetna (5-10 min)
+	@.venv/bin/python scripts/smoke_phase_6.py --client aetna
+
+.PHONY: smoke-phase-6-reset
+smoke-phase-6-reset: ## Full nuke + rebuild + smoke — THE before-demo command
+	@.venv/bin/python scripts/smoke_phase_6.py --reset --client aetna
