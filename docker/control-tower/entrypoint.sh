@@ -11,6 +11,15 @@ echo "[entrypoint] verifying datalink is importable..."
 python -c "import datalink, sys; print('[entrypoint] datalink OK, from', datalink.__file__)" \
     || echo "[entrypoint] ERROR: datalink NOT importable — bind mount broken?"
 
+# Phase 6 fix: pre-create data/generated/ with 0o777 so the Airflow
+# worker (uid 50000, different from control-tower's root uid 0) can
+# create per-client subdirs when task_bronze_ingest generates the
+# synthetic CSVs. Without this, airflow hits:
+#     PermissionError: [Errno 13] Permission denied: '/opt/datalink/data/generated'
+echo "[entrypoint] ensuring /opt/datalink/data/generated is world-writable..."
+mkdir -p /opt/datalink/data/generated && chmod 0777 /opt/datalink/data/generated \
+    || echo "[entrypoint] WARN: could not chmod data/generated — airflow writes may fail"
+
 # Optional editable install, skipped if it hangs or errors. Pages work
 # without it thanks to PYTHONPATH.
 echo "[entrypoint] attempting editable install (optional, max 30s)..."

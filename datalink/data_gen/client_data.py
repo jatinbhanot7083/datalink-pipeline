@@ -531,7 +531,32 @@ def generate_for_client(
 
     Idempotent: if the 3 files already exist in `output_dir` and `force=False`,
     skips generation and returns the existing paths.
+
+    Cross-container robustness: if `output_dir.parent` exists but is not
+    writable by the current user (e.g. control-tower created it as root
+    but we're running as airflow uid 50000), log + raise a clear error
+    instead of the cryptic PermissionError from pathlib. The entrypoint
+    is responsible for creating `data/generated/` world-writable.
     """
+    import contextlib
+
+    # Parent dir (data/generated/) may be bind-mounted and pre-created by
+    # control-tower's entrypoint with 0o777. Ensure it exists + is writable
+    # before attempting the per-client subdir.
+    parent = output_dir.parent
+    try:
+        parent.mkdir(parents=True, exist_ok=True)
+        # Best-effort loosen perms so the airflow worker (uid 50000) can
+        # create the per-client subdir even if control-tower (uid 0)
+        # created the parent first.
+        with contextlib.suppress(OSError):
+            parent.chmod(0o777)
+    except PermissionError as exc:
+        raise PermissionError(
+            f"cannot create {parent} — run `mkdir -p {parent} && chmod 777 {parent}` on the host, "
+            f"or restart control_tower which pre-creates it (see docker/control-tower/entrypoint.sh). "
+            f"Root cause: {exc}"
+        ) from exc
     output_dir.mkdir(parents=True, exist_ok=True)
     upper = client_id.upper()
     paths = {

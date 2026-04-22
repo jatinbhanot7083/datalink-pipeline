@@ -204,6 +204,24 @@ class TestAirflowContract:
         )
         assert rc == 0, f"airflow cannot open warehouse.duckdb rw:\n{err}"
 
+    def test_airflow_can_write_data_generated(self) -> None:
+        """Regression: task_bronze_ingest raised
+            PermissionError: [Errno 13] Permission denied: '/opt/datalink/data/generated'
+        because airflow (uid 50000) couldn't create the per-client subdir.
+        control_tower entrypoint must pre-create /opt/datalink/data/generated
+        with 0o777 so airflow can mkdir client subdirs inside it."""
+        rc, _, err = _python(
+            "airflow_scheduler",
+            "from pathlib import Path; "
+            "p = Path('/opt/datalink/data/generated/_contract_probe'); "
+            "p.mkdir(parents=True, exist_ok=True); "
+            "p.rmdir()",
+        )
+        assert rc == 0, (
+            f"airflow cannot mkdir under /opt/datalink/data/generated:\n{err}\n"
+            f"Regression: control_tower entrypoint must chmod 0777 the dir."
+        )
+
     def test_all_3_dags_parse_cleanly(self) -> None:
         """All Phase 5.5 DAG files must parse without import errors.
         Run `airflow dags list-import-errors` — must be empty."""
