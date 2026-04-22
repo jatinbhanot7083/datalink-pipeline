@@ -143,12 +143,15 @@ class AgentBase(ABC):
         success: bool,
         error: str | None,
     ) -> None:
-        # PHI-safe preview — key names only, values truncated.
+        # PHI-safe preview — key names + values. Truncation widened to 3KB
+        # in Phase 6 so the CrewAI Dashboard can render human-readable
+        # narrative (full action-list, full classification, full suite_name)
+        # instead of cut-off strings. Still metadata-only — no row data.
         preview = json.dumps(
-            {k: str(v)[:120] for k, v in (payload or {}).items() if k != "_phi"},
+            {k: str(v)[:600] for k, v in (payload or {}).items() if k != "_phi"},
             default=str,
-        )[:500]
-        input_preview = json.dumps(list((context or {}).keys()))[:200]
+        )[:3000]
+        input_preview = json.dumps(list((context or {}).keys()))[:400]
         try:
             self._wh.execute(
                 f"INSERT INTO {CONTROL_SCHEMA}.agent_reasoning_log "
