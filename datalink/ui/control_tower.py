@@ -357,13 +357,22 @@ def main() -> None:
     # ========================================================================
     # FLOW DIAGRAM — live row counts per zone
     # ========================================================================
-    st.markdown("## 🏥 Medallion Flow")
+    # Phase 6: resolve per-tenant schema names so the tiles show the selected
+    # client's data (BRONZE_AETNA, SILVER_silver_AETNA, ...). For client_id
+    # 'default' these resolve to the un-suffixed Phase-5.x schemas.
+    from datalink.tenancy import Layer, schema_for
+
+    bronze_schema = schema_for(sel, Layer.BRONZE)
+    silver_schema = schema_for(sel, Layer.SILVER_DV)
+    gold_schema = schema_for(sel, Layer.GOLD_UM)
+
+    st.markdown(f"## 🏥 Medallion Flow — **{sel}**")
 
     # Probe every zone. Ordering intentional: left→right = pipeline direction.
     p_sftp = _airflow("/api/v1/dags/bronze_ingest")  # proxy for "SFTP reachable"
-    p_bronze_claims = _duckdb_count("BRONZE", "RAW_CLAIMS")
-    p_silver_sat = _duckdb_count("SILVER_silver", "sat_claim_details")
-    p_gold_auth = _duckdb_count("SILVER_gold_um", "gold_patient_auth")
+    p_bronze_claims = _duckdb_count(bronze_schema, "RAW_CLAIMS")
+    p_silver_sat = _duckdb_count(silver_schema, "sat_claim_details")
+    p_gold_auth = _duckdb_count(gold_schema, "gold_patient_auth")
     p_mssql = _mssql_count("patient_auth")
     p_pg = _pg_count(PG_HOST, PG_DB, "patient_auth")
     p_pg_replica = _pg_count(PG_REPLICA_HOST, PG_REPLICA_DB, "patient_auth")
@@ -380,19 +389,26 @@ def main() -> None:
         st.markdown('<div class="flow-arrow">→</div>', unsafe_allow_html=True)
     with zones[2]:
         v, cls = _fmt_count(p_bronze_claims)
-        st.markdown(_tile("🥉 BRONZE (raw)", v, "BRONZE.RAW_CLAIMS", cls), unsafe_allow_html=True)
+        st.markdown(
+            _tile("🥉 BRONZE (raw)", v, f"{bronze_schema}.RAW_CLAIMS", cls),
+            unsafe_allow_html=True,
+        )
     with zones[3]:
         st.markdown('<div class="flow-arrow">→</div>', unsafe_allow_html=True)
     with zones[4]:
         v, cls = _fmt_count(p_silver_sat)
         st.markdown(
-            _tile("🥈 SILVER (DV 2.0)", v, "sat_claim_details", cls), unsafe_allow_html=True
+            _tile("🥈 SILVER (DV 2.0)", v, f"{silver_schema}.sat_claim_details", cls),
+            unsafe_allow_html=True,
         )
     with zones[5]:
         st.markdown('<div class="flow-arrow">→</div>', unsafe_allow_html=True)
     with zones[6]:
         v, cls = _fmt_count(p_gold_auth)
-        st.markdown(_tile("🥇 GOLD UM", v, "gold_patient_auth", cls), unsafe_allow_html=True)
+        st.markdown(
+            _tile("🥇 GOLD UM", v, f"{gold_schema}.gold_patient_auth", cls),
+            unsafe_allow_html=True,
+        )
     with zones[7]:
         st.markdown('<div class="flow-arrow">→</div>', unsafe_allow_html=True)
     with zones[8]:
@@ -407,6 +423,36 @@ def main() -> None:
             f'<div class="ct-tile"><div class="label">🏛️ OPERATIONAL</div>'
             f'<div class="value" style="font-size:.95rem;line-height:1.6">{inner}</div>'
             '<div class="sub">prod targets</div></div>',
+            unsafe_allow_html=True,
+        )
+
+    # ========================================================================
+    # PER-SOURCE BRONZE BREAKDOWN — 3 tiles, one per source_type
+    # ========================================================================
+    # Phase 6: shows CLAIMS / MEMBERSHIP / PROVIDER row counts for the
+    # selected client so you can see exactly what landed.
+    st.markdown(f"### 📦 Bronze by source — **{sel}**")
+    p_raw_claims = _duckdb_count(bronze_schema, "RAW_CLAIMS")
+    p_raw_membership = _duckdb_count(bronze_schema, "RAW_MEMBERSHIP")
+    p_raw_provider = _duckdb_count(bronze_schema, "RAW_PROVIDER")
+
+    src_cols = st.columns(3)
+    with src_cols[0]:
+        v, cls = _fmt_count(p_raw_claims)
+        st.markdown(
+            _tile("📋 CLAIMS", v, f"{bronze_schema}.RAW_CLAIMS", cls),
+            unsafe_allow_html=True,
+        )
+    with src_cols[1]:
+        v, cls = _fmt_count(p_raw_membership)
+        st.markdown(
+            _tile("👤 MEMBERSHIP", v, f"{bronze_schema}.RAW_MEMBERSHIP", cls),
+            unsafe_allow_html=True,
+        )
+    with src_cols[2]:
+        v, cls = _fmt_count(p_raw_provider)
+        st.markdown(
+            _tile("🏥 PROVIDER", v, f"{bronze_schema}.RAW_PROVIDER", cls),
             unsafe_allow_html=True,
         )
 
