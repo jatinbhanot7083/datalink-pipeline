@@ -21,10 +21,12 @@ from datalink.config.loader import Settings
 class PostValidationCrew(CrewBase):
     def __init__(self, adapters: AdapterSet, settings: Settings) -> None:
         llm = get_llm(settings)
+        # Phase 6: adaptive thinking shines on diagnosis tasks — pass through.
+        thinking = settings.features.agents.thinking_mode
         agents = [
-            RootCauseAgent(llm, adapters.warehouse),
-            RemediationAgent(llm, adapters.warehouse),
-            ReportingAgent(llm, adapters.warehouse, adapters.notifier),
+            RootCauseAgent(llm, adapters.warehouse, thinking_mode=thinking),
+            RemediationAgent(llm, adapters.warehouse, thinking_mode=thinking),
+            ReportingAgent(llm, adapters.warehouse, adapters.notifier, thinking_mode=thinking),
         ]
         super().__init__(name="post_validation", agents=agents)
 

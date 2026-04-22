@@ -48,10 +48,18 @@ class AgentBase(ABC):
     goal: str = ""
     crew_name: str = ""
 
-    def __init__(self, llm: LlmProvider, warehouse: Warehouse) -> None:
+    def __init__(
+        self,
+        llm: LlmProvider,
+        warehouse: Warehouse,
+        thinking_mode: str = "off",
+    ) -> None:
         self._llm = llm
         self._wh = warehouse
         self._phi = PhiRedactionLayer()
+        # Phase 6: extended-thinking mode ("off" | "adaptive" | "enabled") —
+        # propagated to every _ask_llm call. Ignored by stub.
+        self._thinking_mode = thinking_mode
 
     # --- subclass contract -------------------------------------------------
 
@@ -125,9 +133,16 @@ class AgentBase(ABC):
                 content=f"{instruction}\n\nContext (safe metadata only):\n{payload_json}",
             ),
         ]
-        completion = self._llm.complete(messages, max_tokens=max_tokens)
+        completion = self._llm.complete(
+            messages, max_tokens=max_tokens, thinking_mode=self._thinking_mode
+        )
         # Accumulate tokens — multiple _ask_llm calls in one execute() sum up.
-        self._tokens_this_run += int(completion.input_tokens) + int(completion.output_tokens)
+        # Thinking tokens count too since Anthropic bills them as output.
+        self._tokens_this_run += (
+            int(completion.input_tokens)
+            + int(completion.output_tokens)
+            + int(getattr(completion, "thinking_tokens", 0))
+        )
         return completion.content
 
     # --- audit log --------------------------------------------------------

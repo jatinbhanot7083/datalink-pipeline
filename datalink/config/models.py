@@ -155,6 +155,10 @@ class AgentsFeatureConfig(BaseModel):
     pre_validation_crew: CrewConfig = Field(default_factory=CrewConfig)
     post_validation_crew: CrewConfig = Field(default_factory=CrewConfig)
     max_tokens_per_run: int = 100_000
+    # Phase 6: extended-thinking control. "off" disables thinking, "adaptive"
+    # lets Claude decide the budget, "enabled" forces a fixed budget.
+    # Set via DL_FEATURES__AGENTS__THINKING_MODE env var.
+    thinking_mode: Literal["off", "adaptive", "enabled"] = "off"
 
 
 class WarehouseRouterConfig(BaseModel):

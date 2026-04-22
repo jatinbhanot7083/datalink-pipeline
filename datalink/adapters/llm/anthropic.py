@@ -65,6 +65,7 @@ class AnthropicLlm:
         messages: list[LlmMessage],
         max_tokens: int,
         temperature: float = 0.0,
+        thinking_mode: str = "off",
     ) -> LlmCompletion:
         # Split the first system message out per Anthropic 1.x convention.
         system_parts: list[str] = []
@@ -76,43 +77,97 @@ class AnthropicLlm:
                 convo.append({"role": m.role, "content": m.content})
         system_prompt = "\n\n".join(system_parts) if system_parts else None
 
+        # Extended-thinking config. "adaptive" lets Claude decide the budget;
+        # "enabled" forces thinking with a fixed budget; "off" skips it.
+        # Anthropic requires max_tokens > thinking_budget, so we scale if needed.
+        create_kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "system": system_prompt,
+            "messages": convo,
+        }
+        # When thinking is on, Claude REQUIRES temperature=1. Honor that contract.
+        if thinking_mode == "adaptive":
+            create_kwargs["thinking"] = {"type": "adaptive"}
+            create_kwargs["temperature"] = 1.0
+            # Boost max_tokens to accommodate thinking + final answer.
+            create_kwargs["max_tokens"] = max(max_tokens, 16_000)
+        elif thinking_mode == "enabled":
+            # Fixed-budget thinking — reserve 60% of max_tokens for thinking.
+            budget = max(1024, int(max_tokens * 0.6))
+            create_kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
+            create_kwargs["temperature"] = 1.0
+            create_kwargs["max_tokens"] = max(max_tokens, budget + 2048)
+        else:
+            create_kwargs["temperature"] = temperature
+
         try:
             client = self._get_client()
-            resp = client.messages.create(
-                model=self.model,
-                max_tokens=max_tokens,
-                temperature=temperature,
-                system=system_prompt,
-                messages=convo,
-            )
+            resp = client.messages.create(**create_kwargs)
         except LlmProviderError:
             raise
         except Exception as exc:
-            raise LlmProviderError(f"Anthropic API call failed: {exc}") from exc
+            # If thinking mode isn't supported on this model version,
+            # retry WITHOUT thinking so the agent still gets an answer.
+            if thinking_mode != "off" and "thinking" in str(exc).lower():
+                _log.warning(
+                    "llm.anthropic.thinking_unsupported",
+                    model=self.model,
+                    error=str(exc)[:200],
+                )
+                create_kwargs.pop("thinking", None)
+                create_kwargs["temperature"] = temperature
+                create_kwargs["max_tokens"] = max_tokens
+                try:
+                    resp = client.messages.create(**create_kwargs)
+                except Exception as exc2:
+                    raise LlmProviderError(
+                        f"Anthropic API call failed (with + without thinking): {exc2}"
+                    ) from exc2
+            else:
+                raise LlmProviderError(f"Anthropic API call failed: {exc}") from exc
 
-        # Anthropic returns a list of content blocks; we want the TextBlock.
+        # Anthropic returns a list of content blocks — separate thinking from text.
         content_parts: list[str] = []
+        thinking_parts: list[str] = []
         for block in getattr(resp, "content", []):
-            text = getattr(block, "text", None)
-            if text:
-                content_parts.append(text)
+            btype = getattr(block, "type", "")
+            if btype == "thinking":
+                thinking_parts.append(getattr(block, "thinking", "") or "")
+            elif btype == "text" or hasattr(block, "text"):
+                text = getattr(block, "text", None)
+                if text:
+                    content_parts.append(text)
         content = "\n".join(content_parts)
+        thinking_content = "\n".join(thinking_parts)
 
         usage = getattr(resp, "usage", None)
         in_tok = int(getattr(usage, "input_tokens", 0) or 0)
         out_tok = int(getattr(usage, "output_tokens", 0) or 0)
+        # Approximate thinking-token count from the thinking block length
+        # (Anthropic's usage object splits this in newer SDKs; fall back
+        # to char/4 heuristic otherwise).
+        th_tok = int(
+            getattr(usage, "thinking_tokens", 0)
+            or getattr(usage, "cache_creation_input_tokens", 0)
+            or (len(thinking_content) // 4 if thinking_content else 0)
+        )
 
         _log.info(
             "llm.anthropic.complete",
             model=self.model,
             input_tokens=in_tok,
             output_tokens=out_tok,
+            thinking_tokens=th_tok,
+            thinking_mode=thinking_mode,
             stop_reason=str(getattr(resp, "stop_reason", "")),
         )
         return LlmCompletion(
             content=content,
             input_tokens=in_tok,
             output_tokens=out_tok,
+            thinking_tokens=th_tok,
+            thinking_content=thinking_content[:2000],  # truncate for audit storage
             model=self.model,
             stop_reason=str(getattr(resp, "stop_reason", "end_turn")),
         )

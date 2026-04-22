@@ -25,8 +25,8 @@ class ReportingAgent(AgentBase):
     )
     crew_name = "post_validation"
 
-    def __init__(self, llm, warehouse, notifier) -> None:  # type: ignore[no-untyped-def]
-        super().__init__(llm, warehouse)
+    def __init__(self, llm, warehouse, notifier, thinking_mode: str = "off") -> None:  # type: ignore[no-untyped-def]
+        super().__init__(llm, warehouse, thinking_mode=thinking_mode)
         self._notifier = notifier
 
     def execute(self, context: dict[str, Any]) -> dict[str, Any]:

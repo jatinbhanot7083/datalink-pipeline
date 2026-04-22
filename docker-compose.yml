@@ -475,6 +475,11 @@ services:
     image: datalink-airflow:2.9.3
     container_name: datalink-airflow-init
     networks: [datalink]
+    # Phase 6: load ANTHROPIC_API_KEY + DL_* overrides from host-side .env
+    # (.env is gitignored, chmod 600). Lets agents call real Claude.
+    env_file:
+      - path: .env
+        required: false
     depends_on:
       airflow_db:
         condition: service_healthy
@@ -532,6 +537,9 @@ services:
     image: datalink-airflow:2.9.3
     container_name: datalink-airflow-webserver
     networks: [datalink]
+    env_file:
+      - path: .env
+        required: false
     depends_on:
       airflow_db: { condition: service_healthy }
       airflow_init: { condition: service_completed_successfully }
@@ -557,6 +565,9 @@ services:
     image: datalink-airflow:2.9.3
     container_name: datalink-airflow-scheduler
     networks: [datalink]
+    env_file:
+      - path: .env
+        required: false
     depends_on:
       airflow_db: { condition: service_healthy }
       airflow_init: { condition: service_completed_successfully }
@@ -586,6 +597,9 @@ services:
     image: datalink-control-tower:0.1
     container_name: datalink-control-tower
     networks: [datalink]
+    env_file:
+      - path: .env
+        required: false
     depends_on:
       airflow_webserver: { condition: service_healthy }
       postgres:          { condition: service_healthy }

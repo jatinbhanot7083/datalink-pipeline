@@ -131,7 +131,7 @@ class _RecordingLlm:
         self.model = "test"
         self.last_messages: list[LlmMessage] | None = None
 
-    def complete(self, messages, max_tokens, temperature=0.0):  # type: ignore[no-untyped-def]
+    def complete(self, messages, max_tokens, temperature=0.0, thinking_mode="off"):  # type: ignore[no-untyped-def]
         from datalink.adapters.protocols import LlmCompletion
 
         self.last_messages = messages

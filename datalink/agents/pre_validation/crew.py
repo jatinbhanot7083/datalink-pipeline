@@ -18,10 +18,13 @@ from datalink.config.loader import Settings
 class PreValidationCrew(CrewBase):
     def __init__(self, adapters: AdapterSet, settings: Settings) -> None:
         llm = get_llm(settings)
+        # Phase 6: thinking_mode from settings.features.agents.thinking_mode
+        # controls extended-thinking on Anthropic calls. Stub ignores it.
+        thinking = settings.features.agents.thinking_mode
         agents = [
-            ProfilerAgent(llm, adapters.warehouse),
-            ExpectationAuthorAgent(llm, adapters.warehouse),
-            ReviewerAgent(llm, adapters.warehouse),
+            ProfilerAgent(llm, adapters.warehouse, thinking_mode=thinking),
+            ExpectationAuthorAgent(llm, adapters.warehouse, thinking_mode=thinking),
+            ReviewerAgent(llm, adapters.warehouse, thinking_mode=thinking),
         ]
         super().__init__(name="pre_validation", agents=agents)
 

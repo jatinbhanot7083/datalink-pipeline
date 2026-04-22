@@ -161,6 +161,12 @@ class LlmCompletion:
     output_tokens: int
     model: str
     stop_reason: str
+    # Phase 6: extended-thinking. When Opus/Sonnet reasons privately before
+    # answering, those tokens bill as output but surface here separately so
+    # operators see "how hard the model worked" distinct from "what text it
+    # returned." Zero for stub and non-thinking calls.
+    thinking_tokens: int = 0
+    thinking_content: str = ""
 
 
 @runtime_checkable
@@ -169,6 +175,9 @@ class LlmProvider(Protocol):
 
     Every call MUST pass its input payload through PhiRedactionLayer first. The
     adapter verifies this precondition — it does not do its own redaction.
+
+    Phase 6: `thinking_mode` controls extended thinking on models that support
+    it. Values: "off" | "adaptive" | "enabled". Ignored by stub.
     """
 
     model: str
@@ -178,4 +187,5 @@ class LlmProvider(Protocol):
         messages: list[LlmMessage],
         max_tokens: int,
         temperature: float = 0.0,
+        thinking_mode: str = "off",
     ) -> LlmCompletion: ...

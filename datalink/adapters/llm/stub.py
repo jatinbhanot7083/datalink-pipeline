@@ -24,6 +24,7 @@ class StubLlm:
         messages: list[LlmMessage],
         max_tokens: int,
         temperature: float = 0.0,
+        thinking_mode: str = "off",  # Phase 6: ignored by stub
     ) -> LlmCompletion:
         # Deterministic canned response shaped like a profile/expectation output.
         # Agent code that wants richer stub output can parse the last user message
