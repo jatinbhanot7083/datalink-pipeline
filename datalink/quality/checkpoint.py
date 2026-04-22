@@ -259,7 +259,11 @@ def _json_to_suite(
     # Import here so mypy + the top-level import block stays tidy.
     from great_expectations import expectations as gx_expectations
 
-    suite = ExpectationSuite(name=f"{suite_name}_v{suite_id[:8]}")
+    # Phase 6 fix: at module-load time `ExpectationSuite` is bound to typing.Any
+    # (lazy-GX workaround for the control-tower container). We need the REAL
+    # class here to instantiate the suite — fetch it via the lazy accessor.
+    suite_cls = _gx_expectation_suite_cls()
+    suite = suite_cls(name=f"{suite_name}_v{suite_id[:8]}")
     for exp in expectations:
         exp_type = exp.get("expectation_type")
         if not exp_type:
