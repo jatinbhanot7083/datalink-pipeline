@@ -68,6 +68,9 @@ class AnthropicLlm:
         thinking_mode: str = "off",
     ) -> LlmCompletion:
         # Split the first system message out per Anthropic 1.x convention.
+        # The current API requires `system` as a LIST of content blocks
+        # (plain string form rejected on newer Opus/Sonnet endpoints).
+        # Also enables prompt caching later via cache_control on the block.
         system_parts: list[str] = []
         convo: list[dict[str, str]] = []
         for m in messages:
@@ -75,7 +78,9 @@ class AnthropicLlm:
                 system_parts.append(m.content)
             else:
                 convo.append({"role": m.role, "content": m.content})
-        system_prompt = "\n\n".join(system_parts) if system_parts else None
+        system_prompt: list[dict[str, Any]] | None = None
+        if system_parts:
+            system_prompt = [{"type": "text", "text": "\n\n".join(system_parts)}]
 
         # Extended-thinking config. "adaptive" lets Claude decide the budget;
         # "enabled" forces thinking with a fixed budget; "off" skips it.
@@ -83,9 +88,12 @@ class AnthropicLlm:
         create_kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,
-            "system": system_prompt,
             "messages": convo,
         }
+        # Only include `system` when we actually have one — the API rejects
+        # null / empty-string for that field.
+        if system_prompt is not None:
+            create_kwargs["system"] = system_prompt
         # When thinking is on, Claude REQUIRES temperature=1. Honor that contract.
         if thinking_mode == "adaptive":
             create_kwargs["thinking"] = {"type": "adaptive"}
