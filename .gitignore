@@ -87,5 +87,10 @@ data/sample/large/
 # provider_sample.csv as the dev-loop baseline.
 data/sample/claims_[0-9]*.csv
 
+# Phase 6: per-client generated Bronze data (production-realistic volumes:
+# 1M claims + 500K membership + 100K provider per client × 7 clients ≈ 2 GB).
+# Regenerated on first bronze_ingest per client via scripts/generate_client_data.py.
+data/generated/
+
 # Phase 5.7 demo evidence (Playwright screenshots from verify-phase-5.7)
 demo_evidence/

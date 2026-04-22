@@ -82,14 +82,21 @@ class TaskContext:
 
 
 def task_bronze_ingest(ctx: TaskContext) -> dict[str, Any]:
-    """Ingest all 3 sample CSVs (claims / membership / provider) from SFTP → Bronze.
+    """Ingest per-client CSVs (claims / membership / provider) from SFTP → Bronze.
 
-    Phase 6: each uploaded file is renamed to include the CLIENT + a
-    UTC timestamp so the `_source_file` audit column in Bronze is
-    self-describing: e.g.  claims_AETNA_20260421_213045.csv. The
-    original sample file on disk is untouched — only the destination
-    name changes. This is how production SFTP drops naturally arrive
-    (payer_source_yyyymmdd_hhmmss.csv).
+    Phase 6 data volumes (production-realistic):
+        Membership:    500K rows/client
+        Provider:      100K rows/client
+        Claims:          1M rows/client
+
+    Data is generated ONCE per client (cached at data/generated/{client}/)
+    using the deterministic-per-client generator in
+    scripts/generate_client_data.py. First run for a new client takes
+    ~30-60 s to generate + ingest; subsequent runs reuse the cached CSVs.
+
+    Uploaded files are renamed per-client with UTC timestamp so the
+    Bronze _source_file audit column captures provenance:
+        claims_AETNA_20260421_213045.csv
     """
     import posixpath
     from datetime import UTC, datetime
@@ -97,33 +104,45 @@ def task_bronze_ingest(ctx: TaskContext) -> dict[str, Any]:
     from datalink.adapters.sftp.atmoz import AtmozSftpSource
     from datalink.pipeline.bronze import ingest_file
 
-    sample_dir = Path(__file__).resolve().parents[2] / "data" / "sample"
-    sources = [
-        ("PROVIDER", "provider_sample.csv"),
-        ("MEMBERSHIP", "membership_sample.csv"),
-        ("CLAIMS", "claims_sample.csv"),
-    ]
+    # Import the generator lazily — keeps test-time imports fast, and
+    # generator depends on numpy which is already in the Airflow image.
+    from scripts.generate_client_data import generate_for_client
+
+    repo_root = Path(__file__).resolve().parents[2]
+    generated_dir = repo_root / "data" / "generated" / ctx.client_id
+    _log.info(
+        "task.bronze_ingest.generating_if_needed",
+        client_id=ctx.client_id,
+        target_dir=str(generated_dir),
+    )
+    generated_paths = generate_for_client(ctx.client_id, generated_dir)
+    _log.info(
+        "task.bronze_ingest.generation_done",
+        client_id=ctx.client_id,
+        files={k: str(v) for k, v in generated_paths.items()},
+    )
+
     client_tag = ctx.client_id.upper()
     ts_tag = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
-    # Build per-source timestamped remote filenames:  claims_AETNA_20260421_213045.csv
-    uploads = [
-        (source_type, local_fn, f"{source_type.lower()}_{client_tag}_{ts_tag}.csv")
-        for source_type, local_fn in sources
+    # Per-source upload plan: local generated file → timestamped SFTP filename.
+    # Order: PROVIDER → MEMBERSHIP → CLAIMS so referential checks at Silver work.
+    sources: list[tuple[str, Path, str]] = [
+        ("PROVIDER", generated_paths["PROVIDER"], f"provider_{client_tag}_{ts_tag}.csv"),
+        ("MEMBERSHIP", generated_paths["MEMBERSHIP"], f"membership_{client_tag}_{ts_tag}.csv"),
+        ("CLAIMS", generated_paths["CLAIMS"], f"claims_{client_tag}_{ts_tag}.csv"),
     ]
 
     sftp = ctx.adapters.sftp
     base_dir = ctx.settings.adapters.sftp.remote_base_dir
     # Ensure files are on the SFTP drop — upload helper is AtmozSftpSource-specific.
     if isinstance(sftp, AtmozSftpSource):
-        for _, local_fn, remote_fn in uploads:
-            local = sample_dir / local_fn
-            if local.exists():
-                sftp.upload(local, posixpath.join(base_dir, remote_fn))
+        for _, local_path, remote_fn in sources:
+            if local_path.exists():
+                sftp.upload(local_path, posixpath.join(base_dir, remote_fn))
 
     results: dict[str, Any] = {}
-    for source_type, _local_fn, remote_fn in uploads:
+    for source_type, _local_path, remote_fn in sources:
         remote = posixpath.join(base_dir, remote_fn)
-        # Phase 6: per-source delimiter / format config (defaults to CSV).
         source_fmt = ctx.settings.sources.for_source(source_type)
         r = ingest_file(
             ctx.adapters,
