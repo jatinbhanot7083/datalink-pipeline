@@ -49,7 +49,23 @@ def ensure_warehouse_exists(path: str, *, verbose: bool = False) -> None:
     so operators can see exactly which step succeeded or failed. On
     container entrypoint we pass verbose=True; on Streamlit page imports
     we leave it False (pages have their own empty-state fallbacks).
+
+    Phase 7 Day 3: when ``DL_ADAPTERS__WAREHOUSE__TYPE=snowflake`` this
+    function is a no-op. Snowflake infrastructure (database, schemas,
+    role, stage) is provisioned out-of-band via ``scripts/snowflake_
+    bootstrap.sql`` which runs once per environment. No warehouse.duckdb
+    file needs to exist on the container filesystem in that mode.
     """
+    # Short-circuit for Snowflake mode — no local file to bootstrap.
+    if os.environ.get("DL_ADAPTERS__WAREHOUSE__TYPE", "duckdb").lower() == "snowflake":
+        if verbose:
+            print(
+                "[bootstrap] Snowflake mode detected — skipping warehouse.duckdb "
+                "bootstrap (Snowflake is provisioned via scripts/snowflake_bootstrap.sql).",
+                file=sys.stderr,
+            )
+        return
+
     # Step 1 — parent dir -----------------------------------------------
     try:
         p = Path(path)

@@ -153,7 +153,13 @@ st.markdown(
 
 
 def _q(sql: str) -> pd.DataFrame:
-    return _wh_query(sql)
+    df = _wh_query(sql)
+    # Snowflake uppercases unquoted column names (`SCHEMA_NAME`), DuckDB
+    # preserves case as-stored (`schema_name`). Normalise to lowercase so
+    # downstream DataFrame indexing works for either backend.
+    if not df.empty:
+        df.columns = df.columns.str.lower()
+    return df
 
 
 def _q_scalar(sql: str) -> Any:

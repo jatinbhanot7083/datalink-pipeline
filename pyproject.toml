@@ -193,6 +193,7 @@ markers = [
     "integration: requires docker-compose services",
     "plugout: proves GX/agents can be removed without breaking pipeline",
     "phase: per-phase verify tests",
+    "snowflake: requires live Snowflake credentials via SNOWFLAKE_* env vars (opt-in)",
 ]
 filterwarnings = [
     "error",
