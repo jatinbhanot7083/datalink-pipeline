@@ -145,17 +145,19 @@ def _swallow(label: str) -> Any:
 
 
 def _duckdb_count(schema: str, table: str) -> ProbeResult:
-    """Query DuckDB for a row count. Returns ProbeResult."""
-    try:
-        import duckdb
+    """Query the warehouse for a row count. Returns ProbeResult.
 
-        # read-only so Airflow tasks can simultaneously own the write lock.
-        conn = duckdb.connect(WAREHOUSE_PATH, read_only=True)
-        try:
-            row = conn.execute(f'SELECT COUNT(*) FROM "{schema}"."{table}"').fetchone()
-            return ProbeResult(ok=True, value=int(row[0]) if row else 0)
-        finally:
-            conn.close()
+    Named ``_duckdb_count`` for backwards compatibility with existing
+    callers, but routed through ``datalink.ui._query`` so the backend
+    (DuckDB or Snowflake) is config-driven.
+    """
+    try:
+        from datalink.ui._query import query_scalar
+
+        val = query_scalar(f'SELECT COUNT(*) FROM "{schema}"."{table}"')
+        if val is None:
+            return ProbeResult(ok=False, error=f"{schema}.{table} not found")
+        return ProbeResult(ok=True, value=int(val))
     except Exception as e:
         return ProbeResult(ok=False, error=f"{type(e).__name__}: {e}")
 
@@ -194,16 +196,17 @@ def _mssql_count(table: str, schema: str = "UM") -> ProbeResult:
 
 
 def _control_query(sql: str) -> ProbeResult:
-    """Query the CONTROL.* audit tables from DuckDB (read-only)."""
+    """Query the CONTROL.* audit tables through the configured backend."""
     try:
-        import duckdb
+        from datalink.ui._query import query_silent
 
-        conn = duckdb.connect(WAREHOUSE_PATH, read_only=True)
-        try:
-            df = conn.execute(sql).df()
+        df = query_silent(sql)
+        if df.empty:
+            # query_silent returns empty frame on any failure; surface as error.
+            # NOTE: a genuinely-empty result set is indistinguishable from a
+            # failure here; caller must treat empty as 'no data or error'.
             return ProbeResult(ok=True, value=df)
-        finally:
-            conn.close()
+        return ProbeResult(ok=True, value=df)
     except Exception as e:
         return ProbeResult(ok=False, error=f"{type(e).__name__}: {e}")
 
@@ -237,21 +240,21 @@ def _trigger_dag(dag_id: str, conf: dict[str, Any] | None = None) -> ProbeResult
 
 
 def _list_clients() -> list[str]:
-    """Phase 5.8: read distinct clients from CONTROL.dq_suites so the client
-    dropdown populates automatically. Falls back to ['default'] if the
-    registry is empty (pre-first-run)."""
-    try:
-        import duckdb
+    """Read distinct clients from CONTROL.dq_suites so the client dropdown
+    populates automatically. Falls back to ['default'] if the registry is
+    empty (pre-first-run).
 
-        conn = duckdb.connect(WAREHOUSE_PATH, read_only=True)
-        try:
-            rows = conn.execute(
-                "SELECT DISTINCT client_id FROM CONTROL.dq_suites ORDER BY client_id"
-            ).fetchall()
-            clients = [r[0] for r in rows] or ["default"]
-        finally:
-            conn.close()
-        return clients
+    Phase 7 Day 2: routed through ``datalink.ui._query`` so the underlying
+    backend is config-driven.
+    """
+    try:
+        from datalink.ui._query import query_silent
+
+        df = query_silent("SELECT DISTINCT client_id FROM CONTROL.dq_suites ORDER BY client_id")
+        if df.empty:
+            return ["default"]
+        clients = [str(c) for c in df["client_id"].tolist()]
+        return clients or ["default"]
     except Exception:
         return ["default"]
 

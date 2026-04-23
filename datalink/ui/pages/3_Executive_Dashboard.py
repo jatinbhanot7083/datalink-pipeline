@@ -27,11 +27,8 @@ Fail-safe behavior:
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any
 
-import duckdb
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -47,6 +44,9 @@ WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse
 # doesn't exist until the first DAG runs — without this, every Streamlit
 # page stack-traces with 'Cannot open database in read-only mode'.
 from datalink.ui._bootstrap import ensure_warehouse_exists  # noqa: E402
+
+# Phase 7 Day 2: warehouse access centralised in datalink.ui._query.
+from datalink.ui._query import query_silent as _wh_query_silent  # noqa: E402
 
 ensure_warehouse_exists(WAREHOUSE_PATH)
 
@@ -97,31 +97,15 @@ st.markdown(
 # ============================================================================
 
 
-@contextmanager
-def _conn() -> Iterator[duckdb.DuckDBPyConnection]:
-    """Open a read-only DuckDB connection that releases immediately after use.
-
-    Matches the pattern in 1_DQ_Author.py / 2_DQ_Review.py: never hold a
-    persistent connection in session_state because Streamlit re-runs the
-    script on every interaction and DuckDB rejects conflicting configs
-    across connections on the same file.
-    """
-    conn = duckdb.connect(WAREHOUSE_PATH, read_only=True)
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
 def _try_query(sql: str, params: tuple[Any, ...] = ()) -> pd.DataFrame:
-    """Run a query, return empty DataFrame on any failure (CONTROL not yet
-    bootstrapped, column missing, etc.). Keeps the dashboard "demoable" on a
-    fresh install."""
-    try:
-        with _conn() as c:
-            return c.execute(sql, list(params)).fetchdf()
-    except Exception:
-        return pd.DataFrame()
+    """Run a query; return empty DataFrame on any failure (CONTROL not yet
+    bootstrapped, column missing, etc.). Keeps the dashboard "demoable" on
+    a fresh install. Delegates to datalink.ui._query so the backend is
+    config-driven (DuckDB or Snowflake)."""
+    param_dict: dict[str, Any] | None = None
+    if params:
+        param_dict = {f"p{i}": v for i, v in enumerate(params)}
+    return _wh_query_silent(sql, param_dict)
 
 
 # ============================================================================

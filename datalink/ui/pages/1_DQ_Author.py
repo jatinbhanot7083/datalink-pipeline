@@ -17,10 +17,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-import duckdb
 import pandas as pd
 import streamlit as st
 
@@ -31,6 +31,7 @@ from datalink.quality.registry import (
     SuiteSource,
     SuiteStatus,
 )
+from datalink.ui._query import warehouse_ctx
 
 # ============================================================================
 # CONFIG + THEME (reused from control_tower.py)
@@ -82,42 +83,19 @@ st.markdown(
 # ============================================================================
 
 
-class _DuckAdapter:
-    """Minimal Warehouse-protocol shim so SuiteRegistry works over a raw duckdb connection."""
-
-    def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
-        self._conn = conn
-
-    def query(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        cur = self._conn.execute(sql, params) if params else self._conn.execute(sql)
-        cols = [d[0] for d in cur.description] if cur.description else []
-        return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
-
-    def execute(self, sql: str, params: dict[str, Any] | None = None) -> None:
-        if params:
-            self._conn.execute(sql, params)
-        else:
-            self._conn.execute(sql)
-
-
-from collections.abc import Iterator  # noqa: E402
-
-
 @contextmanager
 def _registry(*, readonly: bool = True) -> Iterator[SuiteRegistry]:
-    """Yield a fresh SuiteRegistry bound to a short-lived DuckDB connection.
+    """Yield a fresh SuiteRegistry bound to a short-lived warehouse adapter.
 
-    DuckDB disallows multiple connections to the same file from the same
-    process when they differ in read-only vs read-write mode — Streamlit
-    scripts re-execute top-to-bottom and would otherwise leak a read-only
-    handle that blocks the writer. Context-manager pattern guarantees we
-    close every handle before the next request can open one.
+    Delegates connection lifecycle to ``datalink.ui._query.warehouse_ctx``
+    so the backend (DuckDB / Snowflake / …) is config-driven. The
+    short-lived pattern is still mandatory for DuckDB: Streamlit re-runs
+    the script on every interaction, and DuckDB disallows concurrent
+    connections of mixed read-only / read-write mode to the same file —
+    so we open, use, close, per request.
     """
-    conn = duckdb.connect(WAREHOUSE_PATH, read_only=readonly)
-    try:
-        yield SuiteRegistry(_DuckAdapter(conn))  # type: ignore[arg-type]
-    finally:
-        conn.close()
+    with warehouse_ctx(readonly=readonly) as wh:
+        yield SuiteRegistry(wh)  # type: ignore[arg-type]
 
 
 def _df_to_expectations(df: pd.DataFrame) -> list[dict[str, Any]]:

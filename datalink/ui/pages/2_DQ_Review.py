@@ -14,10 +14,10 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
 
-import duckdb
 import pandas as pd
 import streamlit as st
 
@@ -25,6 +25,7 @@ from datalink.quality.registry import (
     SuiteRegistry,
     SuiteVersion,
 )
+from datalink.ui._query import warehouse_ctx
 
 # ============================================================================
 # CONFIG + THEME
@@ -75,35 +76,21 @@ st.markdown(
 # ============================================================================
 
 
-class _DuckAdapter:
-    def __init__(self, conn: duckdb.DuckDBPyConnection) -> None:
-        self._conn = conn
-
-    def query(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        cur = self._conn.execute(sql, params) if params else self._conn.execute(sql)
-        cols = [d[0] for d in cur.description] if cur.description else []
-        return [dict(zip(cols, row, strict=False)) for row in cur.fetchall()]
-
-    def execute(self, sql: str, params: dict[str, Any] | None = None) -> None:
-        if params:
-            self._conn.execute(sql, params)
-        else:
-            self._conn.execute(sql)
-
-
-from collections.abc import Iterator  # noqa: E402
-
-
 @contextmanager
 def _registry(*, readonly: bool = True) -> Iterator[SuiteRegistry]:
-    """Open + close a fresh SuiteRegistry connection per operation. DuckDB
-    disallows mixed read-only / read-write handles to the same file within
-    one process; this pattern guarantees no handle outlives its use."""
-    conn = duckdb.connect(WAREHOUSE_PATH, read_only=readonly)
-    try:
-        yield SuiteRegistry(_DuckAdapter(conn))  # type: ignore[arg-type]
-    finally:
-        conn.close()
+    """Open + close a fresh SuiteRegistry connection per operation.
+
+    Phase 7 Day 2: backend lifecycle now delegated to
+    ``datalink.ui._query.warehouse_ctx`` so DuckDB vs Snowflake is a
+    config flip, not a per-page code change.
+
+    The short-lived pattern is still required for DuckDB: Streamlit
+    re-runs the script on every interaction, and DuckDB disallows
+    concurrent read-only / read-write handles to the same file in one
+    process.
+    """
+    with warehouse_ctx(readonly=readonly) as wh:
+        yield SuiteRegistry(wh)  # type: ignore[arg-type]
 
 
 # ============================================================================
@@ -278,15 +265,17 @@ def _render_review_panel(selected: SuiteVersion) -> None:
 
 def _show_audit(suite_id: str) -> None:
     try:
-        conn = duckdb.connect(WAREHOUSE_PATH, read_only=True)
-        df = conn.execute(
-            """SELECT ts, from_status, to_status, actor, notes
-               FROM CONTROL.dq_suite_audit_log
-               WHERE suite_id = ?
-               ORDER BY ts DESC""",
-            [suite_id],
-        ).df()
-        conn.close()
+        with warehouse_ctx(readonly=True) as wh:
+            # Positional param is valid for DuckDB; Day 3 will reconcile
+            # paramstyle differences when Snowflake support lands.
+            rows = wh.query(
+                "SELECT ts, from_status, to_status, actor, notes "
+                "FROM CONTROL.dq_suite_audit_log "
+                "WHERE suite_id = ? "
+                "ORDER BY ts DESC",
+                [suite_id],  # type: ignore[arg-type]
+            )
+        df = pd.DataFrame(rows)
         if df.empty:
             st.info("No audit entries yet.")
         else:

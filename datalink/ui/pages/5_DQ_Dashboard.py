@@ -29,11 +29,8 @@ window they're looking at — no chart is ambiguous about currency.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any
 
-import duckdb
 import pandas as pd
 import plotly.express as px
 import streamlit as st
@@ -43,6 +40,9 @@ WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse
 # Phase 6 fix: bootstrap warehouse file + CONTROL schema before any
 # read-only connection attempt.
 from datalink.ui._bootstrap import ensure_warehouse_exists  # noqa: E402
+
+# Phase 7 Day 2: warehouse access centralised in datalink.ui._query.
+from datalink.ui._query import query_silent as _wh_query_silent  # noqa: E402
 
 ensure_warehouse_exists(WAREHOUSE_PATH)
 
@@ -113,21 +113,12 @@ st.markdown(
 )
 
 
-@contextmanager
-def _conn() -> Iterator[duckdb.DuckDBPyConnection]:
-    c = duckdb.connect(WAREHOUSE_PATH, read_only=True)
-    try:
-        yield c
-    finally:
-        c.close()
-
-
 def _try_query(sql: str, params: tuple[Any, ...] = ()) -> pd.DataFrame:
-    try:
-        with _conn() as c:
-            return c.execute(sql, list(params)).fetchdf()
-    except Exception:
-        return pd.DataFrame()
+    """Thin wrapper preserving the signature used throughout this page."""
+    param_dict: dict[str, Any] | None = None
+    if params:
+        param_dict = {f"p{i}": v for i, v in enumerate(params)}
+    return _wh_query_silent(sql, param_dict)
 
 
 # ============================================================================

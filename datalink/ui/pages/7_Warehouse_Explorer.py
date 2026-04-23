@@ -30,17 +30,16 @@ Why read-only only:
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any
 
-import duckdb
 import pandas as pd
 import streamlit as st
 
 WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
 
 from datalink.ui._bootstrap import ensure_warehouse_exists  # noqa: E402
+from datalink.ui._query import query as _wh_query  # noqa: E402
+from datalink.ui._query import query_scalar as _wh_scalar  # noqa: E402
 
 ensure_warehouse_exists(WAREHOUSE_PATH)
 
@@ -147,36 +146,18 @@ st.markdown(
 
 
 # ---------------------------------------------------------------------------
-# Connection helpers
+# Warehouse access — delegated to datalink.ui._query so swapping DuckDB for
+# Snowflake is a config flip, not a per-page edit. Short aliases _q/_q_scalar
+# keep downstream call sites unchanged.
 # ---------------------------------------------------------------------------
 
 
-@contextmanager
-def _conn() -> Iterator[duckdb.DuckDBPyConnection]:
-    """Open a read-only cursor. Safe to call while DAGs hold write locks."""
-    c = duckdb.connect(WAREHOUSE_PATH, read_only=True)
-    try:
-        yield c
-    finally:
-        c.close()
-
-
 def _q(sql: str) -> pd.DataFrame:
-    try:
-        with _conn() as c:
-            return c.execute(sql).fetchdf()
-    except Exception as exc:
-        st.error(f"Query failed: {exc}")
-        return pd.DataFrame()
+    return _wh_query(sql)
 
 
 def _q_scalar(sql: str) -> Any:
-    try:
-        with _conn() as c:
-            row = c.execute(sql).fetchone()
-            return row[0] if row else None
-    except Exception:
-        return None
+    return _wh_scalar(sql)
 
 
 def _quote_ident(ident: str) -> str:
