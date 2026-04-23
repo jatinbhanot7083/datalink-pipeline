@@ -37,21 +37,29 @@ first pipeline run).
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 import pandas as pd
 import streamlit as st
 
 WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
 
+# Params accepted by the Streamlit warehouse helpers.
+#
+# DuckDB accepts positional (list/tuple with ``?`` placeholders) and named
+# (dict with ``$name`` placeholders). Legacy call sites in this codebase
+# use positional ``?``, so we accept both forms and pass through verbatim.
+# Snowflake's paramstyle reconciliation is Day 3 work.
+_Params = dict[str, Any] | Sequence[Any] | None
+
 
 class _Warehouse(Protocol):
     """Minimal Warehouse protocol the Streamlit layer relies on."""
 
-    def query(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]: ...
-    def execute(self, sql: str, params: dict[str, Any] | None = None) -> None: ...
+    def query(self, sql: str, params: _Params = None) -> list[dict[str, Any]]: ...
+    def execute(self, sql: str, params: _Params = None) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -77,7 +85,7 @@ class _DuckDBShim:
 
         return duckdb.connect(self._path, read_only=self._readonly)
 
-    def query(self, sql: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def query(self, sql: str, params: _Params = None) -> list[dict[str, Any]]:
         conn = self._open()
         try:
             cur = conn.execute(sql, params) if params else conn.execute(sql)
@@ -87,7 +95,7 @@ class _DuckDBShim:
         finally:
             conn.close()
 
-    def execute(self, sql: str, params: dict[str, Any] | None = None) -> None:
+    def execute(self, sql: str, params: _Params = None) -> None:
         if self._readonly:
             raise RuntimeError(
                 "execute() called on a read-only DuckDB shim — "
@@ -128,7 +136,10 @@ def _build_backend(*, readonly: bool) -> _Warehouse:
     from datalink.config.loader import load_settings
 
     adapters = build_adapters(load_settings(env=os.environ.get("DL_ENV", "local")))
-    return adapters.warehouse
+    # Factory-built Warehouse accepts `dict | None`; the UI protocol is
+    # wider (accepts positional Sequence too). The cast is safe: concrete
+    # adapters forward params to their driver, which handles both forms.
+    return cast("_Warehouse", adapters.warehouse)
 
 
 # ---------------------------------------------------------------------------
@@ -154,7 +165,7 @@ def warehouse_ctx(*, readonly: bool = True) -> Iterator[_Warehouse]:
                 close_fn()
 
 
-def query(sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
+def query(sql: str, params: _Params = None) -> pd.DataFrame:
     """Run a SELECT and return a DataFrame. Errors surface as ``st.error``."""
     try:
         wh = _build_backend(readonly=True)
@@ -171,7 +182,7 @@ def query(sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def query_silent(sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame:
+def query_silent(sql: str, params: _Params = None) -> pd.DataFrame:
     """Like :func:`query` but swallows errors silently.
 
     Use for opportunistic lookups on tables that may not yet exist
@@ -191,7 +202,7 @@ def query_silent(sql: str, params: dict[str, Any] | None = None) -> pd.DataFrame
         return pd.DataFrame()
 
 
-def query_scalar(sql: str, params: dict[str, Any] | None = None) -> Any:
+def query_scalar(sql: str, params: _Params = None) -> Any:
     """Run a SELECT and return the first column of the first row, or ``None``."""
     try:
         wh = _build_backend(readonly=True)

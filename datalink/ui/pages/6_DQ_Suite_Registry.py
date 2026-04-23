@@ -120,11 +120,13 @@ st.markdown(
 
 
 def _query(sql: str, params: tuple[Any, ...] = ()) -> pd.DataFrame:
-    """Thin wrapper over datalink.ui._query.query_silent — keeps callers unchanged."""
-    param_dict: dict[str, Any] | None = None
-    if params:
-        param_dict = {f"p{i}": v for i, v in enumerate(params)}
-    return _wh_query_silent(sql, param_dict)
+    """Thin wrapper over datalink.ui._query.query_silent — keeps callers unchanged.
+
+    Params are passed through as a list so the SQL's ``?`` positional
+    placeholders bind correctly (DuckDB native). Snowflake paramstyle
+    reconciliation is Day 3 work.
+    """
+    return _wh_query_silent(sql, list(params) if params else None)
 
 
 # ============================================================================

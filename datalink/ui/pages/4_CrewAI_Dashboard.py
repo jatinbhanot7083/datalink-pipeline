@@ -226,13 +226,9 @@ st.markdown(
 
 
 def _try_query(sql: str, params: tuple[Any, ...] = ()) -> pd.DataFrame:
-    """Backwards-compatible wrapper — params kept for existing call sites."""
-    param_dict: dict[str, Any] | None = None
-    if params:
-        # None of the current call sites on this page actually pass params,
-        # but preserve the shape for future-proofing via named params.
-        param_dict = {f"p{i}": v for i, v in enumerate(params)}
-    return _wh_query_silent(sql, param_dict)
+    """Backwards-compatible wrapper. Params pass through as a positional
+    list so DuckDB's ``?`` placeholders bind correctly."""
+    return _wh_query_silent(sql, list(params) if params else None)
 
 
 def _parse_preview(raw: str | None) -> dict[str, Any]:

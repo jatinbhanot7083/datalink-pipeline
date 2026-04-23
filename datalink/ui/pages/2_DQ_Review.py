@@ -273,7 +273,7 @@ def _show_audit(suite_id: str) -> None:
                 "FROM CONTROL.dq_suite_audit_log "
                 "WHERE suite_id = ? "
                 "ORDER BY ts DESC",
-                [suite_id],  # type: ignore[arg-type]
+                [suite_id],
             )
         df = pd.DataFrame(rows)
         if df.empty:

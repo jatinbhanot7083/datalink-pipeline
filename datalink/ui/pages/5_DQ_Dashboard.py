@@ -114,11 +114,9 @@ st.markdown(
 
 
 def _try_query(sql: str, params: tuple[Any, ...] = ()) -> pd.DataFrame:
-    """Thin wrapper preserving the signature used throughout this page."""
-    param_dict: dict[str, Any] | None = None
-    if params:
-        param_dict = {f"p{i}": v for i, v in enumerate(params)}
-    return _wh_query_silent(sql, param_dict)
+    """Thin wrapper preserving the signature used throughout this page.
+    Params pass through as a list so DuckDB ``?`` placeholders bind."""
+    return _wh_query_silent(sql, list(params) if params else None)
 
 
 # ============================================================================

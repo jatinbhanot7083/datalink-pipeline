@@ -101,11 +101,12 @@ def _try_query(sql: str, params: tuple[Any, ...] = ()) -> pd.DataFrame:
     """Run a query; return empty DataFrame on any failure (CONTROL not yet
     bootstrapped, column missing, etc.). Keeps the dashboard "demoable" on
     a fresh install. Delegates to datalink.ui._query so the backend is
-    config-driven (DuckDB or Snowflake)."""
-    param_dict: dict[str, Any] | None = None
-    if params:
-        param_dict = {f"p{i}": v for i, v in enumerate(params)}
-    return _wh_query_silent(sql, param_dict)
+    config-driven (DuckDB or Snowflake).
+
+    Params pass through as a list so the SQL's ``?`` positional
+    placeholders bind correctly under DuckDB.
+    """
+    return _wh_query_silent(sql, list(params) if params else None)
 
 
 # ============================================================================
