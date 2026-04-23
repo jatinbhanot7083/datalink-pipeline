@@ -124,23 +124,40 @@ def _warehouse_type() -> str:
         return "duckdb"
 
 
+# Module-level Snowflake adapter singleton. The connector's auth handshake
+# is ~2-3s; opening a fresh connection per UI query makes every page load
+# wait for cumulative handshakes. Keeping one persistent connection across
+# all queries in the process lets Streamlit pages render at network-latency
+# speed (~100ms/query in Azure East US 2) instead of auth + network.
+#
+# Lifetime: survives for the lifetime of the Streamlit server process.
+# snowflake.connector uses TCP keepalive + session renewal internally, so
+# the connection stays healthy across an entire demo.
+_snowflake_singleton: _Warehouse | None = None
+
+
 def _build_backend(*, readonly: bool) -> _Warehouse:
     """Construct the right backend for the current configuration."""
     wh_type = _warehouse_type()
     if wh_type == "duckdb":
+        # DuckDB uses per-query short-lived connections to avoid fighting
+        # the scheduler for the file lock — stateless shim is correct here.
         return _DuckDBShim(WAREHOUSE_PATH, readonly=readonly)
 
-    # Snowflake: build the adapter directly to avoid pulling in the full
-    # factory (which eagerly imports every adapter incl. azure / sftp /
-    # pyodbc — any missing optional dep would block the warehouse query
-    # path in the Streamlit container).
+    # Snowflake: reuse a single cached adapter. No file locks to juggle,
+    # and the auth handshake is expensive enough that per-query recreation
+    # dominates page-render latency.
     if wh_type == "snowflake":
-        from datalink.adapters.warehouse.snowflake_adapter import SnowflakeWarehouse
-        from datalink.config.models import WarehouseConfig
+        global _snowflake_singleton
+        if _snowflake_singleton is None:
+            from datalink.adapters.warehouse.snowflake_adapter import SnowflakeWarehouse
+            from datalink.config.models import WarehouseConfig
 
-        # SnowflakeWarehouse._connect falls back to SNOWFLAKE_* env vars
-        # when WarehouseConfig fields are None.
-        return cast("_Warehouse", SnowflakeWarehouse(WarehouseConfig(type="snowflake")))
+            _snowflake_singleton = cast(
+                "_Warehouse",
+                SnowflakeWarehouse(WarehouseConfig(type="snowflake")),
+            )
+        return _snowflake_singleton
 
     # Future backends — fall back to the full factory path.
     from datalink.adapters.factory import build_adapters
@@ -173,17 +190,18 @@ def warehouse_ctx(*, readonly: bool = True) -> Iterator[_Warehouse]:
                 close_fn()
 
 
+# Backends returned by _build_backend for DuckDB are stateless (per-query
+# short-lived conns inside the shim); for Snowflake they're a long-lived
+# singleton. In neither case do we want to call close() after a single
+# query — DuckDB shim handles its own lifecycle, and closing the Snowflake
+# singleton would force a full re-auth on the next page render. `warehouse_ctx`
+# remains the explicit batch-boundary close point for callers who want one.
+
+
 def query(sql: str, params: _Params = None) -> pd.DataFrame:
     """Run a SELECT and return a DataFrame. Errors surface as ``st.error``."""
     try:
-        wh = _build_backend(readonly=True)
-        try:
-            rows = wh.query(sql, params)
-        finally:
-            close_fn = getattr(wh, "close", None)
-            if callable(close_fn):
-                with suppress(Exception):
-                    close_fn()
+        rows = _build_backend(readonly=True).query(sql, params)
         return pd.DataFrame(rows)
     except Exception as exc:
         st.error(f"Warehouse query failed: {exc}")
@@ -197,14 +215,7 @@ def query_silent(sql: str, params: _Params = None) -> pd.DataFrame:
     (e.g. before any pipeline run has populated BRONZE_*).
     """
     try:
-        wh = _build_backend(readonly=True)
-        try:
-            rows = wh.query(sql, params)
-        finally:
-            close_fn = getattr(wh, "close", None)
-            if callable(close_fn):
-                with suppress(Exception):
-                    close_fn()
+        rows = _build_backend(readonly=True).query(sql, params)
         return pd.DataFrame(rows)
     except Exception:
         return pd.DataFrame()
@@ -213,14 +224,7 @@ def query_silent(sql: str, params: _Params = None) -> pd.DataFrame:
 def query_scalar(sql: str, params: _Params = None) -> Any:
     """Run a SELECT and return the first column of the first row, or ``None``."""
     try:
-        wh = _build_backend(readonly=True)
-        try:
-            rows = wh.query(sql, params)
-        finally:
-            close_fn = getattr(wh, "close", None)
-            if callable(close_fn):
-                with suppress(Exception):
-                    close_fn()
+        rows = _build_backend(readonly=True).query(sql, params)
         if not rows:
             return None
         # Warehouse.query contract guarantees list[dict[str, Any]] — take
