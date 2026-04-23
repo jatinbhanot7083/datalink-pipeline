@@ -1,28 +1,27 @@
-"""Suite Browser — Phase 6 Commit 2.
+"""DQ Suite Registry — versioned catalog of DQ suites and expectations.
 
-Answers the question: "What DQ suites + expectations exist for a given
-client, for a given source_type (Claims / Membership / Provider)?"
+Answers the question: "What DQ suites and expectations exist for a
+given client, for a given source_type (Claims / Membership / Provider)?"
 
-Catalog-style browser. Not operational (doesn't trigger anything). Pure
-read model over CONTROL.dq_suites. Lets an operator:
+Read-only registry view over CONTROL.dq_suites. Operators can:
 
-  * Pick a client (or view all)
-  * Pick a source_type (Claims / Membership / Provider)
-  * See every suite (baseline + agent-authored + ui-authored) with status
-  * Expand any suite to see the FULL list of expectations (not PHI — just
-    the rules themselves: "expect_column_values_to_not_be_null on claim_id")
-  * See each suite's schema_fingerprint so you can tell when the agent
-    decides the table changed
+  * Filter by client (or view all)
+  * Filter by source_type (Claims / Membership / Provider)
+  * See every suite (baseline + agent-authored + UI-authored) with status
+  * Expand any suite to see the complete expectation list — rule shape
+    only, not row-level data (e.g. "expect_column_values_to_not_be_null
+    on claim_id")
+  * See each suite's schema_fingerprint so drift is attributable
 
 Data source
 -----------
 CONTROL.dq_suites + CONTROL.dq_suite_audit_log. Zero joins outside CONTROL.
 
-What you DON'T see here (by design)
------------------------------------
-* Actual data values → use DuckDB / Adminer
-* Pass/fail stats per suite → that's the DQ Dashboard
-* Agent reasoning logs → that's the CrewAI Dashboard
+What this page intentionally excludes
+-------------------------------------
+* Actual data values → use the Warehouse Explorer
+* Pass/fail statistics per suite → see the DQ Dashboard
+* Agent reasoning logs → see the CrewAI Dashboard
 """
 
 from __future__ import annotations
@@ -44,11 +43,16 @@ from datalink.ui._bootstrap import ensure_warehouse_exists  # noqa: E402
 ensure_warehouse_exists(WAREHOUSE_PATH)
 
 st.set_page_config(
-    page_title="DataLink — Suite Browser",
+    page_title="DataLink — DQ Suite Registry",
     page_icon="📚",
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# Shared sidebar nav (defined in datalink/ui/_nav.py).
+from datalink.ui._nav import render_sidebar  # noqa: E402
+
+render_sidebar(active="DQ Suite Registry")
 
 _NAVY = "#0a1a3e"
 _GOLD = "#d4af37"
@@ -135,14 +139,16 @@ def _query(sql: str, params: tuple[Any, ...] = ()) -> pd.DataFrame:
 # ============================================================================
 # HEADER
 # ============================================================================
-st.title("📚 Suite Browser")
+st.title("📚 DQ Suite Registry")
 st.markdown(
     '<div class="browser-hero">'
-    "<h2>Every DQ suite · every expectation · per client × per source</h2>"
-    "<p>Catalog of the complete DQ rule set in <code>CONTROL.dq_suites</code>. "
-    "Baseline (seeded), agent-authored (auto-approved or pending review), and UI-authored "
-    "suites all appear here with their full expectation lists. "
-    "Read-only — this page describes, doesn't execute.</p>"
+    "<h2>Versioned catalog of every DQ suite and expectation</h2>"
+    "<p>Complete view of the quality rule set held in "
+    "<code>CONTROL.dq_suites</code> — baseline suites seeded at bootstrap, "
+    "agent-authored suites (auto-approved or pending human review), and "
+    "suites authored via the DQ Author page. Filter by client and source, "
+    "then drill into any suite to see every expectation with its kwargs "
+    "and metadata. Read-only — this registry describes, it does not execute.</p>"
     "</div>",
     unsafe_allow_html=True,
 )

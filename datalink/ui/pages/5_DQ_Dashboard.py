@@ -53,6 +53,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Shared sidebar nav (defined in datalink/ui/_nav.py).
+from datalink.ui._nav import render_sidebar  # noqa: E402
+
+render_sidebar(active="DQ Dashboard")
+
 _NAVY = "#0a1a3e"
 _GOLD = "#d4af37"
 _GREEN = "#047857"

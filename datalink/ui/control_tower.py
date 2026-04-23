@@ -88,8 +88,14 @@ st.set_page_config(
     page_title="DataLink Control Tower",
     page_icon="🏛️",
     layout="wide",
-    initial_sidebar_state="collapsed",
+    initial_sidebar_state="expanded",
 )
+
+# Shared sidebar nav — Dashboards + External Tools + Databases.
+# Defined in datalink/ui/_nav.py so every page gets the same nav.
+from datalink.ui._nav import render_sidebar  # noqa: E402
+
+render_sidebar(active="Control Tower")
 
 _NAVY = "#0a1a3e"
 _GOLD = "#d4af37"

@@ -388,7 +388,7 @@ def emit_all_rules(profile: dict[str, Any]) -> list[dict[str, Any]]:
     """Convenience — union of every emitter, in a stable order.
 
     Order matters for deterministic suite fingerprints and for
-    human-readable diff output in the Suite Browser.
+    human-readable diff output in the DQ Suite Registry.
     """
     return [
         *emit_completeness_rules(profile),

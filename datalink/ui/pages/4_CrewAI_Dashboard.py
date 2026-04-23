@@ -46,6 +46,11 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
+# Shared sidebar nav (defined in datalink/ui/_nav.py).
+from datalink.ui._nav import render_sidebar  # noqa: E402
+
+render_sidebar(active="CrewAI Dashboard")
+
 # ============================================================================
 # THEME
 # ============================================================================
@@ -88,9 +93,10 @@ _AGENT_META: dict[str, dict[str, str]] = {
         "crew": "pre_validation",
         "label": "Rule Reviewer",
         "role": (
-            "Inspects the draft rules and flags any that need human sign-off "
-            "(e.g. value-set rules where the agent can't be sure of the "
-            "complete set). Lands the draft in CONTROL.dq_suites."
+            "Inspects the draft expectations and flags any that require human "
+            "approval (e.g. value-set rules where the agent cannot "
+            "independently verify the complete set). Persists the draft to "
+            "CONTROL.dq_suites."
         ),
     },
     "RootCauseAgent": {
@@ -309,11 +315,13 @@ if crew_sel != "<all>":
 st.title("🤖 CrewAI Dashboard")
 st.markdown(
     '<div class="ai-hero">'
-    "<h2>AI-Native Data Quality — in plain English</h2>"
-    "<p>6 autonomous agents work in two crews: <b>Pre-Checks</b> drafts quality "
-    "rules before your data runs; <b>Incident Response</b> diagnoses + recommends "
-    "fixes when a rule breaks. Every decision auto-logged, PHI-guarded at the "
-    "LLM boundary, and human-approval-required for any change.</p>"
+    "<h2>Agentic Data Quality Operations</h2>"
+    "<p>Six autonomous agents operate across two crews. The "
+    "<b>Pre-Validation Crew</b> authors quality expectations before "
+    "ingestion; the <b>Post-Validation Crew</b> performs root-cause "
+    "analysis and recommends remediation when an expectation fails. "
+    "Every agent decision is recorded to the audit log, PHI is redacted "
+    "at the LLM boundary, and all structural changes require human approval.</p>"
     "</div>",
     unsafe_allow_html=True,
 )
@@ -358,56 +366,67 @@ st.markdown(
 # ============================================================================
 # HOW IT WORKS — expandable explainer
 # ============================================================================
-with st.expander("📖 How the agents actually work — click to expand", expanded=False):
+with st.expander("📖 Agent architecture and execution flow", expanded=False):
     col1, col2 = st.columns(2)
     with col1:
-        st.markdown("#### 🧭 Flow A: BEFORE a DAG runs (Pre-Checks Crew)")
+        st.markdown("#### Flow A — Pre-Validation Crew (pre-ingestion)")
         st.markdown(
             """
-When a new client is onboarded or a suite needs refreshing, the Pre-Checks Crew runs in sequence:
+Invoked when a new client is onboarded or when schema drift invalidates a
+cached suite. The three agents execute sequentially:
 
-**1. 📊 Data Profiler**
-→ Reads `BRONZE_{CLIENT}.RAW_CLAIMS/MEMBERSHIP/PROVIDER`
-→ Computes: row count, null % per column, distinct-value count per column
-→ NO row-level data leaves the warehouse
+**1. Data Profiler**
+- Reads `BRONZE_{CLIENT}.RAW_CLAIMS / RAW_MEMBERSHIP / RAW_PROVIDER`
+- Computes aggregate statistics: row count, null percentage per column,
+  distinct-value count per column
+- No row-level data is transmitted beyond the warehouse boundary
 
-**2. ✍️ Rule Author**
-→ Takes those stats and proposes rules:
-  * "claim_id has 0% nulls → REQUIRE not_null"
-  * "claim_status has 4 distinct values → REQUIRE in_set (human must supply set)"
-→ Output: a DRAFT `dq_suite` in CONTROL.dq_suites
+**2. Expectation Author**
+- Consumes the profile and emits structured expectations, for example:
+  - `claim_id` exhibits 0% nulls → `expect_column_values_to_not_be_null`
+  - `claim_status` has 4 distinct values → `expect_column_values_to_be_in_set`
+    (flagged for human-supplied value set)
+- Persists a DRAFT suite to `CONTROL.dq_suites`
 
-**3. 🔍 Rule Reviewer**
-→ Scans the draft, flags rules needing human sign-off
-→ Landing: the draft appears in the DQ Review page as `PENDING_REVIEW`
+**3. Expectation Reviewer**
+- Reviews the draft and flags expectations that require human approval
+- Flagged items surface in the DQ Review page with status `PENDING_REVIEW`
 
-**Net effect:** New client onboarded → 9 draft suites proposed automatically → human approves or edits → they become LIVE.
+**Outcome:** A new client is onboarded with a complete set of draft suites
+ready for review or auto-approval, with zero manual authoring required.
             """
         )
     with col2:
-        st.markdown("#### 🚨 Flow B: WHEN a rule BREAKS (Incident Response Crew)")
+        st.markdown("#### Flow B — Post-Validation Crew (incident response)")
         st.markdown(
             """
-GX checkpoint flags a BREACH (fail % ≥ threshold). The Incident Response Crew fires automatically:
+Invoked automatically when a Great Expectations checkpoint reports a
+breach (failure percentage at or above the configured threshold):
 
-**4. 🔬 Root-Cause Analyst**
-→ Pulls the failing expectations from `gx_validation_results`
-→ Classifies each: `SCHEMA_CHANGE` / `DATA_QUALITY` / `VOLUME_ANOMALY` / `CONFIG_ERROR`
-→ Looks at history: first-time issue, or recurring?
+**4. Root-Cause Analyst**
+- Retrieves failing expectations from `gx_validation_results`
+- Classifies each failure into one of: `SCHEMA_CHANGE`, `DATA_QUALITY`,
+  `VOLUME_ANOMALY`, `CONFIG_ERROR`
+- Consults historical runs to determine whether the issue is recurring
+  or first observed
 
-**5. 🛠️ Remediation Planner**
-→ Takes the classification + picks a canned playbook:
-  * `PB-SCHEMA-CHANGE` → ABORT_AND_INVESTIGATE
-  * `PB-DATA-QUALITY` → PARTIAL_LOAD (split batch, quarantine failures)
-  * `PB-VOLUME-ANOMALY` → FIX_AND_RESUME
-  * `PB-CONFIG-ERROR` → FIX_AND_RESUME
-→ **ALWAYS** tags output `DBA_APPROVAL_REQUIRED` — never executes anything
+**5. Remediation Planner**
+- Maps the classification to a predefined playbook:
+  - `PB-SCHEMA-CHANGE` → ABORT_AND_INVESTIGATE
+  - `PB-DATA-QUALITY` → PARTIAL_LOAD (quarantine failing records)
+  - `PB-VOLUME-ANOMALY` → FIX_AND_RESUME
+  - `PB-CONFIG-ERROR` → FIX_AND_RESUME
+- Every recommendation is tagged `DBA_APPROVAL_REQUIRED`; the agent does
+  not execute any remediation action directly
 
-**6. 📨 Incident Reporter**
-→ Sends severity-tagged notification to webhook / email / Teams
-→ Writes to the webhook-stub inbox at `http://localhost:9000` for demo
+**6. Incident Reporter**
+- Issues a severity-tagged notification to the configured channel
+  (webhook, email, Teams). The local demo environment captures these in
+  the webhook inbox at `http://localhost:9000`.
 
-**Net effect:** BREACH → 3-agent diagnosis → human sees a fully-formed incident ticket with classification, playbook, recommended actions, MTTR estimate — in under 5 seconds.
+**Outcome:** A breach is converted into a fully-structured incident
+record — classification, recommended playbook, action items, MTTR
+estimate — within seconds of detection.
             """
         )
 
@@ -666,11 +685,12 @@ def _render_narrative(row: pd.Series) -> None:
         task = f"Review {total} draft rules in <b>{suite}</b>"
         if isinstance(flagged, int | str) and str(flagged) != "0":
             result = (
-                f"<b>{flagged}</b> rules need human sign-off (usually value-set rules "
-                f"where the agent can't know the complete valid set). The rest are auto-approvable."
+                f"<b>{flagged}</b> expectations require human approval — typically "
+                f"value-set rules where the agent cannot infer the complete valid "
+                f"set. The remainder qualify for auto-approval."
             )
         else:
-            result = f"All {total} rules look standard — no human review required."
+            result = f"All {total} expectations satisfy structural-confidence criteria; no human review required."
 
     elif agent == "RootCauseAgent":
         run_id = output.get("run_id", "?")
