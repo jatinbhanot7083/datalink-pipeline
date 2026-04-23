@@ -347,12 +347,39 @@ def task_gold_checkpoint(ctx: TaskContext) -> dict[str, Any]:
 
 
 def task_router_push(ctx: TaskContext) -> dict[str, Any]:
-    """Fan Gold UM out to every target in features.warehouse_router.targets."""
+    """Fan Gold UM out to every target in features.warehouse_router.targets.
+
+    Phase-6 multi-tenancy: the Silver/Gold dbt models write to
+    `SILVER_gold_um_{CLIENT}` (uppercase client suffix) for non-default
+    clients, and plain `SILVER_gold_um` for `default`. The router's
+    `push_gold_um_to_operational` defaults to the no-suffix schema —
+    without this client-aware override we'd silently push 0 rows on every
+    non-default tenant. See datalink/pipeline/router/bulk_push.py:50.
+
+    NOTE: this fix ensures rows flow to SQL Server / Postgres. The target
+    tables themselves (`UM.PatientAuth` etc) have no `client_id` column
+    today, so a subsequent run for another client OVERWRITES the previous
+    client's rows on the same PK. Multi-tenant target DDL is a separate
+    design decision — flagged as a follow-up.
+    """
     from datalink.pipeline.router import push_gold_um_to_operational
 
-    result = push_gold_um_to_operational(ctx.adapters, ctx.settings)
+    client = (ctx.client_id or "default").strip()
+    if client and client != "default":
+        source_schema = f"SILVER_gold_um_{client.upper()}"
+    else:
+        source_schema = "SILVER_gold_um"
+
+    _log.info(
+        "task.router_push.start",
+        client_id=client,
+        source_schema=source_schema,
+    )
+    result = push_gold_um_to_operational(ctx.adapters, ctx.settings, source_schema=source_schema)
     return {
         "all_green": result.all_green,
+        "client_id": client,
+        "source_schema": source_schema,
         "targets_requested": result.targets_requested,
         "targets_skipped": result.targets_skipped,
         "per_target_row_totals": {t.target: t.total_rows for t in result.per_target},
