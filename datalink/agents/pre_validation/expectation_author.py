@@ -14,6 +14,7 @@ from __future__ import annotations
 from typing import Any
 
 from datalink.agents.base import AgentBase
+from datalink.agents.pre_validation.rules import emit_all_rules
 
 
 class ExpectationAuthorAgent(AgentBase):
@@ -37,28 +38,13 @@ class ExpectationAuthorAgent(AgentBase):
         # Deterministic rule-based authorship (works in stub mode too — the LLM
         # acts as NARRATIVE only; the structured suite is code-generated from
         # the profile so it's reproducible and testable).
-        expectations: list[dict[str, Any]] = []
-        for col, stats in profile.items():
-            if not isinstance(stats, dict):
-                continue
-            null_pct = stats.get("null_pct", 0)
-            distinct = stats.get("distinct_count", 0)
-            # Columns with <1% nulls → expect not_null
-            if null_pct < 1.0:
-                expectations.append(
-                    {"expectation_type": "expect_column_values_to_not_be_null", "column": col}
-                )
-            # Low cardinality (likely enum) → in_set (but we only have stats,
-            # not the actual values — so we SUGGEST a manual review)
-            if 1 < distinct <= 10:
-                expectations.append(
-                    {
-                        "expectation_type": "expect_column_values_to_be_in_set",
-                        "column": col,
-                        "review_required": True,
-                        "rationale": f"distinct_count={distinct} — likely enum; caller must supply value_set",
-                    }
-                )
+        #
+        # Phase 6 Commit 3: all rule shapes live in pre_validation.rules — the
+        # Author is now a thin orchestrator. That keeps the auto-vs-HITL split
+        # visible in one place (rules.emit_enum_review_rules is the only one
+        # that flags review_required=True) and makes every emitter unit-testable
+        # without needing a warehouse adapter.
+        expectations: list[dict[str, Any]] = emit_all_rules(profile)
 
         # Ask LLM to *review* the plan (real value-add: natural-language rationale).
         safe_payload: dict[str, Any] = {
@@ -146,30 +132,57 @@ class ExpectationAuthorAgent(AgentBase):
             review_name = f"{base_name}__review"
 
             # Shape helper — common for auto + review buckets.
+            #
+            # NB: Commit 3 carries SIX new kwarg flavours (regex, mostly,
+            # column_A/B, or_equal, parse_strings_as_datetimes, sla_hours)
+            # because the expanded emitters in rules.py produce them. Each
+            # is additive — an emitter that doesn't set the key skips it.
             def _shape(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 shaped: list[dict[str, Any]] = []
                 for e in rules:
                     exp_type = e.get("expectation_type", "")
                     kwargs: dict[str, Any] = {}
+                    # Single-column kwargs
                     if e.get("column"):
                         kwargs["column"] = e["column"]
                     if e.get("value_set"):
                         kwargs["value_set"] = e["value_set"]
                     if e.get("regex"):
                         kwargs["regex"] = e["regex"]
+                    if e.get("mostly") is not None:
+                        kwargs["mostly"] = e["mostly"]
+                    # Range kwargs (Timeliness / numeric ranges)
                     if e.get("min_value") is not None:
                         kwargs["min_value"] = e["min_value"]
                     if e.get("max_value") is not None:
                         kwargs["max_value"] = e["max_value"]
+                    if e.get("parse_strings_as_datetimes") is not None:
+                        kwargs["parse_strings_as_datetimes"] = e["parse_strings_as_datetimes"]
+                    # Pair kwargs (Consistency invariants)
+                    if e.get("column_A"):
+                        kwargs["column_A"] = e["column_A"]
+                    if e.get("column_B"):
+                        kwargs["column_B"] = e["column_B"]
+                    if e.get("or_equal") is not None:
+                        kwargs["or_equal"] = e["or_equal"]
+
+                    # Prefer the emitter's own dimension+severity hints —
+                    # fall back to inference (old behaviour) if absent.
+                    dq_dim = e.get("dq_dimension") or _infer_dimension(exp_type)
+                    severity = e.get("severity", "MEDIUM")
                     meta = {
-                        "dq_dimension": _infer_dimension(exp_type),
-                        "severity": "MEDIUM",
+                        "dq_dimension": dq_dim,
+                        "severity": severity,
                         "description": e.get(
                             "rationale",
                             "Auto-proposed by ExpectationAuthorAgent from profile stats.",
                         ),
                         "review_required": e.get("review_required", False),
                     }
+                    # Timeliness carries sla_hours as meta (not a GX kwarg)
+                    # so the runtime substitutes now / now-Δ at execute time.
+                    if e.get("sla_hours") is not None:
+                        meta["sla_hours"] = e["sla_hours"]
                     shaped.append({"expectation_type": exp_type, "kwargs": kwargs, "meta": meta})
                 return shaped
 
@@ -244,16 +257,26 @@ class ExpectationAuthorAgent(AgentBase):
 
 
 def _infer_dimension(expectation_type: str) -> str:
-    """Map a GX expectation type to one of the 6 DQ dimensions."""
+    """Map a GX expectation type to one of the 6 DQ dimensions.
+
+    Fallback only — emitters in pre_validation.rules set `dq_dimension`
+    explicitly, and _shape() prefers that. This helper exists for legacy
+    rules (e.g. human-authored suites that didn't tag a dimension) and
+    for hand-written unit tests.
+    """
     t = expectation_type.lower()
     if "not_be_null" in t:
         return "Completeness"
     if "be_unique" in t:
         return "Uniqueness"
-    if "max_to_be_between" in t and "time" in t.lower():
+    # Timeliness: column_max_to_be_between is how GX expresses "latest
+    # row's timestamp is within the SLA window". The earlier bug gated
+    # this on `"time" in t` which never matches — max_to_be_between now
+    # resolves to Timeliness cleanly.
+    if "max_to_be_between" in t or "min_to_be_between" in t:
         return "Timeliness"
-    if "match_regex" in t or "be_in_set" in t or "be_between" in t or "match_ordered_list" in t:
-        return "Validity"
     if "pair_values" in t:
         return "Consistency"
+    if "match_regex" in t or "be_in_set" in t or "be_between" in t or "match_ordered_list" in t:
+        return "Validity"
     return "Validity"  # default bucket

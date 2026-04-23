@@ -84,11 +84,7 @@ class PostgresOperationalDb:
         else:
             on_conflict = f"ON CONFLICT ({pk_list}) DO NOTHING"
 
-        stmt = (
-            f"INSERT INTO {schema}.{table} ({col_list}) "
-            f"VALUES ({placeholders}) "
-            f"{on_conflict}"
-        )
+        stmt = f"INSERT INTO {schema}.{table} ({col_list}) VALUES ({placeholders}) {on_conflict}"
         conn = self._connect()
         with conn.cursor() as cur:
             cur.executemany(stmt, [tuple(r[c] for c in cols) for r in rows_list])

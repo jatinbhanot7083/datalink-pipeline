@@ -289,7 +289,7 @@ def _tile(label: str, value: str, sub: str = "", color_class: str = "") -> str:
         else '<div class="value muted">—</div>'
     )
     sub_html = f'<div class="sub">{sub}</div>' if sub else ""
-    return f'<div class="ct-tile"><div class="label">{label}</div>' f"{value_html}{sub_html}</div>"
+    return f'<div class="ct-tile"><div class="label">{label}</div>{value_html}{sub_html}</div>'
 
 
 def _state_color(state: str | None) -> str:

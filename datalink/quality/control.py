@@ -299,7 +299,7 @@ class PipelineControl:
 
     def current(self, pipeline_id: str) -> PipelineState | None:
         rows = self._wh.query(
-            f"SELECT status FROM {CONTROL_SCHEMA}.pipeline_control_state " "WHERE pipeline_id = $p",
+            f"SELECT status FROM {CONTROL_SCHEMA}.pipeline_control_state WHERE pipeline_id = $p",
             {"p": pipeline_id},
         )
         if not rows:

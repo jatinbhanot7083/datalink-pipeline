@@ -81,8 +81,7 @@ class DuckDBWarehouse:
             header = opts.get("header", True)
             delimiter = opts.get("delimiter", ",")
             sql = (
-                f"INSERT INTO {target_table} "
-                f"SELECT * FROM read_csv_auto(?, header = ?, delim = ?)"
+                f"INSERT INTO {target_table} SELECT * FROM read_csv_auto(?, header = ?, delim = ?)"
             )
             conn.execute(sql, [stage_uri, header, delimiter])
         elif file_format == "parquet":

@@ -28,8 +28,17 @@ class ProfilerAgent(AgentBase):
         table = context["table"]  # e.g. "BRONZE.RAW_CLAIMS"
         # Run a SQL aggregate per column. We discover columns first.
         cols_result = self._wh.query(f"DESCRIBE {table}")
-        # DuckDB DESCRIBE returns column_name / column_type
-        col_names: list[str] = [r["column_name"] for r in cols_result]
+        # DuckDB DESCRIBE returns column_name / column_type. Some adapters
+        # use lowercase keys, so we defensively normalise.
+        col_specs: list[tuple[str, str]] = [
+            (
+                str(r.get("column_name") or r.get("name") or ""),
+                str(r.get("column_type") or r.get("type") or ""),
+            )
+            for r in cols_result
+        ]
+        col_names: list[str] = [c for c, _ in col_specs]
+        col_types: dict[str, str] = {c: t for c, t in col_specs}
 
         row_count_rows = self._wh.query(f"SELECT COUNT(*) AS c FROM {table}")
         row_count = int(row_count_rows[0]["c"]) if row_count_rows else 0
@@ -51,6 +60,9 @@ class ProfilerAgent(AgentBase):
                 else 0.0
             )
             profile[col] = {
+                # dtype carries through for Commit-3 rule emitters (Timeliness
+                # needs it to detect timestamp columns; Validity uses name only).
+                "dtype": col_types.get(col, ""),
                 "element_count": int(stats["element_count"]),
                 "null_count": int(stats["null_count"]),
                 "null_pct": round(null_pct, 3),

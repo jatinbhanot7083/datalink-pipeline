@@ -62,7 +62,7 @@ st.markdown(
       .status-DRAFT {{background:#e0e7ff;color:#1e3a8a;padding:.15rem .5rem;border-radius:3px;font-weight:600}}
       .status-PENDING_REVIEW {{background:#fef3c7;color:#92400e;padding:.15rem .5rem;border-radius:3px;font-weight:600}}
       .status-APPROVED {{background:#d1fae5;color:#047857;padding:.15rem .5rem;border-radius:3px;font-weight:600}}
-      .status-LIVE {{background:#{_GOLD.lstrip('#')};color:#{_NAVY.lstrip('#')};padding:.15rem .5rem;border-radius:3px;font-weight:700}}
+      .status-LIVE {{background:#{_GOLD.lstrip("#")};color:#{_NAVY.lstrip("#")};padding:.15rem .5rem;border-radius:3px;font-weight:700}}
       .status-ARCHIVED {{background:#e5e7eb;color:#4b5563;padding:.15rem .5rem;border-radius:3px;font-weight:600}}
       .status-REJECTED {{background:#fee2e2;color:#991b1b;padding:.15rem .5rem;border-radius:3px;font-weight:600}}
     </style>

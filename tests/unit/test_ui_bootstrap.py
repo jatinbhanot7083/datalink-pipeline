@@ -35,7 +35,7 @@ def test_ensure_warehouse_creates_control_schema(tmp_path: Path) -> None:
     conn = duckdb.connect(str(db), read_only=True)
     try:
         rows = conn.execute(
-            "SELECT table_name FROM information_schema.tables " "WHERE table_schema = 'CONTROL'"
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'CONTROL'"
         ).fetchall()
         tables = {r[0] for r in rows}
     finally:

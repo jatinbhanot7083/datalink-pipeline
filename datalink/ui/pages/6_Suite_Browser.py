@@ -307,7 +307,7 @@ for (client, source), group in grouped:
             st.markdown(
                 f'<div class="suite-card">'
                 f'<div class="suite-head">'
-                f'  <span>{name_label}</span>'
+                f"  <span>{name_label}</span>"
                 f'  <span class="suite-badge" style="background:{status_color}">{status}</span>'
                 f"</div>"
                 f'<div class="suite-meta">'
@@ -315,7 +315,7 @@ for (client, source), group in grouped:
                 f"source: <b>{row['source']}</b> · "
                 f"created_by: <code>{row['created_by']}</code> · "
                 f"created_at: {row['created_at']} {fp_display}"
-                f'<br>{dim_html}'
+                f"<br>{dim_html}"
                 f"</div>"
                 f"</div>",
                 unsafe_allow_html=True,
@@ -355,6 +355,12 @@ for (client, source), group in grouped:
                     phrasing = f"<code>{exp_type}</code>"
                     if col:
                         phrasing += f" on column <code>{col}</code>"
+                    # Consistency pair rules carry column_A / column_B instead of `column`.
+                    col_a = kwargs.get("column_A")
+                    col_b = kwargs.get("column_B")
+                    if col_a and col_b:
+                        op = " ≥ " if kwargs.get("or_equal") else " > "
+                        phrasing += f" &middot; <code>{col_a}</code>{op}<code>{col_b}</code>"
                     extras = []
                     if kwargs.get("regex"):
                         extras.append(f"regex = <code>{kwargs['regex']}</code>")
@@ -370,6 +376,12 @@ for (client, source), group in grouped:
                         )
                     if kwargs.get("mostly"):
                         extras.append(f"mostly ≥ {kwargs['mostly']}")
+                    if kwargs.get("parse_strings_as_datetimes"):
+                        extras.append("parse_as_datetime = true")
+                    # Timeliness: sla_hours lives in meta, not kwargs.
+                    sla = meta.get("sla_hours")
+                    if sla:
+                        extras.append(f"rolling SLA = {sla}h")
                     if extras:
                         phrasing += " &middot; " + " &middot; ".join(extras)
 
