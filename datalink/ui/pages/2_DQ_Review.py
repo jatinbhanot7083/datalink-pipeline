@@ -315,12 +315,26 @@ except Exception as e:
     st.error(f"Can't reach the warehouse: {e}")
     st.stop()
 
+# Phase 6 Commit 2: suites ending with `__review` are the ONLY ones a human
+# needs to look at. Agent-authored auto-approved suites fast-track to LIVE
+# without appearing here. Human-authored suites (source=ui, source=baseline)
+# still surface normally. Filter logic:
+#   * suite_name ends with "__review"     → ALWAYS show (human-flag requires review)
+#   * suite_name starts with "auto_"      → AGENT-AUTHORED auto-approve bucket; never
+#                                            should appear here, but belt-and-braces hide
+#   * other suites (ui / baseline)        → show as-is
+queue = [
+    v for v in queue if v.suite_name.endswith("__review") or not v.suite_name.startswith("auto_")
+]
+
 st.markdown("## Pending Reviews")
 
 if not queue:
     st.success(
-        "✓ Inbox zero. No suites waiting on review. "
-        "When a DQ analyst clicks 📤 Submit on the Author page, they appear here."
+        "✓ Inbox zero. No suites awaiting human sign-off. "
+        "When agents flag rules for human review (or an analyst submits a suite), "
+        "they appear here. Agent-authored auto-approved rules go LIVE directly — "
+        "they do NOT appear on this page."
     )
 else:
     st.write(f"**{len(queue)}** suite(s) awaiting approval:")

@@ -99,6 +99,11 @@ class SuiteVersion:
     Phase 6: `source_type` identifies which ingested source the suite
     targets (CLAIMS / MEMBERSHIP / PROVIDER). NULL = stage-aggregate
     (legacy 5.8 row; do not mix with per-source suites).
+
+    Phase 6 Commit 2: `schema_fingerprint` is a 16-char sha256 of the
+    (column_name, column_type) tuples of the source table the suite
+    was authored against. Pre-Val crew skips re-authoring when the
+    fingerprint of the target table matches the LIVE suite's fingerprint.
     """
 
     suite_id: str
@@ -112,6 +117,7 @@ class SuiteVersion:
     created_by: str
     created_at: datetime
     source_type: str | None = None
+    schema_fingerprint: str | None = None
     submitted_at: datetime | None = None
     reviewed_by: str | None = None
     reviewed_at: datetime | None = None
@@ -131,6 +137,7 @@ class SuiteDraft:
     source: SuiteSource = SuiteSource.UI
     dq_dimensions: list[str] = field(default_factory=list)
     source_type: str | None = None
+    schema_fingerprint: str | None = None
 
 
 # ----------------------------------------------------------------------------
@@ -234,8 +241,9 @@ class SuiteRegistry:
         self._wh.execute(
             f"INSERT INTO {CONTROL_SCHEMA}.dq_suites "
             "(suite_id, client_id, suite_name, version, status, expectations, "
-            " dq_dimensions, source_type, source, created_by, created_at) "
-            "VALUES ($id, $c, $s, $v, $st, $e, $d, $srct, $src, $cb, $ts)",
+            " dq_dimensions, source_type, source, schema_fingerprint, "
+            " created_by, created_at) "
+            "VALUES ($id, $c, $s, $v, $st, $e, $d, $srct, $src, $fp, $cb, $ts)",
             {
                 "id": suite_id,
                 "c": draft.client_id,
@@ -246,6 +254,7 @@ class SuiteRegistry:
                 "d": json.dumps(draft.dq_dimensions),
                 "srct": draft.source_type,
                 "src": draft.source.value,
+                "fp": draft.schema_fingerprint,
                 "cb": draft.created_by,
                 "ts": datetime.now(UTC),
             },
@@ -448,8 +457,9 @@ def _row_to_version(row: dict[str, Any]) -> SuiteVersion:
         source=SuiteSource(row["source"]),
         created_by=row["created_by"],
         created_at=row["created_at"],
-        # source_type is nullable — older 5.8 rows may not have it.
+        # source_type + schema_fingerprint nullable — older 5.8 rows may not have them.
         source_type=row.get("source_type"),
+        schema_fingerprint=row.get("schema_fingerprint"),
         submitted_at=row.get("submitted_at"),
         reviewed_by=row.get("reviewed_by"),
         reviewed_at=row.get("reviewed_at"),

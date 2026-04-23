@@ -318,20 +318,40 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Phase 6 Commit 2: dynamic banner. Reads the actual env-var state of the
+# Streamlit container. GREEN if live Anthropic is wired. AMBER if stub.
+_llm_type = os.environ.get("DL_ADAPTERS__LLM__TYPE", "stub").lower()
+_llm_model = os.environ.get("DL_ADAPTERS__LLM__MODEL", "(default)")
+_llm_key_set = bool(os.environ.get("ANTHROPIC_API_KEY"))
+_thinking = os.environ.get("DL_FEATURES__AGENTS__THINKING_MODE", "off")
+
+if _llm_type == "anthropic" and _llm_key_set:
+    _banner_cls = "llm-mode-live"
+    _banner_text = (
+        f"<b>🟢 LIVE: Claude API active</b> &nbsp;&middot;&nbsp; "
+        f"model: <code>{_llm_model}</code> &nbsp;&middot;&nbsp; "
+        f"thinking: <b>{_thinking}</b> &nbsp;&middot;&nbsp; "
+        f"key: <code>…{(os.environ.get('ANTHROPIC_API_KEY', '') or '')[-4:]}</code> "
+        f"(last 4 chars). Every agent call below is a real Anthropic API request. "
+        f"Tokens shown are ACTUAL usage — billed to your account. "
+        f"Flip <code>DL_ADAPTERS__LLM__TYPE</code> to <code>stub</code> + restart "
+        f"control_tower to go offline (zero-cost stub responses)."
+    )
+else:
+    _banner_cls = "disclosure-box"
+    _banner_text = (
+        f"<b>⚙️ LLM mode: STUB (deterministic, offline, zero API cost).</b> "
+        f"DL_ADAPTERS__LLM__TYPE=<code>{_llm_type}</code>, "
+        f"ANTHROPIC_API_KEY set: <b>{_llm_key_set}</b>. "
+        f"To activate real Claude: put ANTHROPIC_API_KEY in <code>.env</code> + set "
+        f"<code>DL_ADAPTERS__LLM__TYPE=anthropic</code> + "
+        f"<code>docker compose restart airflow_scheduler control_tower</code>. "
+        f"Note: Claude Max subscription is a separate product (consumer chat UI) — "
+        f"you need an <b>API</b> key from console.anthropic.com for programmatic use."
+    )
+
 st.markdown(
-    '<div class="disclosure-box">'
-    "<b>⚙️ LLM mode:</b> This system uses <b>StubLlm by default</b> — deterministic "
-    "canned responses, zero network calls, <b>zero API cost</b>. No Claude Max "
-    "subscription or Anthropic API key is being consumed right now. "
-    "<br><b>Claude Max vs Anthropic API:</b> your Claude Max ($100/mo) subscription "
-    "is a separate product — it powers the Claude chat UI, NOT programmatic API "
-    "access. To use real Claude in CrewAI, create an Anthropic <b>API</b> account at "
-    "<code>console.anthropic.com</code> (~$5 credits is thousands of agent runs), "
-    "then <code>export ANTHROPIC_API_KEY=sk-ant-...</code> + "
-    "<code>export DL_ADAPTERS__LLM__TYPE=anthropic</code> + restart control_tower. "
-    "<br><b>Today ~70% of each agent's work is real anyway</b> — SQL aggregates, "
-    "rule derivation, history lookup, audit logging. Only the narrative prose "
-    "becomes richer with live Claude.</div>",
+    f'<div class="{_banner_cls}">{_banner_text}</div>',
     unsafe_allow_html=True,
 )
 

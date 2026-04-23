@@ -212,39 +212,83 @@ def _extract_expectation_results(
 def _load_suite_from_registry(
     warehouse: Warehouse, client_id: str, suite_name: str
 ) -> ExpectationSuite | None:
-    """Phase 5.8: look up the LIVE suite for (client_id, suite_name) in
-    CONTROL.dq_suites and materialise it as a GX ExpectationSuite.
+    """Phase 5.8 + Phase 6 Commit 2: load one logical DQ suite — UNION of
+    the baseline suite AND any agent-authored LIVE suites for the same
+    (client_id, source_type).
 
-    Falls back to `client_id='default'` when the requested client has no
-    LIVE suite yet (e.g., a new Client B on their first run — they use the
-    default baseline until their DQ analyst authors their own).
+    Contributors the GX checkpoint should evaluate, in order of resolution:
 
-    Returns None if neither the requested client nor default has a LIVE
-    suite — caller should fall back to the legacy `suite_builder` path.
+      1. The named baseline suite `suite_name` (e.g. `bronze_claims`).
+         Falls back to `client_id='default'` if the tenant has no row yet.
+      2. Agent-authored `auto_{source_type}` — rules the agent drafted
+         and auto-approved (no human needed). ALSO fallsback to default.
+      3. Agent-authored `auto_{source_type}__review` — rules that WERE
+         flagged for human review AND the human has already APPROVED.
+         If still PENDING_REVIEW, not LIVE, contributes nothing here.
+
+    All expectations from all 3 sources are UNIONed into ONE ExpectationSuite
+    that the checkpoint runs in a single pass. Operators see ONE suite
+    executing — the split exists only in authoring + review UX.
+
+    Returns None only if EVERY source is empty/absent — caller falls back
+    to the legacy `suite_builder` path.
     """
     # Lazy import to avoid circularity through __init__.py.
     from datalink.quality.registry import SuiteRegistry
 
     reg = SuiteRegistry(warehouse)
-    live = reg.get_live(client_id, suite_name)
-    if live is None and client_id != "default":
-        _log.info(
-            "checkpoint.suite_fallback_to_default",
-            requested_client=client_id,
-            suite_name=suite_name,
-        )
-        live = reg.get_live("default", suite_name)
-    if live is None:
+
+    def _live_or_default(name: str) -> list[dict[str, Any]]:
+        """Fetch LIVE expectations list for (client_id, name), falling
+        back to the 'default' tenant. Returns [] if no LIVE exists
+        anywhere — callers treat empty as 'this source contributes nothing'."""
+        live = reg.get_live(client_id, name)
+        if live is None and client_id != "default":
+            live = reg.get_live("default", name)
+        return list(live.expectations) if live else []
+
+    # 1 — baseline (the handcrafted canonical suite, e.g. bronze_claims)
+    baseline_exps = _live_or_default(suite_name)
+
+    # 2 + 3 — agent-authored auto + approved-review, derived from source_type.
+    # suite_name like "bronze_claims" → source_slug "claims" → agent suites
+    # "auto_claims" + "auto_claims__review". The stage prefix (bronze/silver/gold)
+    # is implicit in the qualified_table the checkpoint is running against.
+    agent_auto_exps: list[dict[str, Any]] = []
+    agent_review_exps: list[dict[str, Any]] = []
+    source_slug = _derive_source_slug(suite_name)
+    if source_slug:
+        agent_auto_exps = _live_or_default(f"auto_{source_slug}")
+        agent_review_exps = _live_or_default(f"auto_{source_slug}__review")
+
+    combined = baseline_exps + agent_auto_exps + agent_review_exps
+    if not combined:
         return None
+
     _log.info(
-        "checkpoint.suite_loaded_from_registry",
-        suite_id=live.suite_id,
-        client_id=live.client_id,
+        "checkpoint.suite_loaded_from_registry.union",
+        client_id=client_id,
         suite_name=suite_name,
-        version=live.version,
-        expectation_count=len(live.expectations),
+        baseline_count=len(baseline_exps),
+        agent_auto_count=len(agent_auto_exps),
+        agent_approved_review_count=len(agent_review_exps),
+        total=len(combined),
     )
-    return _json_to_suite(live.suite_id, suite_name, live.expectations)
+    # Synthetic suite_id encodes the union so audit trail is readable.
+    return _json_to_suite(f"union:{suite_name}", suite_name, combined)
+
+
+def _derive_source_slug(suite_name: str) -> str | None:
+    """Pull the source slug ('claims' / 'membership' / 'provider') from a
+    baseline suite name like 'bronze_claims', 'silver_membership',
+    'gold_provider'. Returns None for legacy aggregates like
+    'bronze_structural' — those have no per-source agent suite."""
+    known_sources = {"claims", "membership", "provider"}
+    # Split on underscore; look for a known source token.
+    for part in suite_name.lower().split("_"):
+        if part in known_sources:
+            return part
+    return None
 
 
 def _json_to_suite(

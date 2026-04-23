@@ -94,7 +94,17 @@ def run_checkpoint_with_hooks(
         from datalink.agents.pre_validation.crew import run_pre_validation
 
         _log.info("hooks.pre_validation.start", table=qualified_table)
-        pre_val_results = run_pre_validation(adapters, settings, qualified_table)
+        # Phase 6 Commit 2: pass client_id + source_type so the crew can
+        # skip authoring when the schema hasn't changed (no LLM calls on
+        # cache hit). Without these args the crew falls back to always-run.
+        pre_val_results = run_pre_validation(
+            adapters,
+            settings,
+            qualified_table,
+            client_id=client_id,
+            source_type=source_type,
+            checkpoint_name=checkpoint_name,
+        )
     else:
         _log.info("hooks.pre_validation.disabled")
 

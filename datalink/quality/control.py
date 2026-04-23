@@ -205,23 +205,24 @@ _DDL = [
     # baseline_seeder creates one suite per (client, stage, source_type).
     f"""
     CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.dq_suites (
-        suite_id        VARCHAR PRIMARY KEY,
-        client_id       VARCHAR NOT NULL,
-        suite_name      VARCHAR NOT NULL,
-        version         INTEGER NOT NULL,
-        status          VARCHAR NOT NULL,
-        expectations    VARCHAR NOT NULL,
-        dq_dimensions   VARCHAR,
-        source_type     VARCHAR,
-        source          VARCHAR NOT NULL,
-        created_by      VARCHAR NOT NULL,
-        created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-        submitted_at    TIMESTAMP,
-        reviewed_by     VARCHAR,
-        reviewed_at     TIMESTAMP,
-        review_notes    VARCHAR,
-        activated_at    TIMESTAMP,
-        archived_at     TIMESTAMP
+        suite_id           VARCHAR PRIMARY KEY,
+        client_id          VARCHAR NOT NULL,
+        suite_name         VARCHAR NOT NULL,
+        version            INTEGER NOT NULL,
+        status             VARCHAR NOT NULL,
+        expectations       VARCHAR NOT NULL,
+        dq_dimensions      VARCHAR,
+        source_type        VARCHAR,
+        source             VARCHAR NOT NULL,
+        schema_fingerprint VARCHAR,
+        created_by         VARCHAR NOT NULL,
+        created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        submitted_at       TIMESTAMP,
+        reviewed_by        VARCHAR,
+        reviewed_at        TIMESTAMP,
+        review_notes       VARCHAR,
+        activated_at       TIMESTAMP,
+        archived_at        TIMESTAMP
     )
     """,
     # Phase 6 migration: add source_type column on existing DBs (idempotent
@@ -259,6 +260,7 @@ def create_control_tables(warehouse: Warehouse) -> None:
     # swallows only the "already exists" error.
     _migrations = [
         f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN source_type VARCHAR",
+        f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN schema_fingerprint VARCHAR",
         f"ALTER TABLE {CONTROL_SCHEMA}.pipeline_checkpoints ADD COLUMN client_id VARCHAR",
         f"ALTER TABLE {CONTROL_SCHEMA}.pipeline_checkpoints ADD COLUMN source_type VARCHAR",
         f"ALTER TABLE {CONTROL_SCHEMA}.gx_validation_results ADD COLUMN client_id VARCHAR",

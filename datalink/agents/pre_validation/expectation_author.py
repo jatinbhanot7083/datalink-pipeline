@@ -77,97 +77,170 @@ class ExpectationAuthorAgent(AgentBase):
             max_tokens=512,
         )
 
-        # Phase 5.8: register this proposal as a DRAFT in CONTROL.dq_suites so
-        # it shows up in the /DQ_Review queue. A human reviewer must still
-        # approve before it goes LIVE — agents never auto-activate.
-        proposed_suite_id = self._register_as_draft(
+        # Phase 6 Commit 2: split auto-approve vs HITL-review.
+        client_id = context.get("client_id", "default")
+        source_type = context.get("source_type")
+        schema_fingerprint = self._compute_fingerprint(table_name)
+
+        auto_sid, review_sid = self._register_split(
             table_name=table_name,
             expectations=expectations,
-            client_id=context.get("client_id", "default"),
-            reviewer_note=str(rationale)[:500] if rationale else None,
+            client_id=client_id,
+            source_type=source_type,
+            schema_fingerprint=schema_fingerprint,
         )
 
+        auto_rules = [e for e in expectations if not e.get("review_required")]
+        review_rules = [e for e in expectations if e.get("review_required")]
+
         return {
-            "suite_name": f"auto_{table_name.replace('.', '_').lower()}",
+            "suite_name": f"auto_{(source_type or 'unknown').lower()}",
             "suite_version": "0.1.0",
-            "status": "DRAFT",
+            "auto_approved_count": len(auto_rules),
+            "flagged_for_review_count": len(review_rules),
             "expectation_count": len(expectations),
+            "schema_fingerprint": schema_fingerprint,
+            "auto_suite_id": auto_sid,
+            "review_suite_id": review_sid,
+            "auto_suite_status": "LIVE" if auto_sid else "none",
+            "review_suite_status": "PENDING_REVIEW" if review_sid else "none",
             "expectations": expectations,
             "llm_rationale": rationale,
-            "proposed_suite_id": proposed_suite_id,
         }
 
-    def _register_as_draft(
+    def _compute_fingerprint(self, qualified_table: str) -> str | None:
+        """Hash the column layout so the Pre-Val crew can cache-skip next run."""
+        try:
+            from datalink.quality.schema_fingerprint import compute_fingerprint
+
+            return compute_fingerprint(self._wh, qualified_table)
+        except Exception:
+            return None
+
+    def _register_split(
         self,
         table_name: str,
         expectations: list[dict[str, Any]],
         client_id: str,
-        reviewer_note: str | None = None,
-    ) -> str | None:
-        """Write the proposed expectations to CONTROL.dq_suites as a DRAFT.
+        source_type: str | None,
+        schema_fingerprint: str | None,
+    ) -> tuple[str | None, str | None]:
+        """Split proposed expectations into two suites in CONTROL.dq_suites:
+          * auto_{source}           — rules agent is confident in → fast-track to LIVE (no human)
+          * auto_{source}__review   — rules flagged review_required → PENDING_REVIEW (human)
 
-        Returns the new suite_id, or None if the registry write fails
-        (non-fatal — agent run still succeeds; proposal just doesn't reach
-        the review queue this cycle). Failure is logged via the standard
-        agent audit trail.
+        Returns (auto_suite_id, review_suite_id). Either may be None if
+        nothing fell into that bucket or the registry write failed.
         """
         try:
-            # Lazy import so the agent module doesn't hard-depend on the
-            # quality layer at module import time.
             from datalink.quality.registry import (
                 SuiteDraft,
                 SuiteRegistry,
                 SuiteSource,
             )
 
-            # Pick a suite_name from the table name. "BRONZE.RAW_CLAIMS" →
-            # "bronze_raw_claims_agent". Keeps it distinct from the
-            # hand-coded baselines ("bronze_structural" etc.).
-            suite_name = f"{table_name.replace('.', '_').lower()}_agent"
-
-            # Shape the agent's rule-based output to the registry's expected
-            # JSON: {expectation_type, kwargs, meta}.
-            shaped: list[dict[str, Any]] = []
-            for e in expectations:
-                exp_type = e.get("expectation_type", "")
-                kwargs: dict[str, Any] = {}
-                if e.get("column"):
-                    kwargs["column"] = e["column"]
-                # Default meta — agent proposals start at MEDIUM severity;
-                # reviewer can bump to HIGH on approve.
-                meta = {
-                    "dq_dimension": _infer_dimension(exp_type),
-                    "severity": "MEDIUM",
-                    "description": e.get(
-                        "rationale", "Auto-proposed by ExpectationAuthorAgent from profile stats."
-                    ),
-                    "review_required": e.get("review_required", False),
-                }
-                shaped.append({"expectation_type": exp_type, "kwargs": kwargs, "meta": meta})
-
             reg = SuiteRegistry(self._wh)
-            dims = sorted(
-                {s["meta"]["dq_dimension"] for s in shaped if s["meta"].get("dq_dimension")}
-            )
-            sid = reg.create_draft(
-                SuiteDraft(
-                    client_id=client_id,
-                    suite_name=suite_name,
-                    expectations=shaped,
-                    dq_dimensions=list(dims),
-                    created_by=f"agent:{self.__class__.__name__}",
-                    source=SuiteSource.AGENT,
+            actor = f"agent:{self.__class__.__name__}"
+            src_slug = (source_type or "unknown").lower()
+            base_name = f"auto_{src_slug}"
+            review_name = f"{base_name}__review"
+
+            # Shape helper — common for auto + review buckets.
+            def _shape(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+                shaped: list[dict[str, Any]] = []
+                for e in rules:
+                    exp_type = e.get("expectation_type", "")
+                    kwargs: dict[str, Any] = {}
+                    if e.get("column"):
+                        kwargs["column"] = e["column"]
+                    if e.get("value_set"):
+                        kwargs["value_set"] = e["value_set"]
+                    if e.get("regex"):
+                        kwargs["regex"] = e["regex"]
+                    if e.get("min_value") is not None:
+                        kwargs["min_value"] = e["min_value"]
+                    if e.get("max_value") is not None:
+                        kwargs["max_value"] = e["max_value"]
+                    meta = {
+                        "dq_dimension": _infer_dimension(exp_type),
+                        "severity": "MEDIUM",
+                        "description": e.get(
+                            "rationale",
+                            "Auto-proposed by ExpectationAuthorAgent from profile stats.",
+                        ),
+                        "review_required": e.get("review_required", False),
+                    }
+                    shaped.append({"expectation_type": exp_type, "kwargs": kwargs, "meta": meta})
+                return shaped
+
+            auto_rules = [e for e in expectations if not e.get("review_required")]
+            review_rules = [e for e in expectations if e.get("review_required")]
+
+            auto_sid: str | None = None
+            review_sid: str | None = None
+
+            # ── Auto-approved bucket ─────────────────────────────────────────
+            if auto_rules:
+                shaped_auto = _shape(auto_rules)
+                dims = sorted(
+                    {
+                        s["meta"]["dq_dimension"]
+                        for s in shaped_auto
+                        if s["meta"].get("dq_dimension")
+                    }
                 )
-            )
-            # Immediately submit for review — no point in sitting as DRAFT
-            # when the agent can't edit it further. Reviewer sees it next
-            # time they open /DQ_Review.
-            reg.submit_for_review(sid, actor=f"agent:{self.__class__.__name__}")
-            return sid
+                auto_sid = reg.create_draft(
+                    SuiteDraft(
+                        client_id=client_id,
+                        suite_name=base_name,
+                        expectations=shaped_auto,
+                        dq_dimensions=list(dims),
+                        created_by=actor,
+                        source=SuiteSource.AGENT,
+                        source_type=source_type,
+                        schema_fingerprint=schema_fingerprint,
+                    )
+                )
+                # Fast-track: DRAFT → PENDING_REVIEW → APPROVED → LIVE.
+                # The "auto-approver" is the agent itself because the rule
+                # shape is structurally valid (matches a GX built-in by name
+                # and all its kwargs are derivable deterministically).
+                reg.submit_for_review(auto_sid, actor=actor)
+                reg.approve(
+                    auto_sid,
+                    actor=f"{actor}:auto-approved",
+                    notes=(
+                        f"Auto-approved: {len(auto_rules)} rules passed structural "
+                        f"confidence check (no review_required flag)."
+                    ),
+                )
+                reg.activate(auto_sid, actor=f"{actor}:auto-approved")
+
+            # ── Human-review bucket ──────────────────────────────────────────
+            if review_rules:
+                shaped_rev = _shape(review_rules)
+                dims = sorted(
+                    {s["meta"]["dq_dimension"] for s in shaped_rev if s["meta"].get("dq_dimension")}
+                )
+                review_sid = reg.create_draft(
+                    SuiteDraft(
+                        client_id=client_id,
+                        suite_name=review_name,
+                        expectations=shaped_rev,
+                        dq_dimensions=list(dims),
+                        created_by=actor,
+                        source=SuiteSource.AGENT,
+                        source_type=source_type,
+                        schema_fingerprint=schema_fingerprint,
+                    )
+                )
+                reg.submit_for_review(review_sid, actor=actor)
+                # Stays PENDING_REVIEW — human sees this in DQ Review page.
+
+            return auto_sid, review_sid
         except Exception:
-            # Non-fatal — the agent's main output is still returned. Log
-            # via the standard base-class audit in _ask_llm so ops can see.
-            return None
+            # Non-fatal — the agent's main output is still returned.
+            return None, None
 
 
 def _infer_dimension(expectation_type: str) -> str:
