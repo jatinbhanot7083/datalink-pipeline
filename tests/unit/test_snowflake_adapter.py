@@ -102,11 +102,24 @@ def mock_snowflake(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
 
 
 @pytest.mark.unit
-def test_connect_raises_with_clear_message_when_fields_missing() -> None:
-    """WarehouseConfig without Snowflake creds should fail-fast at _connect."""
+def test_connect_raises_with_clear_message_when_fields_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """WarehouseConfig without Snowflake creds AND no SNOWFLAKE_* env vars
+    should fail-fast at _connect with a helpful diagnostic."""
+    # Scrub env vars so the fallback can't satisfy the missing creds.
+    for name in (
+        "SNOWFLAKE_ACCOUNT",
+        "SNOWFLAKE_USER",
+        "SNOWFLAKE_PASSWORD",
+        "SNOWFLAKE_ROLE",
+        "SNOWFLAKE_WAREHOUSE",
+        "SNOWFLAKE_DATABASE",
+    ):
+        monkeypatch.delenv(name, raising=False)
     cfg = WarehouseConfig(type="snowflake")  # all optional fields default to None
     wh = SnowflakeWarehouse(cfg)
-    with pytest.raises(RuntimeError, match="missing required field"):
+    with pytest.raises(RuntimeError, match="missing required credential"):
         wh.execute("SELECT 1")
 
 
@@ -135,7 +148,12 @@ def test_execute_with_list_params_rewrites_qmark(
 
 
 @pytest.mark.unit
-def test_query_returns_list_of_dicts(mock_snowflake: MagicMock, cfg_full: WarehouseConfig) -> None:
+def test_query_returns_list_of_dicts_with_lowercase_keys(
+    mock_snowflake: MagicMock, cfg_full: WarehouseConfig
+) -> None:
+    """SnowflakeWarehouse.query lowercases column names so callers written
+    against DuckDB (which preserves case) keep working on Snowflake
+    (which uppercases by default)."""
     cur = mock_snowflake.cursor.return_value
     cur.description = [("USER_ID",), ("NAME",)]
     cur.fetchall.return_value = [(1, "a"), (2, "b")]
@@ -143,7 +161,7 @@ def test_query_returns_list_of_dicts(mock_snowflake: MagicMock, cfg_full: Wareho
     wh = SnowflakeWarehouse(cfg_full)
     rows = wh.query("SELECT user_id, name FROM t")
 
-    assert rows == [{"USER_ID": 1, "NAME": "a"}, {"USER_ID": 2, "NAME": "b"}]
+    assert rows == [{"user_id": 1, "name": "a"}, {"user_id": 2, "name": "b"}]
 
 
 @pytest.mark.unit

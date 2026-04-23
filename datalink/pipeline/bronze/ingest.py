@@ -94,39 +94,52 @@ def _load_to_staging(
 ) -> int:
     """Load a CSV file into a staging table with the 4 audit columns appended.
 
-    DuckDB and Snowflake both support "CREATE TABLE AS SELECT ... LIMIT 0"
-    to clone a schema. We use it here to get the target's exact column types
-    for the staging table.
-
-    Phase 6: `fmt` drives delimiter + header behaviour so pipe-delimited
-    or tab-delimited feeds work without code changes. Default is still
-    comma-delimited with header (Phase-5.x compat).
+    Phase 7 Day 4: backend-agnostic via ``warehouse.load_csv_with_audit``.
+    DuckDB reads the local file directly; Snowflake PUTs then COPY INTOs.
+    The staging table is a TEMP clone of the target (full column list
+    including audit cols) — MERGE downstream uses the same table layout
+    so no schema divergence between backends.
     """
     # Clone target schema into staging — empty, no rows.
     warehouse.execute(
         f"CREATE OR REPLACE TEMP TABLE {staging_table} AS SELECT * FROM {target_table} LIMIT 0"
     )
 
-    # Count target cols vs source CSV cols. Source CSV has target_cols - 4 (no audit cols).
-    # The read_csv_auto projection must align with target order, then we append audit cols.
     target_cols = _get_columns(warehouse, target_table)
     if len(target_cols) < 4:
         raise RuntimeError(
             f"Target {target_table} has fewer than 4 columns; expected 4 audit cols at end"
         )
-    source_col_names = [c for c in target_cols[:-4]]  # all but last 4 (audit)
-    audit_col_names = target_cols[-4:]  # sanity
+    source_col_names = list(target_cols[:-4])  # all but last 4 (audit)
+    audit_col_names = target_cols[-4:]
     if audit_col_names != ["_load_dt", "_source_file", "_batch_id", "_record_source"]:
         raise RuntimeError(
             f"Target {target_table} audit columns in wrong order or missing: got {audit_col_names!r}"
         )
-    col_list_source = ", ".join(source_col_names)
-    col_list_full = ", ".join(target_cols)
 
-    # INSERT with audit cols computed on the fly. Named params so positional
-    # ordering can't drift when we change the column projection later.
-    # Positional params for csv_path/header/delim so DuckDB's read_csv_auto
-    # gets type-coerced args (header=BOOLEAN, delim=VARCHAR).
+    # Prefer the adapter's native implementation if present.
+    loader = getattr(warehouse, "load_csv_with_audit", None)
+    if callable(loader):
+        before = _row_count(warehouse, staging_table)
+        loader(
+            local_csv,
+            staging_table,
+            source_col_names,
+            {
+                "source_file": source_file,
+                "batch_id": batch_id,
+                "record_source": record_source,
+            },
+            has_header=fmt.has_header,
+            delimiter=fmt.delimiter,
+        )
+        return _row_count(warehouse, staging_table) - before
+
+    # Fallback for adapters that predate Phase 7 Day 4 (test fakes,
+    # older stubs). Uses DuckDB's read_csv_auto — will NOT work on
+    # Snowflake, only reachable in unit tests with a dict-based fake.
+    col_list_full = ", ".join(target_cols)
+    col_list_source = ", ".join(source_col_names)
     sql = (
         f"INSERT INTO {staging_table} ({col_list_full}) "
         f"SELECT {col_list_source}, {_audit_columns_sql()} "
@@ -143,7 +156,6 @@ def _load_to_staging(
             "record_source": record_source,
         },
     )
-
     count_sql = f"SELECT COUNT(*) AS c FROM {staging_table}"
     rows = warehouse.query(count_sql)
     return int(rows[0]["c"]) if rows else 0

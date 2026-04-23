@@ -122,6 +122,63 @@ class DuckDBWarehouse:
         count_row = conn.execute(f"SELECT COUNT(*) FROM {source}").fetchone()
         return int(count_row[0]) if count_row else 0
 
+    # --- bronze ingest helper --------------------------------------------
+
+    def load_csv_with_audit(
+        self,
+        local_csv: Any,
+        target_table: str,
+        source_cols: list[str],
+        audit_values: dict[str, Any],
+        *,
+        has_header: bool = True,
+        delimiter: str = ",",
+    ) -> int:
+        """Load a local CSV into target_table with 4 audit columns appended.
+
+        Phase 7 Day 4: adapter-dispatched Bronze ingest. DuckDB reads the
+        local file directly via ``read_csv_auto``; the Snowflake adapter
+        implements the same method using PUT + COPY INTO. Callers in
+        pipeline/bronze/ingest.py just invoke this method; the backend
+        choice is transparent.
+
+        ``source_cols`` are the CSV columns in target-order (every target
+        column except the 4 trailing audit columns).
+        ``audit_values`` provides `source_file`, `batch_id`, `record_source`;
+        `_load_dt` is always CURRENT_TIMESTAMP.
+
+        Returns the total row count of target_table AFTER load (caller
+        typically computes delta against a pre-load count).
+        """
+        from pathlib import Path as PathCls
+
+        target_cols = [
+            *source_cols,
+            "_load_dt",
+            "_source_file",
+            "_batch_id",
+            "_record_source",
+        ]
+        col_list = ", ".join(target_cols)
+        src_list = ", ".join(source_cols)
+        sql = (
+            f"INSERT INTO {target_table} ({col_list}) "
+            f"SELECT {src_list}, CURRENT_TIMESTAMP, $source_file, $batch_id, $record_source "
+            f"FROM read_csv_auto($csv_path, header = $header, delim = $delim)"
+        )
+        self.execute(
+            sql,
+            {
+                "csv_path": str(PathCls(local_csv)),
+                "header": has_header,
+                "delim": delimiter,
+                "source_file": audit_values["source_file"],
+                "batch_id": audit_values["batch_id"],
+                "record_source": audit_values["record_source"],
+            },
+        )
+        return self.row_count(target_table)
+
     # --- helpers (not in protocol) ---------------------------------------
 
     def create_schema_if_not_exists(self, schema: str) -> None:

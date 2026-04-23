@@ -50,20 +50,16 @@ def ensure_warehouse_exists(path: str, *, verbose: bool = False) -> None:
     container entrypoint we pass verbose=True; on Streamlit page imports
     we leave it False (pages have their own empty-state fallbacks).
 
-    Phase 7 Day 3: when ``DL_ADAPTERS__WAREHOUSE__TYPE=snowflake`` this
-    function is a no-op. Snowflake infrastructure (database, schemas,
-    role, stage) is provisioned out-of-band via ``scripts/snowflake_
-    bootstrap.sql`` which runs once per environment. No warehouse.duckdb
-    file needs to exist on the container filesystem in that mode.
+    Phase 7 Day 4: when ``DL_ADAPTERS__WAREHOUSE__TYPE=snowflake`` this
+    function runs the equivalent bootstrap against Snowflake instead —
+    CONTROL schema + tables + baseline suite seeding. The database +
+    base schemas + role + stage are provisioned out-of-band via
+    ``scripts/snowflake_bootstrap.sql`` which runs once per environment;
+    this function handles the per-application schema that ships with
+    every code release.
     """
-    # Short-circuit for Snowflake mode — no local file to bootstrap.
     if os.environ.get("DL_ADAPTERS__WAREHOUSE__TYPE", "duckdb").lower() == "snowflake":
-        if verbose:
-            print(
-                "[bootstrap] Snowflake mode detected — skipping warehouse.duckdb "
-                "bootstrap (Snowflake is provisioned via scripts/snowflake_bootstrap.sql).",
-                file=sys.stderr,
-            )
+        _bootstrap_snowflake(verbose=verbose)
         return
 
     # Step 1 — parent dir -----------------------------------------------
@@ -148,6 +144,72 @@ def default_warehouse_path() -> str:
     Overridable via:   DL_CT_WAREHOUSE_PATH env var
     """
     return os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
+
+
+def _bootstrap_snowflake(*, verbose: bool = False) -> None:
+    """Create CONTROL schema + tables + seed baseline suites on Snowflake.
+
+    Layered same way as the DuckDB path — each step independently guarded
+    so a failure in seeding doesn't prevent CONTROL tables from being
+    usable. Idempotent: re-running is a no-op.
+
+    Preconditions (satisfied by scripts/snowflake_bootstrap.sql):
+      * DATALINK_DEV database exists
+      * DATALINK_ENGINEER role owns the BRONZE / SILVER / CONTROL schemas
+      * DATALINK_SVC user authenticates with the above role
+    """
+    # Step 1 — build the Snowflake adapter directly (skip the full factory
+    # which eagerly imports every adapter incl. azure / sftp / pyodbc — any
+    # missing optional dep would break the bootstrap).
+    try:
+        from datalink.adapters.warehouse.snowflake_adapter import SnowflakeWarehouse
+        from datalink.config.models import WarehouseConfig
+
+        # SnowflakeWarehouse._connect falls back to SNOWFLAKE_* env vars
+        # when WarehouseConfig fields are None, so an empty config is OK.
+        wh: Any = SnowflakeWarehouse(WarehouseConfig(type="snowflake"))
+        if verbose:
+            print("[bootstrap] snowflake step 1: adapter built", file=sys.stderr)
+    except Exception:
+        if verbose:
+            traceback.print_exc()
+        return  # config missing — nothing we can do, dashboards show empty state
+
+    # Step 2 — CONTROL tables + forward-migrations ----------------------
+    try:
+        from datalink.quality.control import create_control_tables
+
+        create_control_tables(wh)
+        if verbose:
+            print(
+                "[bootstrap] snowflake step 2: CONTROL tables created / migrated",
+                file=sys.stderr,
+            )
+    except Exception:
+        if verbose:
+            traceback.print_exc()
+
+    # Step 3 — seed baselines for 7 clients -----------------------------
+    try:
+        from datalink.quality.baseline_seeder import seed_all_real_clients
+
+        result = seed_all_real_clients(wh)
+        if verbose:
+            total = sum(result.values())
+            print(
+                f"[bootstrap] snowflake step 3: seeded {total} baseline suites "
+                f"across {len(result)} clients — {result}",
+                file=sys.stderr,
+            )
+    except Exception:
+        if verbose:
+            traceback.print_exc()
+
+    # Step 4 — release the adapter connection ---------------------------
+    with contextlib.suppress(Exception):
+        close_fn = getattr(wh, "close", None)
+        if callable(close_fn):
+            close_fn()
 
 
 class _DuckShim:

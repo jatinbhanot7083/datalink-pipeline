@@ -16,6 +16,7 @@ prod, these exact functions run inside Airflow worker pods.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import uuid
 from dataclasses import dataclass, field
@@ -417,7 +418,13 @@ def _run_dbt(args: list[str], ctx: TaskContext | None = None) -> dict[str, Any]:
     # Thread tenant through as a dbt var so generate_schema_name.sql picks it up.
     if ctx is not None and ctx.client_id and ctx.client_id != "default":
         cmd.extend(["--vars", f"{{client_id: {ctx.client_id}}}"])
-    _log.info("task.dbt.run", cmd=" ".join(cmd))
+    # Phase 7 Day 4: dbt profile has two targets — `local` (duckdb) and
+    # `dev` (snowflake). Pick the one matching the active adapter so
+    # flipping DL_ADAPTERS__WAREHOUSE__TYPE also flips dbt's backend.
+    wh_type = os.environ.get("DL_ADAPTERS__WAREHOUSE__TYPE", "duckdb").lower()
+    target = "dev" if wh_type == "snowflake" else "local"
+    cmd.extend(["--target", target])
+    _log.info("task.dbt.run", cmd=" ".join(cmd), target=target)
     proc = subprocess.run(
         cmd,
         cwd=str(repo_root),

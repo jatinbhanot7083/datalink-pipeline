@@ -75,16 +75,17 @@ def scratch_table(wh: SnowflakeWarehouse) -> str:
 
 
 def test_connect_returns_expected_defaults(wh: SnowflakeWarehouse) -> None:
+    """SnowflakeWarehouse.query lowercases column keys (Day 4 change)."""
     rows = wh.query(
         "SELECT CURRENT_USER() AS u, CURRENT_ROLE() AS r, "
         "CURRENT_WAREHOUSE() AS w, CURRENT_DATABASE() AS d"
     )
     assert len(rows) == 1
     row = rows[0]
-    assert row["U"] == "DATALINK_SVC"
-    assert row["R"] == "DATALINK_ENGINEER"
-    assert row["W"] == "DATALINK_WH"
-    assert row["D"] == "DATALINK_DEV"
+    assert row["u"] == "DATALINK_SVC"
+    assert row["r"] == "DATALINK_ENGINEER"
+    assert row["w"] == "DATALINK_WH"
+    assert row["d"] == "DATALINK_DEV"
 
 
 def test_execute_insert_then_query(wh: SnowflakeWarehouse, scratch_table: str) -> None:
@@ -92,8 +93,8 @@ def test_execute_insert_then_query(wh: SnowflakeWarehouse, scratch_table: str) -
     wh.execute(f"INSERT INTO {scratch_table} VALUES (2, 'bob', 20.00)")
     rows = wh.query(f"SELECT id, name, amt FROM {scratch_table} ORDER BY id")
     assert len(rows) == 2
-    assert rows[0]["NAME"] == "alice"
-    assert rows[1]["NAME"] == "bob"
+    assert rows[0]["name"] == "alice"
+    assert rows[1]["name"] == "bob"
 
 
 def test_query_with_qmark_params_is_rewritten(wh: SnowflakeWarehouse, scratch_table: str) -> None:
@@ -106,7 +107,7 @@ def test_query_with_qmark_params_is_rewritten(wh: SnowflakeWarehouse, scratch_ta
         ["keep"],
     )
     assert len(rows) == 1
-    assert rows[0]["ID"] == 1
+    assert rows[0]["id"] == 1
 
 
 def test_row_count_helper(wh: SnowflakeWarehouse, scratch_table: str) -> None:
