@@ -94,14 +94,48 @@ def _coerce(value: str) -> Any:
     return value
 
 
+# Known top-level keys on the Settings model. Any DL_-prefixed env var whose
+# first path component is NOT in this set is ignored by the loader — it's
+# presumed to be consumed directly by application code (e.g. DL_CT_* for the
+# Control Tower Streamlit layer, DL_ENV for the orchestrator, etc.).
+#
+# Without this filter, every DL_CT_MSSQL_USER / DL_CT_SFTP_HOST / ... var
+# in .env ends up as a top-level key on the Settings dict, and Pydantic's
+# `extra="forbid"` mode fails the whole config load with ValidationError.
+_SETTINGS_TOP_KEYS: frozenset[str] = frozenset(
+    {
+        "env",
+        "orchestrator",
+        "project_name",
+        "processing",
+        "logging",
+        "adapters",
+        "features",
+        "tenancy",
+        "sources",
+    }
+)
+
+
 def _env_overrides(prefix: str = "DL_") -> dict[str, Any]:
-    """Translate DL_ADAPTERS__WAREHOUSE__PATH=... into {'adapters': {'warehouse': {'path': ...}}}."""
+    """Translate ``DL_ADAPTERS__WAREHOUSE__PATH=...`` into
+    ``{'adapters': {'warehouse': {'path': ...}}}``.
+
+    Env vars whose first path segment is not a recognised Settings section
+    are silently dropped — they belong to other layers of the app (e.g.
+    the Streamlit ``DL_CT_*`` UI namespace). This keeps ``extra="forbid"``
+    strict for the Settings schema without requiring callers to rename
+    every unrelated ``DL_*`` var.
+    """
     result: dict[str, Any] = {}
     for key, raw in os.environ.items():
         if not key.startswith(prefix):
             continue
         path = key[len(prefix) :].lower().split("__")
         if not path or not path[0]:
+            continue
+        if path[0] not in _SETTINGS_TOP_KEYS:
+            # Unknown namespace — not a Settings override.
             continue
         cursor = result
         for part in path[:-1]:

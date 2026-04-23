@@ -130,15 +130,23 @@ def _build_backend(*, readonly: bool) -> _Warehouse:
     if wh_type == "duckdb":
         return _DuckDBShim(WAREHOUSE_PATH, readonly=readonly)
 
-    # Snowflake / other: use the production factory. Role-based permissions
-    # in the backend handle read/write safety, so `readonly` is advisory only.
+    # Snowflake: build the adapter directly to avoid pulling in the full
+    # factory (which eagerly imports every adapter incl. azure / sftp /
+    # pyodbc — any missing optional dep would block the warehouse query
+    # path in the Streamlit container).
+    if wh_type == "snowflake":
+        from datalink.adapters.warehouse.snowflake_adapter import SnowflakeWarehouse
+        from datalink.config.models import WarehouseConfig
+
+        # SnowflakeWarehouse._connect falls back to SNOWFLAKE_* env vars
+        # when WarehouseConfig fields are None.
+        return cast("_Warehouse", SnowflakeWarehouse(WarehouseConfig(type="snowflake")))
+
+    # Future backends — fall back to the full factory path.
     from datalink.adapters.factory import build_adapters
     from datalink.config.loader import load_settings
 
     adapters = build_adapters(load_settings(env=os.environ.get("DL_ENV", "local")))
-    # Factory-built Warehouse accepts `dict | None`; the UI protocol is
-    # wider (accepts positional Sequence too). The cast is safe: concrete
-    # adapters forward params to their driver, which handles both forms.
     return cast("_Warehouse", adapters.warehouse)
 
 
