@@ -361,6 +361,11 @@ def main() -> None:
             unsafe_allow_html=True,
         )
         if st.button("🔄 Refresh now", use_container_width=True):
+            # Dashboards use @st.cache_data (30s TTL). "Refresh now" must
+            # clear the cache so the next render hits the warehouse fresh.
+            from datalink.ui._query import clear_query_cache
+
+            clear_query_cache()
             st.rerun()
 
     # ========================================================================

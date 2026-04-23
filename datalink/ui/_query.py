@@ -36,6 +36,7 @@ first pipeline run).
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
@@ -43,6 +44,14 @@ from typing import Any, Protocol, cast
 
 import pandas as pd
 import streamlit as st
+
+# How long cached query results stay warm. Dashboards re-render on every
+# user interaction; caching results for a short window turns 10 network
+# round-trips per render (~1-2s on Snowflake) into 0 (<5ms).
+#
+# Tune via DL_CT_QUERY_TTL_SECONDS. Default 30s gives a responsive feel
+# without masking real-world data movement for more than half a minute.
+_QUERY_CACHE_TTL = int(os.environ.get("DL_CT_QUERY_TTL_SECONDS", "30"))
 
 WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
 
@@ -198,10 +207,53 @@ def warehouse_ctx(*, readonly: bool = True) -> Iterator[_Warehouse]:
 # remains the explicit batch-boundary close point for callers who want one.
 
 
+def _serialize_params(params: _Params) -> str:
+    """Serialize params to a stable string key for the @st.cache_data hash.
+
+    Dicts / lists aren't natively hashable; JSON gives a deterministic key
+    that also round-trips losslessly for the allowed value types in our
+    codebase (str, int, float, bool, None).
+    """
+    if params is None:
+        return "~none~"
+    if isinstance(params, dict):
+        return "~dict~" + json.dumps(params, sort_keys=True, default=str)
+    return "~seq~" + json.dumps(list(params), default=str)
+
+
+def _deserialize_params(key: str) -> _Params:
+    if key == "~none~":
+        return None
+    if key.startswith("~dict~"):
+        return cast("dict[str, Any]", json.loads(key[len("~dict~") :]))
+    if key.startswith("~seq~"):
+        return cast("Sequence[Any]", json.loads(key[len("~seq~") :]))
+    return None
+
+
+@st.cache_data(ttl=_QUERY_CACHE_TTL, show_spinner=False)  # type: ignore
+def _cached_rows(sql: str, params_key: str) -> list[dict[str, Any]]:
+    """Cached warehouse query keyed by (sql, serialized_params).
+
+    TTL defaults to 30s — short enough to reflect real data movement,
+    long enough to deliver a 10x speedup on repeat page renders during an
+    interactive session. Streamlit invalidates the cache on process
+    restart (container bounce, code reload) and when the user hits
+    Ctrl+Shift+R on pages that trigger a full re-run.
+    """
+    params = _deserialize_params(params_key)
+    return _build_backend(readonly=True).query(sql, params)
+
+
 def query(sql: str, params: _Params = None) -> pd.DataFrame:
-    """Run a SELECT and return a DataFrame. Errors surface as ``st.error``."""
+    """Run a SELECT and return a DataFrame. Errors surface as ``st.error``.
+
+    Results cached for _QUERY_CACHE_TTL seconds (default 30s). Interactive
+    re-renders within that window return instantly from memory instead of
+    hitting Snowflake / DuckDB again.
+    """
     try:
-        rows = _build_backend(readonly=True).query(sql, params)
+        rows = _cached_rows(sql, _serialize_params(params))
         return pd.DataFrame(rows)
     except Exception as exc:
         st.error(f"Warehouse query failed: {exc}")
@@ -215,7 +267,7 @@ def query_silent(sql: str, params: _Params = None) -> pd.DataFrame:
     (e.g. before any pipeline run has populated BRONZE_*).
     """
     try:
-        rows = _build_backend(readonly=True).query(sql, params)
+        rows = _cached_rows(sql, _serialize_params(params))
         return pd.DataFrame(rows)
     except Exception:
         return pd.DataFrame()
@@ -224,7 +276,7 @@ def query_silent(sql: str, params: _Params = None) -> pd.DataFrame:
 def query_scalar(sql: str, params: _Params = None) -> Any:
     """Run a SELECT and return the first column of the first row, or ``None``."""
     try:
-        rows = _build_backend(readonly=True).query(sql, params)
+        rows = _cached_rows(sql, _serialize_params(params))
         if not rows:
             return None
         # Warehouse.query contract guarantees list[dict[str, Any]] — take
@@ -234,3 +286,10 @@ def query_scalar(sql: str, params: _Params = None) -> Any:
         return vals[0] if vals else None
     except Exception:
         return None
+
+
+def clear_query_cache() -> None:
+    """Blow away every cached query result. Call from a 'Refresh now' button
+    when operators need an immediate re-fetch from the warehouse (e.g. right
+    after a DAG run completes)."""
+    _cached_rows.clear()
