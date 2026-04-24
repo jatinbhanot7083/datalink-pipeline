@@ -146,18 +146,35 @@ def default_warehouse_path() -> str:
     return os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
 
 
+# Module-level "already done" flag. Streamlit re-runs every page script's
+# body on each user interaction, so ensure_warehouse_exists() is called
+# on every refresh. For DuckDB the bootstrap is a fast no-op (file
+# exists, tables exist). For Snowflake, re-running would open a new
+# connection + re-seed 90 baseline suites on every page refresh — which
+# is what made the UI appear to take 7-10 seconds per interaction.
+#
+# This flag is set after the FIRST successful bootstrap in this process;
+# every subsequent call returns immediately.
+_snowflake_bootstrap_done: bool = False
+
+
 def _bootstrap_snowflake(*, verbose: bool = False) -> None:
     """Create CONTROL schema + tables + seed baseline suites on Snowflake.
 
     Layered same way as the DuckDB path — each step independently guarded
     so a failure in seeding doesn't prevent CONTROL tables from being
-    usable. Idempotent: re-running is a no-op.
+    usable. Idempotent — and guarded at call-site by
+    ``_snowflake_bootstrap_done`` so re-runs on Streamlit page refreshes
+    are instant no-ops.
 
     Preconditions (satisfied by scripts/snowflake_bootstrap.sql):
       * DATALINK_DEV database exists
       * DATALINK_ENGINEER role owns the BRONZE / SILVER / CONTROL schemas
       * DATALINK_SVC user authenticates with the above role
     """
+    global _snowflake_bootstrap_done
+    if _snowflake_bootstrap_done:
+        return
     # Step 1 — build the Snowflake adapter directly (skip the full factory
     # which eagerly imports every adapter incl. azure / sftp / pyodbc — any
     # missing optional dep would break the bootstrap).
@@ -210,6 +227,13 @@ def _bootstrap_snowflake(*, verbose: bool = False) -> None:
         close_fn = getattr(wh, "close", None)
         if callable(close_fn):
             close_fn()
+
+    # Mark done so subsequent calls in this process are instant no-ops.
+    # We set this even if step 2 or step 3 raised because:
+    #   (a) the exception was already logged,
+    #   (b) the failure-mode we want is "warn once, don't spam logs
+    #       and take 8 seconds off every page render forever".
+    _snowflake_bootstrap_done = True
 
 
 class _DuckShim:

@@ -144,15 +144,42 @@ def _swallow(label: str) -> Any:
         raise RuntimeError(f"{label}: {type(e).__name__}: {e}") from e
 
 
+def _existing_schemas_upper() -> set[str]:
+    """Return the set of warehouse schemas that actually exist, uppercased.
+
+    This query is cached by ``datalink.ui._query``, so the whole page
+    renders use at most ONE warehouse round-trip to learn the schema
+    catalog — not N per-missing-table probes. Empty set on error.
+    """
+    from datalink.ui._query import query_silent
+
+    df = query_silent(
+        "SELECT schema_name FROM information_schema.schemata "
+        "WHERE schema_name NOT IN ('information_schema','pg_catalog','main')"
+    )
+    if df.empty or "schema_name" not in df.columns:
+        return set()
+    return {str(s).upper() for s in df["schema_name"].tolist()}
+
+
 def _duckdb_count(schema: str, table: str) -> ProbeResult:
     """Query the warehouse for a row count. Returns ProbeResult.
 
     Named ``_duckdb_count`` for backwards compatibility with existing
     callers, but routed through ``datalink.ui._query`` so the backend
     (DuckDB or Snowflake) is config-driven.
+
+    Phase 7 perf: checks the cached schema catalog first. If ``schema``
+    doesn't exist on the current warehouse, we skip the COUNT(*) entirely
+    instead of asking the warehouse about a table we know isn't there.
+    This eliminates 8+ failing round-trips per page render when the
+    pipelines haven't been run on the current backend yet.
     """
     try:
         from datalink.ui._query import query_scalar
+
+        if schema.upper() not in _existing_schemas_upper():
+            return ProbeResult(ok=False, error=f"{schema} schema does not exist")
 
         val = query_scalar(f'SELECT COUNT(*) FROM "{schema}"."{table}"')
         if val is None:

@@ -231,18 +231,90 @@ def _deserialize_params(key: str) -> _Params:
     return None
 
 
-@st.cache_data(ttl=_QUERY_CACHE_TTL, show_spinner=False)  # type: ignore
+# In-process TTL cache. Simpler + more predictable than @st.cache_data,
+# which has edge-case behaviour around the Streamlit ScriptRunner context
+# that we were hitting. Everything lives in this module's globals and
+# survives every Streamlit rerun for the lifetime of the server process.
+#
+# Format: _cache[key] = (inserted_at_monotonic_seconds, rows_or_error_marker)
+# A MISSING TABLE or syntax error is cached as an empty list so subsequent
+# renders don't pay the 100-200ms Snowflake round-trip to re-learn the same
+# error. TTL for negative results is shorter so the UI picks up newly-created
+# tables within ~10s of a pipeline completing.
+_cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+# Sentinel wrapping: when we cache a failure, we store an empty list with
+# a *negative* TTL marker so the hit logic distinguishes success-empty
+# from failed-empty.
+_neg_cache: dict[tuple[str, str], float] = {}
+# Negative TTL: long enough that fast refreshes don't re-probe a missing
+# table over and over; short enough that after a pipeline creates the
+# table, operators see it within a minute or two (or sooner if they hit
+# the "🔄 Refresh now" button which calls clear_query_cache()).
+_NEG_CACHE_TTL = 120
+
+
 def _cached_rows(sql: str, params_key: str) -> list[dict[str, Any]]:
     """Cached warehouse query keyed by (sql, serialized_params).
 
-    TTL defaults to 30s — short enough to reflect real data movement,
-    long enough to deliver a 10x speedup on repeat page renders during an
-    interactive session. Streamlit invalidates the cache on process
-    restart (container bounce, code reload) and when the user hits
-    Ctrl+Shift+R on pages that trigger a full re-run.
+    Positive results cached for ``DL_CT_QUERY_TTL_SECONDS`` seconds
+    (default 30s). Failed queries (missing tables, syntax errors, auth
+    hiccups) cached as empty result for ``_NEG_CACHE_TTL`` seconds so
+    dashboards don't re-ask Snowflake about a non-existent table on
+    every render.
+
+    Every HIT, MISS, and ERROR is logged to stderr with timing so
+    operators can confirm cache behaviour via ``docker logs``.
     """
+    import sys as _sys
+    import time as _time
+
+    key = (sql, params_key)
+    now = _time.monotonic()
+
+    # Positive cache check
+    cached = _cache.get(key)
+    if cached is not None and (now - cached[0]) < _QUERY_CACHE_TTL:
+        print(
+            f"[_query.HIT ]       - | {sql[:90].replace(chr(10), ' ')}",
+            file=_sys.stderr,
+            flush=True,
+        )
+        return cached[1]
+
+    # Negative cache check — don't re-ask about a missing table
+    neg_at = _neg_cache.get(key)
+    if neg_at is not None and (now - neg_at) < _NEG_CACHE_TTL:
+        print(
+            f"[_query.NEG ]       - | {sql[:90].replace(chr(10), ' ')}",
+            file=_sys.stderr,
+            flush=True,
+        )
+        return []
+
+    # MISS — actually hit the warehouse.
     params = _deserialize_params(params_key)
-    return _build_backend(readonly=True).query(sql, params)
+    t0 = now
+    try:
+        rows = _build_backend(readonly=True).query(sql, params)
+    except Exception as exc:
+        elapsed_ms = (_time.monotonic() - t0) * 1000
+        _neg_cache[key] = now
+        print(
+            f"[_query.ERR ] {elapsed_ms:7.0f}ms | {type(exc).__name__}: "
+            f"{sql[:80].replace(chr(10), ' ')}",
+            file=_sys.stderr,
+            flush=True,
+        )
+        return []
+
+    elapsed_ms = (_time.monotonic() - t0) * 1000
+    _cache[key] = (now, rows)
+    print(
+        f"[_query.MISS] {elapsed_ms:7.0f}ms | {sql[:90].replace(chr(10), ' ')}",
+        file=_sys.stderr,
+        flush=True,
+    )
+    return rows
 
 
 def query(sql: str, params: _Params = None) -> pd.DataFrame:
@@ -289,7 +361,8 @@ def query_scalar(sql: str, params: _Params = None) -> Any:
 
 
 def clear_query_cache() -> None:
-    """Blow away every cached query result. Call from a 'Refresh now' button
-    when operators need an immediate re-fetch from the warehouse (e.g. right
-    after a DAG run completes)."""
-    _cached_rows.clear()
+    """Blow away every cached query result (positive AND negative). Call from
+    a 'Refresh now' button when operators need an immediate re-fetch — e.g.
+    right after a DAG run that should have just created BRONZE tables."""
+    _cache.clear()
+    _neg_cache.clear()
