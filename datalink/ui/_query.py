@@ -39,7 +39,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Iterator, Sequence
-from contextlib import contextmanager, suppress
+from contextlib import contextmanager
 from typing import Any, Protocol, cast
 
 import pandas as pd
@@ -186,17 +186,20 @@ def warehouse_ctx(*, readonly: bool = True) -> Iterator[_Warehouse]:
     """Yield a Warehouse-protocol object for the duration of a block.
 
     Use this when a page needs to pass a warehouse to another class (e.g.
-    ``SuiteRegistry``) or run multiple related statements. Closes the
-    backend connection (if applicable) on block exit.
+    ``SuiteRegistry``) or run multiple related statements.
+
+    Phase 7 perf: we do NOT close the backend on exit. The DuckDB shim
+    is stateless (opens/closes its own per-call connections inside query
+    methods); the Snowflake backend is a module-level singleton that
+    MUST stay open — closing it forced a 2-3s auth handshake on every
+    page interaction of DQ Author / DQ Review (which drive SuiteRegistry
+    through this ctx manager).
+
+    If callers genuinely need to release the connection (e.g. right
+    before a dbt subprocess takes over the DuckDB file lock), they should
+    call ``_snowflake_singleton.close()`` or similar explicitly.
     """
-    wh = _build_backend(readonly=readonly)
-    try:
-        yield wh
-    finally:
-        close_fn = getattr(wh, "close", None)
-        if callable(close_fn):
-            with suppress(Exception):
-                close_fn()
+    yield _build_backend(readonly=readonly)
 
 
 # Backends returned by _build_backend for DuckDB are stateless (per-query
