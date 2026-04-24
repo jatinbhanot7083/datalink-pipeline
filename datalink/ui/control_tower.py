@@ -382,25 +382,43 @@ def main() -> None:
         )
     with col_client:
         # Phase 5.8: picks the DQ suite version each triggered DAG uses.
-        # Persisted across reruns via session_state.
-        # Phase 7 tweak: sentinel enforces an explicit choice — "default"
-        # no longer shows up; operators must consciously select a tenant.
+        # Phase 7: sentinel enforces an explicit choice; "default" is
+        # hidden so operators must pick a real tenant.
+        #
+        # State persistence is handled by _nav._resolve_current_client()
+        # which reconciles URL <-> session_state BEFORE the sidebar
+        # renders. By the time this selectbox runs, session_state
+        # ["client_id"] already reflects the URL's ?client= param (if
+        # any), and the selectbox's own key= binding keeps them in sync
+        # going forward. We just validate + bind.
         clients = _list_clients()
         options = [_CLIENT_SENTINEL, *clients]
-        current = st.session_state.get("client_id", _CLIENT_SENTINEL)
-        if current not in options:
-            current = _CLIENT_SENTINEL
-        sel = st.selectbox(
+
+        # Stale-value guard: if session_state holds a client that's no
+        # longer in the registry, fall back to the sentinel.
+        if st.session_state.get("client_id") not in options:
+            st.session_state["client_id"] = _CLIENT_SENTINEL
+
+        st.selectbox(
             "Client",
             options=options,
-            index=options.index(current),
+            key="client_id",
             help=(
                 "Pick a real healthcare tenant. Drives the DQ suite version "
                 "each triggered DAG uses and which per-client schema "
-                "(BRONZE_AETNA, …) the tiles below read from."
+                "(BRONZE_AETNA, …) the tiles below read from. "
+                "Selection persists across pages via the URL."
             ),
         )
-        st.session_state["client_id"] = sel
+        sel = st.session_state["client_id"]
+
+        # Push selection to the URL so cross-page navigation preserves
+        # it. Clear the param when the sentinel is chosen.
+        if sel != _CLIENT_SENTINEL:
+            if st.query_params.get("client") != sel:
+                st.query_params["client"] = sel
+        elif "client" in st.query_params:
+            del st.query_params["client"]
     with col_b:
         refreshed_at = datetime.now(UTC).strftime("%H:%M:%S UTC")
         st.markdown(

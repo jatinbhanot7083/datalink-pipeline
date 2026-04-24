@@ -189,8 +189,55 @@ def _render_link(label: str, url: str, *, external: bool, is_active: bool, icon:
     )
 
 
+def _resolve_current_client() -> str | None:
+    """Reconcile URL query param and session_state, return the active client.
+
+    The Control Tower's client selector writes to ``session_state["client_id"]``
+    via the widget's ``key=`` binding. The custom ``<a href>`` sidebar causes
+    full-page navigations that wipe session_state, so we keep the URL
+    (``?client=aetna``) as the cross-page source of truth.
+
+    On every page render this function:
+      1. If URL has ``?client=X`` → persist X into session_state so the
+         Control Tower selectbox shows it when the user lands there.
+      2. Else if session_state has a real client → push it to the URL so
+         the sidebar's outgoing links carry it forward.
+
+    Sentinel values (anything starting with '—') and the legacy
+    pseudo-tenant "default" are filtered out — we only propagate real
+    tenants.
+    """
+
+    def _is_real(x: object) -> bool:
+        return bool(x) and isinstance(x, str) and x != "default" and not x.startswith("—")
+
+    url_client: str | None = st.query_params.get("client")
+    ss_client = st.session_state.get("client_id")
+
+    if _is_real(url_client):
+        # URL wins — persist to session_state so widgets pick it up
+        st.session_state["client_id"] = url_client
+        return str(url_client)
+
+    if _is_real(ss_client):
+        # Session has a real client, push to URL for nav persistence
+        if st.query_params.get("client") != ss_client:
+            st.query_params["client"] = str(ss_client)
+        return str(ss_client)
+
+    # No real client anywhere — clear stale URL param if present
+    if "client" in st.query_params:
+        del st.query_params["client"]
+    return None
+
+
 def render_sidebar(active: str | None = None) -> None:
     """Render the enterprise sidebar. Call once per page, after set_page_config."""
+    # Reconcile URL <-> session_state BEFORE rendering any hrefs so
+    # sidebar links always carry the active client forward.
+    current_client = _resolve_current_client()
+    client_suffix = f"?client={current_client}" if current_client else ""
+
     with st.sidebar:
         st.markdown(_SIDEBAR_CSS, unsafe_allow_html=True)
 
@@ -205,10 +252,11 @@ def render_sidebar(active: str | None = None) -> None:
             unsafe_allow_html=True,
         )
         for label, path in INTERNAL_PAGES:
+            href = f"{path}{client_suffix}"
             st.markdown(
                 _render_link(
                     label,
-                    path,
+                    href,
                     external=False,
                     is_active=(label == active),
                     icon="▸",
