@@ -213,13 +213,31 @@ def _type_chip_class(dtype: str) -> str:
 # Header + filters
 # ---------------------------------------------------------------------------
 st.title("🔍 Warehouse Explorer")
+
+# Header text adapts to whichever backend is live. The page queries the
+# configured warehouse (DL_ADAPTERS__WAREHOUSE__TYPE), not a hard-coded one.
+from datalink.ui._query import _warehouse_type  # noqa: E402
+
+_wh_mode = _warehouse_type()
+
+if _wh_mode == "snowflake":
+    _backend_name = "Snowflake"
+    _backend_target = (
+        f"<code>{os.environ.get('SNOWFLAKE_DATABASE', 'DATALINK_DEV')}</code> "
+        f"on Snowflake account "
+        f"<code>{os.environ.get('SNOWFLAKE_ACCOUNT', '(unset)')}</code>"
+    )
+else:
+    _backend_name = "DuckDB"
+    _backend_target = f"<code>{os.path.basename(WAREHOUSE_PATH)}</code> (local file)"
+
 st.markdown(
     '<div class="db-hero">'
-    "<h2>Schema and data explorer for the DuckDB warehouse</h2>"
-    "<p>Browse every schema in <code>warehouse.duckdb</code> — Bronze, "
-    "Silver, Gold, and Control. Select a table to inspect its columns, "
-    "preview rows, or issue ad-hoc SELECT statements in the worksheet. "
-    "Read-only by design; safe to use during live pipeline execution.</p>"
+    f"<h2>Schema and data explorer for the {_backend_name} warehouse</h2>"
+    f"<p>Browse every schema in {_backend_target} — Bronze, Silver, "
+    "Gold, and Control. Select a table to inspect its columns, preview "
+    "rows, or issue ad-hoc SELECT statements in the worksheet. Read-only "
+    "by design; safe to use during live pipeline execution.</p>"
     "</div>",
     unsafe_allow_html=True,
 )
