@@ -267,23 +267,37 @@ def _trigger_dag(dag_id: str, conf: dict[str, Any] | None = None) -> ProbeResult
 
 
 def _list_clients() -> list[str]:
-    """Read distinct clients from CONTROL.dq_suites so the client dropdown
-    populates automatically. Falls back to ['default'] if the registry is
-    empty (pre-first-run).
+    """Read distinct real-tenant clients from CONTROL.dq_suites.
 
-    Phase 7 Day 2: routed through ``datalink.ui._query`` so the underlying
-    backend is config-driven.
+    The Control Tower dropdown excludes the ``default`` pseudo-tenant —
+    it exists in the registry for legacy Phase-5.x baseline suites but
+    shouldn't be offered as a selectable client in the UI (it's not a
+    real healthcare tenant). Operators explicitly pick a real client
+    (aetna / caresource / affinity / …) to drive the medallion view.
+
+    Returns an empty list if the registry is empty (pre-first-run) or
+    on any backend error — the UI layer handles that by showing a
+    "no clients available yet" state.
     """
     try:
         from datalink.ui._query import query_silent
 
-        df = query_silent("SELECT DISTINCT client_id FROM CONTROL.dq_suites ORDER BY client_id")
+        df = query_silent(
+            "SELECT DISTINCT client_id FROM CONTROL.dq_suites "
+            "WHERE client_id <> 'default' "
+            "ORDER BY client_id"
+        )
         if df.empty:
-            return ["default"]
-        clients = [str(c) for c in df["client_id"].tolist()]
-        return clients or ["default"]
+            return []
+        return [str(c) for c in df["client_id"].tolist()]
     except Exception:
-        return ["default"]
+        return []
+
+
+# Sentinel shown as the FIRST option in the Client dropdown. When it's the
+# current selection the Control Tower halts rendering and prompts the
+# operator to pick a real client — no tiles load, no DAG triggers possible.
+_CLIENT_SENTINEL = "— Select a client —"
 
 
 # =============================================================================
@@ -369,16 +383,22 @@ def main() -> None:
     with col_client:
         # Phase 5.8: picks the DQ suite version each triggered DAG uses.
         # Persisted across reruns via session_state.
+        # Phase 7 tweak: sentinel enforces an explicit choice — "default"
+        # no longer shows up; operators must consciously select a tenant.
         clients = _list_clients()
-        current = st.session_state.get("client_id", "default")
-        if current not in clients:
-            current = "default"
+        options = [_CLIENT_SENTINEL, *clients]
+        current = st.session_state.get("client_id", _CLIENT_SENTINEL)
+        if current not in options:
+            current = _CLIENT_SENTINEL
         sel = st.selectbox(
             "Client",
-            options=clients,
-            index=clients.index(current),
-            help="DQ suite selection. `default` uses the baseline seeded suites; "
-            "other clients use their own LIVE (authored via /DQ_Author).",
+            options=options,
+            index=options.index(current),
+            help=(
+                "Pick a real healthcare tenant. Drives the DQ suite version "
+                "each triggered DAG uses and which per-client schema "
+                "(BRONZE_AETNA, …) the tiles below read from."
+            ),
         )
         st.session_state["client_id"] = sel
     with col_b:
@@ -394,6 +414,26 @@ def main() -> None:
 
             clear_query_cache()
             st.rerun()
+
+    # ========================================================================
+    # CLIENT-SELECTION GATE — halt rendering until a real client is chosen.
+    # Without a selection there is nothing meaningful to show (tiles would
+    # render for "nothing") and DAG triggers would be wrong. Exit early.
+    # ========================================================================
+    if sel == _CLIENT_SENTINEL:
+        if not clients:
+            st.warning(
+                "No clients are registered in **CONTROL.dq_suites** yet. "
+                "Run the bootstrap or seed baseline suites to populate the "
+                "registry, then refresh this page."
+            )
+        else:
+            st.info(
+                "👆 **Pick a client from the dropdown above.** The medallion "
+                "tiles, DAG triggers, and agent activity all render for the "
+                "selected tenant."
+            )
+        st.stop()
 
     # ========================================================================
     # FLOW DIAGRAM — live row counts per zone
@@ -578,7 +618,10 @@ def main() -> None:
                 else:
                     st.error(r.error)
 
-    selected_client = st.session_state.get("client_id", "default")
+    # `sel` is guaranteed a real client here (sentinel would have halted
+    # rendering above via st.stop()). Use it directly instead of refetching
+    # from session_state with a now-impossible default fallback.
+    selected_client = sel
 
     def _trigger_ui(dag_id: str, label: str, help_text: str) -> None:
         clicked = st.button(label, use_container_width=True, help=help_text)
