@@ -298,11 +298,13 @@ def require_client() -> str:
     When no selection is active, shows a prompt and st.stop()s. When a
     real client is active, returns it.
 
-    MUST be called AFTER ``render_sidebar(...)`` so the selector has
-    been drawn first.
+    MUST be called AFTER ``render_sidebar(...)`` so the selector widget
+    has already been drawn. This function ONLY READS session_state —
+    it does not attempt to write, because Streamlit forbids external
+    modification of a key that's bound to an instantiated widget.
     """
-    sel = _resolve_current_client()
-    if sel is None:
+    sel = st.session_state.get("client_id")
+    if not sel or not isinstance(sel, str) or sel == CLIENT_SENTINEL or sel == "default":
         st.info(
             "👆 **Pick a client from the sidebar.** "
             "Every page renders content scoped to the selected tenant."
@@ -310,7 +312,7 @@ def require_client() -> str:
         st.stop()
         # mypy doesn't know st.stop() halts — appease the return-type check.
         raise RuntimeError("unreachable: st.stop() halts execution")
-    return sel
+    return str(sel)
 
 
 def render_sidebar(active: str | None = None) -> None:
