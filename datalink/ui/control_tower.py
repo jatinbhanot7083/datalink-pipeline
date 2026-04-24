@@ -266,38 +266,10 @@ def _trigger_dag(dag_id: str, conf: dict[str, Any] | None = None) -> ProbeResult
     return _airflow(f"/api/v1/dags/{dag_id}/dagRuns", method="POST", json=body)
 
 
-def _list_clients() -> list[str]:
-    """Read distinct real-tenant clients from CONTROL.dq_suites.
-
-    The Control Tower dropdown excludes the ``default`` pseudo-tenant —
-    it exists in the registry for legacy Phase-5.x baseline suites but
-    shouldn't be offered as a selectable client in the UI (it's not a
-    real healthcare tenant). Operators explicitly pick a real client
-    (aetna / caresource / affinity / …) to drive the medallion view.
-
-    Returns an empty list if the registry is empty (pre-first-run) or
-    on any backend error — the UI layer handles that by showing a
-    "no clients available yet" state.
-    """
-    try:
-        from datalink.ui._query import query_silent
-
-        df = query_silent(
-            "SELECT DISTINCT client_id FROM CONTROL.dq_suites "
-            "WHERE client_id <> 'default' "
-            "ORDER BY client_id"
-        )
-        if df.empty:
-            return []
-        return [str(c) for c in df["client_id"].tolist()]
-    except Exception:
-        return []
-
-
-# Sentinel shown as the FIRST option in the Client dropdown. When it's the
-# current selection the Control Tower halts rendering and prompts the
-# operator to pick a real client — no tiles load, no DAG triggers possible.
-_CLIENT_SENTINEL = "— Select a client —"
+# Client selector + sentinel logic lives in datalink/ui/_nav.py as of
+# Phase-7 unification — one selector for the whole app, surfaced in the
+# sidebar. Pages call ``require_client()`` from that module to get the
+# active tenant or halt rendering if none is selected.
 
 
 # =============================================================================
@@ -372,7 +344,7 @@ def main() -> None:
         f"<span style='color:{_GOLD}'>Control Tower</span></h1>",
         unsafe_allow_html=True,
     )
-    col_a, col_client, col_b = st.columns([2, 1, 1])
+    col_a, col_b = st.columns([3, 1])
     with col_a:
         st.markdown(
             '<p style="color:#4a5a7e;margin:0">Single-pane-of-glass for the '
@@ -380,45 +352,6 @@ def main() -> None:
             "SQL Server + PostgreSQL — with Great Expectations + CrewAI visible end-to-end.</p>",
             unsafe_allow_html=True,
         )
-    with col_client:
-        # Phase 5.8: picks the DQ suite version each triggered DAG uses.
-        # Phase 7: sentinel enforces an explicit choice; "default" is
-        # hidden so operators must pick a real tenant.
-        #
-        # State persistence is handled by _nav._resolve_current_client()
-        # which reconciles URL <-> session_state BEFORE the sidebar
-        # renders. By the time this selectbox runs, session_state
-        # ["client_id"] already reflects the URL's ?client= param (if
-        # any), and the selectbox's own key= binding keeps them in sync
-        # going forward. We just validate + bind.
-        clients = _list_clients()
-        options = [_CLIENT_SENTINEL, *clients]
-
-        # Stale-value guard: if session_state holds a client that's no
-        # longer in the registry, fall back to the sentinel.
-        if st.session_state.get("client_id") not in options:
-            st.session_state["client_id"] = _CLIENT_SENTINEL
-
-        st.selectbox(
-            "Client",
-            options=options,
-            key="client_id",
-            help=(
-                "Pick a real healthcare tenant. Drives the DQ suite version "
-                "each triggered DAG uses and which per-client schema "
-                "(BRONZE_AETNA, …) the tiles below read from. "
-                "Selection persists across pages via the URL."
-            ),
-        )
-        sel = st.session_state["client_id"]
-
-        # Push selection to the URL so cross-page navigation preserves
-        # it. Clear the param when the sentinel is chosen.
-        if sel != _CLIENT_SENTINEL:
-            if st.query_params.get("client") != sel:
-                st.query_params["client"] = sel
-        elif "client" in st.query_params:
-            del st.query_params["client"]
     with col_b:
         refreshed_at = datetime.now(UTC).strftime("%H:%M:%S UTC")
         st.markdown(
@@ -434,24 +367,13 @@ def main() -> None:
             st.rerun()
 
     # ========================================================================
-    # CLIENT-SELECTION GATE — halt rendering until a real client is chosen.
-    # Without a selection there is nothing meaningful to show (tiles would
-    # render for "nothing") and DAG triggers would be wrong. Exit early.
+    # CLIENT GATE — the sidebar owns the selector (_nav.render_sidebar). If
+    # no real tenant is selected, halt rendering with a prompt. `sel` is
+    # the resolved client going forward.
     # ========================================================================
-    if sel == _CLIENT_SENTINEL:
-        if not clients:
-            st.warning(
-                "No clients are registered in **CONTROL.dq_suites** yet. "
-                "Run the bootstrap or seed baseline suites to populate the "
-                "registry, then refresh this page."
-            )
-        else:
-            st.info(
-                "👆 **Pick a client from the dropdown above.** The medallion "
-                "tiles, DAG triggers, and agent activity all render for the "
-                "selected tenant."
-            )
-        st.stop()
+    from datalink.ui._nav import require_client
+
+    sel = require_client()
 
     # ========================================================================
     # FLOW DIAGRAM — live row counts per zone

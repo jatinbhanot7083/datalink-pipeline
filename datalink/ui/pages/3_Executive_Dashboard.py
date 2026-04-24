@@ -113,18 +113,17 @@ def _try_query(sql: str, params: tuple[Any, ...] = ()) -> pd.DataFrame:
 # SIDEBAR FILTERS
 # ============================================================================
 
-st.sidebar.header("Filters")
+# Client comes from the global sidebar selector; halt if not chosen.
+from datalink.ui._nav import require_client  # noqa: E402
 
-clients_df = _try_query("SELECT DISTINCT client_id FROM CONTROL.dq_suites ORDER BY client_id")
-client_options = ["<all>"] + (clients_df["client_id"].tolist() if not clients_df.empty else [])
-selected_client = st.sidebar.selectbox("Client", client_options, index=0)
+selected_client = require_client()
+
+st.sidebar.header("Filters")
 days = st.sidebar.slider("Window (days)", 1, 90, 30)
 
-client_filter_sql = ""
-client_params: tuple[Any, ...] = ()
-if selected_client != "<all>":
-    client_filter_sql = "AND client_id = ?"
-    client_params = (selected_client,)
+# Client filter is always applied (guaranteed a real tenant).
+client_filter_sql = "AND client_id = ?"
+client_params: tuple[Any, ...] = (selected_client,)
 
 
 # ============================================================================

@@ -140,13 +140,13 @@ st.markdown(
 # SIDEBAR FILTERS — client / source_type / dimension / window
 # ============================================================================
 
-st.sidebar.header("Filters")
+# Client is selected once in the sidebar (global selector). All filters
+# on this page are scoped to that client — no per-page client dropdown.
+from datalink.ui._nav import require_client  # noqa: E402
 
-clients_df = _try_query("SELECT DISTINCT client_id FROM CONTROL.dq_suites ORDER BY client_id")
-client_options = ["<all>"] + (
-    clients_df["client_id"].tolist() if not clients_df.empty else ["default"]
-)
-selected_client = st.sidebar.selectbox("Client", client_options, index=0)
+selected_client = require_client()
+
+st.sidebar.header("Filters")
 
 source_options = ["<all>", "CLAIMS", "MEMBERSHIP", "PROVIDER"]
 selected_source = st.sidebar.selectbox("Source type", source_options, index=0)
@@ -165,12 +165,9 @@ selected_dim = st.sidebar.selectbox("DQ Dimension", dimension_options, index=0)
 days = st.sidebar.slider("Window (days)", 1, 90, 30)
 
 # Build param list + where clauses for each slicer.
-_wheres: list[str] = []
-_params: list[Any] = []
+_wheres: list[str] = ["client_id = ?"]
+_params: list[Any] = [selected_client]
 
-if selected_client != "<all>":
-    _wheres.append("client_id = ?")
-    _params.append(selected_client)
 if selected_source != "<all>":
     _wheres.append("UPPER(source_type) = ?")
     _params.append(selected_source.upper())
@@ -178,7 +175,7 @@ if selected_dim != "<all>":
     _wheres.append("dq_dimension = ?")
     _params.append(selected_dim)
 
-filter_sql = (" AND " + " AND ".join(_wheres)) if _wheres else ""
+filter_sql = " AND " + " AND ".join(_wheres)
 params_tuple: tuple[Any, ...] = tuple(_params)
 
 scope_str = (
@@ -445,7 +442,8 @@ suite_df = _try_query(
     """
 )
 
-if selected_client != "<all>" and not suite_df.empty:
+# selected_client is always a real tenant (require_client() halts if not).
+if not suite_df.empty:
     suite_df = suite_df[suite_df["client_id"] == selected_client]
 if selected_source != "<all>" and not suite_df.empty:
     suite_df = suite_df[suite_df["source_type"].str.upper() == selected_source.upper()]

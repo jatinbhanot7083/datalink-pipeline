@@ -231,6 +231,88 @@ def _resolve_current_client() -> str | None:
     return None
 
 
+# Sentinel shown as the first option in the unified client selector.
+# When it's the current selection, pages that need a client halt
+# rendering via require_client().
+CLIENT_SENTINEL = "— Select a client —"
+
+
+def _list_real_clients() -> list[str]:
+    """Read distinct real tenants from CONTROL.dq_suites (excludes 'default')."""
+    try:
+        from datalink.ui._query import query_silent
+
+        df = query_silent(
+            "SELECT DISTINCT client_id FROM CONTROL.dq_suites "
+            "WHERE client_id <> 'default' ORDER BY client_id"
+        )
+        if df.empty:
+            return []
+        return [str(c) for c in df["client_id"].tolist()]
+    except Exception:
+        return []
+
+
+def _render_client_selector() -> str | None:
+    """Render the one-and-only client selector at the top of the sidebar.
+
+    State is persisted via ``session_state["client_id"]`` (intra-session)
+    and ``?client=X`` URL param (cross-page navigation). Returns the
+    currently-selected real client, or ``None`` if the sentinel is active.
+    """
+    clients = _list_real_clients()
+    options = [CLIENT_SENTINEL, *clients]
+
+    # Stale-value guard: if the remembered client was removed from the
+    # registry, reset to the sentinel so the selectbox doesn't blow up.
+    if st.session_state.get("client_id") not in options:
+        st.session_state["client_id"] = CLIENT_SENTINEL
+
+    st.selectbox(
+        "Client",
+        options=options,
+        key="client_id",
+        help=(
+            "One client at a time. Drives DQ suite versions + per-client "
+            "schemas (BRONZE_AETNA, …). Selection persists across every "
+            "page via URL query param."
+        ),
+    )
+
+    sel = st.session_state["client_id"]
+
+    # Keep URL in sync so cross-page navigation preserves the choice.
+    if sel != CLIENT_SENTINEL:
+        if st.query_params.get("client") != sel:
+            st.query_params["client"] = str(sel)
+    elif "client" in st.query_params:
+        del st.query_params["client"]
+
+    return None if sel == CLIENT_SENTINEL else str(sel)
+
+
+def require_client() -> str:
+    """Halt page rendering until a real client is selected in the sidebar.
+
+    Call this at the top of any page whose content is client-scoped.
+    When no selection is active, shows a prompt and st.stop()s. When a
+    real client is active, returns it.
+
+    MUST be called AFTER ``render_sidebar(...)`` so the selector has
+    been drawn first.
+    """
+    sel = _resolve_current_client()
+    if sel is None:
+        st.info(
+            "👆 **Pick a client from the sidebar.** "
+            "Every page renders content scoped to the selected tenant."
+        )
+        st.stop()
+        # mypy doesn't know st.stop() halts — appease the return-type check.
+        raise RuntimeError("unreachable: st.stop() halts execution")
+    return sel
+
+
 def render_sidebar(active: str | None = None) -> None:
     """Render the enterprise sidebar. Call once per page, after set_page_config."""
     # Reconcile URL <-> session_state BEFORE rendering any hrefs so
@@ -245,6 +327,9 @@ def render_sidebar(active: str | None = None) -> None:
             '<div class="dl-nav-title">🏛️ DataLink Navigation</div>',
             unsafe_allow_html=True,
         )
+
+        # ---- CLIENT SELECTOR (global, one per session) ----
+        _render_client_selector()
 
         # ---- DASHBOARDS ----
         st.markdown(

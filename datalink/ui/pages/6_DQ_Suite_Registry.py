@@ -150,13 +150,12 @@ st.markdown(
 # ============================================================================
 # SIDEBAR FILTERS
 # ============================================================================
-st.sidebar.header("Filters")
+# Client comes from the global sidebar selector; halt if not chosen.
+from datalink.ui._nav import require_client  # noqa: E402
 
-clients_df = _query("SELECT DISTINCT client_id FROM CONTROL.dq_suites ORDER BY client_id")
-client_options = ["<all>"] + (
-    clients_df["client_id"].tolist() if not clients_df.empty else ["default"]
-)
-selected_client = st.sidebar.selectbox("Client", client_options, index=0)
+selected_client = require_client()
+
+st.sidebar.header("Filters")
 
 source_options = ["<all>", "CLAIMS", "MEMBERSHIP", "PROVIDER", "(legacy aggregate)"]
 selected_source = st.sidebar.selectbox("Source type", source_options, index=0)
@@ -172,11 +171,9 @@ elif selected_source != "<all>":
     source_filter = "AND UPPER(source_type) = ?"
     source_params = [selected_source.upper()]
 
-client_filter = ""
-client_params: list[Any] = []
-if selected_client != "<all>":
-    client_filter = "AND client_id = ?"
-    client_params = [selected_client]
+# Client filter is always applied (guaranteed a real tenant by require_client()).
+client_filter = "AND client_id = ?"
+client_params: list[Any] = [selected_client]
 
 status_filter = ""
 status_params: list[Any] = []
@@ -284,7 +281,9 @@ for (client, source), group in grouped:
     with st.expander(
         f"{icon}  **{client}** · {src_label}  —  {n_suites} suite(s), "
         f"{exp_total} expectation(s) total",
-        expanded=(selected_client != "<all>" and n_suites <= 6),
+        # Always a real client now (require_client enforced); keep the
+        # "expand when small group" heuristic for readability.
+        expanded=(n_suites <= 6),
     ):
         for _, row in group.iterrows():
             status = row["status"]
