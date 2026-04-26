@@ -111,7 +111,8 @@ class AgentMemoryStore:
     ) -> None:
         # Same env vars the warehouse router + Control Tower already use.
         self._host = host or os.environ.get("POSTGRES_HOST", "postgres")
-        self._port = int(port or os.environ.get("POSTGRES_PORT", "5432"))
+        # Coerce explicitly — port may be int (constructor arg) or str (env var).
+        self._port = int(port if port is not None else os.environ.get("POSTGRES_PORT", "5432"))
         self._user = user or os.environ.get("POSTGRES_USER", "datalink")
         self._password = password or os.environ.get("POSTGRES_PASSWORD", "datalink_local_only")
         self._database = database or os.environ.get("POSTGRES_DATABASE", "datalink_um")
@@ -292,7 +293,7 @@ class AgentMemoryStore:
             ordered_params.append(client_id)
         # query_vec appears TWICE — once in SELECT distance, once in ORDER BY.
         # Inject the same vec object both times so they share a serialisation.
-        ordered_params = [_to_pgvector(embedding)] + ordered_params + [_to_pgvector(embedding), k]
+        ordered_params = [_to_pgvector(embedding), *ordered_params, _to_pgvector(embedding), k]
         with self._connect() as conn, conn.cursor() as cur:
             cur.execute(sql, ordered_params)
             rows = cur.fetchall()

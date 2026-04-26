@@ -37,9 +37,133 @@ from datalink.pipeline.bronze.parsers import (
     SourceFormatConfig,
     build_parser,
 )
+from datalink.quality.schema_drift import (
+    ColumnContract,
+    SchemaDriftError,
+    classify_drift,
+    get_active_contract,
+    log_drift_event,
+)
 from datalink.tenancy import DEFAULT_CLIENT, Layer, schema_for
 
 _log = get_logger(__name__)
+
+
+def _read_csv_header(local_csv: Path, fmt: SourceFormatConfig) -> list[str]:
+    """Phase 11.3 — read just the CSV header line for drift pre-check.
+
+    Returns the trimmed column names in source order. Returns ``[]`` if
+    the format has no header (caller treats as unknown-schema). Uses the
+    stdlib csv module so we don't drag in a pandas dependency for a
+    one-line read.
+    """
+    if not fmt.has_header:
+        return []
+    import csv
+
+    with open(local_csv, encoding=fmt.encoding or "utf-8", newline="") as f:
+        reader = csv.reader(f, delimiter=fmt.delimiter or ",")
+        try:
+            row = next(reader)
+        except StopIteration:
+            return []
+    return [c.strip() for c in row]
+
+
+def _check_schema_drift(
+    warehouse: Warehouse,
+    *,
+    client_id: str,
+    source_type: str,
+    local_csv: Path,
+    fmt: SourceFormatConfig,
+    source_file: str,
+    batch_id: str,
+) -> None:
+    """Phase 11.3 — classify drift against the active contract. Raises
+    :class:`SchemaDriftError` on FATAL.
+
+    Behaviour matrix (Phase 11.3 v1, name-only check):
+
+      * No active contract for ``(client_id, source_type)`` → log a
+        warning and continue. Back-compat for tenants that haven't been
+        migrated to contracts yet. Once the migration script runs, this
+        path goes away.
+      * Header read returns ``[]`` (no-header format) → also log warning
+        and continue. Drift detection requires a header line.
+      * Clean (no drift) → silent return.
+      * ADDITIVE only → log to ``schema_drift_log`` with
+        ``action_taken='LOGGED'``, return. Caller's load proceeds.
+        Extras are not yet captured at row level — operator promotes
+        via Schema Drift UI (Phase 11.5), at which point a new contract
+        version covers them and future batches stay clean.
+      * SUBTRACTIVE / DESTRUCTIVE / MIXED → log with
+        ``action_taken='HALTED'``, raise :class:`SchemaDriftError`.
+        Bronze ingest aborts; pipeline_control_state flips to PAUSED
+        via the existing hooks machinery.
+    """
+    contract = get_active_contract(warehouse, client_id=client_id, source_type=source_type)
+    if contract is None:
+        _log.warning(
+            "schema_drift.no_contract",
+            client_id=client_id,
+            source_type=source_type,
+            source_file=source_file,
+            note="no contract registered; drift detection skipped",
+        )
+        return
+
+    actual_names = _read_csv_header(local_csv, fmt)
+    if not actual_names:
+        _log.warning(
+            "schema_drift.no_header",
+            client_id=client_id,
+            source_type=source_type,
+            source_file=source_file,
+            note="format has no header row; drift detection skipped",
+        )
+        return
+
+    # Build name-only ColumnContract — types unknown from header alone.
+    actuals = [ColumnContract(name=n, logical_type="") for n in actual_names]
+    report = classify_drift(actuals, contract, check_types=False)
+
+    if report.is_clean:
+        return
+
+    action = "HALTED" if report.is_fatal else "LOGGED"
+    log_drift_event(
+        warehouse,
+        client_id=client_id,
+        source_type=source_type,
+        source_file=source_file,
+        batch_id=batch_id,
+        report=report,
+        action_taken=action,
+        notes=f"detected at Bronze ingest; contract v{report.contract_version}",
+    )
+
+    if report.is_fatal:
+        _log.error(
+            "schema_drift.halt",
+            client_id=client_id,
+            source_type=source_type,
+            source_file=source_file,
+            batch_id=batch_id,
+            summary=report.summary(),
+        )
+        raise SchemaDriftError(report, client_id=client_id, source_type=source_type)
+
+    _log.warning(
+        "schema_drift.warn",
+        client_id=client_id,
+        source_type=source_type,
+        source_file=source_file,
+        batch_id=batch_id,
+        summary=report.summary(),
+        added=list(report.added_columns),
+        note="additive drift — load continues; promote via Schema Drift UI to capture future batches",
+    )
 
 
 def _sanitize_identifier(raw: str) -> str:
@@ -334,6 +458,23 @@ def ingest_file(
         tmp_dir = Path(tmp)
         local_downloaded = tmp_dir / filename
         adapters.sftp.download(remote_path, local_downloaded)
+
+        # 1.5 Phase 11.3 — schema drift pre-check. Reads the CSV header
+        # against the active contract for (client_id, source_type) BEFORE
+        # any staging work. Fail-fast on FATAL: SchemaDriftError bubbles
+        # up to the orchestrator's hooks which mark the batch failed and
+        # flip pipeline_control_state to PAUSED. Additive drift is logged
+        # and the load continues — extras drop on the floor for v1
+        # (operator promotes via UI in Phase 11.5).
+        _check_schema_drift(
+            adapters.warehouse,
+            client_id=client_id,
+            source_type=source_type,
+            local_csv=local_downloaded,
+            fmt=fmt_cfg,
+            source_file=filename,
+            batch_id=batch_id,
+        )
 
         # 2. Upload to object store under a date-partitioned key.
         today = datetime.now(UTC).strftime("%Y-%m-%d")

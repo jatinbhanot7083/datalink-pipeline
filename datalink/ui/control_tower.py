@@ -540,13 +540,14 @@ def main() -> None:
         "`CONTROL.pipeline_control_audit_log`."
     )
     try:
+        from collections.abc import Iterator
         from contextlib import contextmanager as _cm
 
         from datalink.quality.control import PipelineControl
         from datalink.ui._query import warehouse_ctx as _wctx
 
         @_cm
-        def _control_ctx():
+        def _control_ctx() -> Iterator[PipelineControl]:
             with _wctx(readonly=False) as _wh:
                 yield PipelineControl(_wh)  # type: ignore[arg-type]
 

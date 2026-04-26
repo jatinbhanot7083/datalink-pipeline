@@ -40,7 +40,7 @@ _log = get_logger(__name__)
 
 _PASS = "✅ PASS"
 _FAIL = "❌ FAIL"
-_INFO = "ℹ️  INFO"
+_INFO = "ℹ️  INFO"  # noqa: RUF001
 
 
 @dataclass
@@ -247,7 +247,8 @@ def _assertions_for_day(day: int) -> list[Assertion]:
     generation can produce slightly different row counts run-to-run."""
     base = _assertions_for_existing()
     if day == 1:
-        return base + [
+        return [
+            *base,
             Assertion(
                 name="Day 1: Silver active members ≥ 5 K (full file landed)",
                 predicate=lambda s: s.get("silver_sat_member_demographics_active", 0) >= 5_000,
@@ -255,7 +256,8 @@ def _assertions_for_day(day: int) -> list[Assertion]:
             ),
         ]
     if day == 2:
-        return base + [
+        return [
+            *base,
             Assertion(
                 name="Day 2: Bronze membership grew by ≥ 1 batch",
                 predicate=lambda s: s.get("bronze_raw_membership_batches", 0) >= 2,
@@ -263,7 +265,8 @@ def _assertions_for_day(day: int) -> list[Assertion]:
             ),
         ]
     if day == 3:
-        return base + [
+        return [
+            *base,
             Assertion(
                 name="Day 3: Silver Sat has both active + inactive rows (soft-delete fired)",
                 predicate=lambda s: (

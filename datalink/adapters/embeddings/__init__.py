@@ -33,20 +33,24 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
+    # Inline imports inside each branch keep the optional voyageai SDK
+    # off the import path for callers that only need the stub. The
+    # function-local rebind is intentional — no module-level cache so
+    # tests that monkeypatch the underlying class still work.
     if name == "EmbeddingProvider":
-        from datalink.adapters.embeddings.protocol import EmbeddingProvider as _P
+        from datalink.adapters.embeddings.protocol import EmbeddingProvider
 
-        return _P
+        return EmbeddingProvider
     if name == "StubEmbedder":
-        from datalink.adapters.embeddings.stub import StubEmbedder as _S
+        from datalink.adapters.embeddings.stub import StubEmbedder
 
-        return _S
+        return StubEmbedder
     if name == "VoyageEmbedder":
-        from datalink.adapters.embeddings.voyage import VoyageEmbedder as _V
+        from datalink.adapters.embeddings.voyage import VoyageEmbedder
 
-        return _V
+        return VoyageEmbedder
     if name == "get_embedder":
-        from datalink.adapters.embeddings.router import get_embedder as _G
+        from datalink.adapters.embeddings.router import get_embedder
 
-        return _G
+        return get_embedder
     raise AttributeError(f"module 'datalink.adapters.embeddings' has no attribute {name!r}")

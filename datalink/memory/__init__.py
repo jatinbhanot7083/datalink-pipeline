@@ -31,4 +31,4 @@ Public surface:
 
 from datalink.memory.store import AgentMemoryStore, ReasoningHit, SuiteHit
 
-__all__ = ["AgentMemoryStore", "SuiteHit", "ReasoningHit"]
+__all__ = ["AgentMemoryStore", "ReasoningHit", "SuiteHit"]

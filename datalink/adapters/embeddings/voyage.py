@@ -31,8 +31,13 @@ _MODEL_DIMS: dict[str, int] = {
 
 
 class VoyageEmbedder:
+    model: str
+
     def __init__(self, model: str | None = None, api_key: str | None = None) -> None:
-        self.model = model or os.environ.get("VOYAGE_MODEL", "voyage-3-lite")
+        # Always end up with a non-None str — the literal default is the
+        # last-resort fallback. Keeps `self.model: str` (required by the
+        # EmbeddingProvider protocol).
+        self.model = model or os.environ.get("VOYAGE_MODEL") or "voyage-3-lite"
         if self.model not in _MODEL_DIMS:
             raise ValueError(
                 f"Unknown Voyage model {self.model!r}; expected one of "
@@ -50,7 +55,7 @@ class VoyageEmbedder:
     def _ensure_client(self) -> Any:
         if self._client is None:
             try:
-                import voyageai  # type: ignore[import-untyped]
+                import voyageai
             except ImportError as e:
                 raise RuntimeError(
                     "voyageai package not installed. Add to your image "

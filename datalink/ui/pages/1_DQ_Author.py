@@ -25,10 +25,9 @@ import pandas as pd
 import streamlit as st
 
 from datalink.quality.registry import (
+    ApprovalMode,
     DqDimension,
-    SuiteDraft,
     SuiteRegistry,
-    SuiteSource,
     SuiteStatus,
 )
 from datalink.ui._query import warehouse_ctx
@@ -221,29 +220,27 @@ latest_draft = next(
     (v for v in versions if v.status is SuiteStatus.DRAFT and v.client_id == client_id), None
 )
 
-# Handle the clone action — open a fresh WRITE connection ONLY for the clone.
-# Every prior read handle is already closed by the `with _registry(...)` blocks
-# above, so DuckDB's "same config" constraint is satisfied.
+# Phase 10.2 — clone uses fork_for_edit() so audit log records the
+# source suite_id + version, and the new draft inherits source/source_type/
+# fingerprint from the original (preserves provenance for baselines that
+# get edited via the UI; old code reset source to SuiteSource.UI which
+# erased the fact that this was originally a baseline-seeded suite).
 if clone_from_live and live:
     with st.spinner("Cloning..."):
         try:
             with _registry(readonly=False) as reg:
-                draft = SuiteDraft(
-                    client_id=client_id,
-                    suite_name=suite_name,
-                    expectations=[dict(e) for e in live.expectations],
-                    dq_dimensions=list(live.dq_dimensions),
-                    created_by=st.session_state.get("user", "anonymous@local"),
-                    source=SuiteSource.UI,
+                new_id = reg.fork_for_edit(
+                    live.suite_id,
+                    actor=st.session_state.get("user", "anonymous@local"),
                 )
-                new_id = reg.create_draft(draft)
             st.success(
-                f"Cloned v{live.version} → new DRAFT (id={new_id[:8]}). Scroll down to edit."
+                f"Forked v{live.version} → new DRAFT v{live.version + 1} "
+                f"(id={new_id[:8]}). Scroll down to edit."
             )
             st.session_state["active_draft_id"] = new_id
             st.rerun()
         except Exception as e:
-            st.error(f"Clone failed: {e}")
+            st.error(f"Fork failed: {e}")
 
 
 # ----------------------------------------------------------------------------
@@ -420,9 +417,52 @@ else:
             key=f"actor_{active.suite_id}",
         )
 
+        # Phase 10.4 — approval-mode picker. Per Option C:
+        # - When editing a suite that already has a LIVE version, the
+        #   policy LOCKS the picker to HITL. Edits to production must
+        #   go through review even if the user is a senior steward.
+        # - For brand-new suites (no LIVE yet), the user picks freely:
+        #   DRAFT (park), HITL (default — review queue), AUTO_APPROVE
+        #   (skip review, go straight to LIVE — power-user opt-in).
+        if live is not None:  # narrows live to SuiteVersion (mypy)
+            st.caption(
+                f"🔒 Editing v{live.version} (currently LIVE) — "
+                f"by Phase-10 policy this draft must go through HITL review "
+                f"regardless of mode picker. Changes to production-gating "
+                f"suites cannot bypass two-eye approval."
+            )
+            mode_options = [ApprovalMode.DRAFT, ApprovalMode.HITL]
+            mode_default_idx = 1  # HITL
+        else:
+            mode_options = [
+                ApprovalMode.DRAFT,
+                ApprovalMode.HITL,
+                ApprovalMode.AUTO_APPROVE,
+            ]
+            mode_default_idx = 1  # HITL — Option C default for UI authoring
+
+        approval_mode = st.radio(
+            "On Submit, route as:",
+            options=mode_options,
+            index=mode_default_idx,
+            horizontal=True,
+            format_func=lambda m: {
+                ApprovalMode.DRAFT: "📝 Save DRAFT (park)",
+                ApprovalMode.HITL: "👁️ HITL (route to DQ Review)",
+                ApprovalMode.AUTO_APPROVE: "⚡ AUTO_APPROVE (skip review, go LIVE)",
+            }[m],
+            key=f"mode_{active.suite_id}",
+        )
+
         btn_save, btn_submit, btn_archive, _ = st.columns([1, 1, 1, 2])
         with btn_save:
-            if st.button("💾 Save Draft", use_container_width=True, type="secondary"):
+            if st.button(
+                "💾 Save Draft",
+                use_container_width=True,
+                type="secondary",
+                help="Persists the editor state without changing status. "
+                "Use this between edit sessions; click Submit when ready.",
+            ):
                 try:
                     new_exps = _df_to_expectations(edited)
                     dims = sorted(
@@ -439,7 +479,12 @@ else:
                 except Exception as e:
                     st.error(f"Save failed: {e}")
         with btn_submit:
-            if st.button("📤 Submit for Review", use_container_width=True, type="primary"):
+            submit_label = {
+                ApprovalMode.DRAFT: "💾 Save (no submit)",
+                ApprovalMode.HITL: "📤 Submit for Review",
+                ApprovalMode.AUTO_APPROVE: "⚡ Approve & Go LIVE",
+            }[approval_mode]
+            if st.button(submit_label, use_container_width=True, type="primary"):
                 try:
                     # Save first, THEN submit — so the reviewer sees the latest edits.
                     new_exps = _df_to_expectations(edited)
@@ -452,12 +497,33 @@ else:
                     )
                     with _registry(readonly=False) as reg:
                         reg.update_draft(active.suite_id, new_exps, list(dims), actor=actor)
-                        reg.submit_for_review(active.suite_id, actor=actor)
+                        reg.submit_with_policy(
+                            active.suite_id,
+                            mode=approval_mode,
+                            actor=actor,
+                            approval_notes=(
+                                "DQ Author auto-approve"
+                                if approval_mode is ApprovalMode.AUTO_APPROVE
+                                else None
+                            ),
+                        )
+                    final_status = {
+                        ApprovalMode.DRAFT: "DRAFT (still editable)",
+                        ApprovalMode.HITL: "PENDING_REVIEW",
+                        ApprovalMode.AUTO_APPROVE: "LIVE",
+                    }[approval_mode]
+                    next_stop = {
+                        ApprovalMode.DRAFT: "this page (continue editing)",
+                        ApprovalMode.HITL: "[DQ Review](/DQ_Review)",
+                        ApprovalMode.AUTO_APPROVE: "[DQ Suite Registry](/DQ_Suite_Registry)",
+                    }[approval_mode]
                     st.success(
-                        f"Submitted for review. A reviewer will pick it up at "
-                        f"[DQ Review](/DQ_Review). Draft id: `{active.suite_id[:8]}`."
+                        f"Done — suite is now **{final_status}**. "
+                        f"Next stop: {next_stop}. "
+                        f"Draft id: `{active.suite_id[:8]}`."
                     )
-                    st.session_state.pop("active_draft_id", None)
+                    if approval_mode is not ApprovalMode.DRAFT:
+                        st.session_state.pop("active_draft_id", None)
                     st.rerun()
                 except Exception as e:
                     st.error(f"Submit failed: {e}")

@@ -65,6 +65,60 @@ class SuiteSource(StrEnum):
     AGENT = "agent"
 
 
+class ApprovalMode(StrEnum):
+    """Phase 10.1 — source-aware approval policy.
+
+    Determines where a freshly-authored suite version lands in the state
+    machine. Replaces the ad-hoc string-typed ``target_status`` parameter
+    that ``accept_proposal()`` used to take.
+
+    * ``AUTO_APPROVE`` — walks DRAFT → PENDING_REVIEW → APPROVED → LIVE
+                          in one round-trip. Reserved for low-risk,
+                          mechanically-generated content (profiler-baseline
+                          expectations: null-checks, uniqueness, regex
+                          inferred from column metadata).
+    * ``HITL``         — lands in PENDING_REVIEW awaiting an independent
+                          reviewer. The audit-friendly default for any
+                          *creative* content (agent-authored proposals
+                          from NL prompts) and for **any edit of a LIVE
+                          suite** regardless of original source.
+    * ``DRAFT``        — leaves it editable; author parks it for later.
+    """
+
+    AUTO_APPROVE = "AUTO_APPROVE"
+    HITL = "HITL"
+    DRAFT = "DRAFT"
+
+
+def default_approval_mode(
+    source: SuiteSource,
+    *,
+    is_edit_of_live: bool = False,
+) -> ApprovalMode:
+    """Source-aware default policy (Option C).
+
+    Rules, in priority order:
+
+      1. Editing a LIVE suite → ALWAYS HITL. A LIVE suite is currently
+         gating production checkpoints; mutating it must go through review
+         even if the original suite was auto-approved.
+      2. ``BASELINE_PYTHON`` (profiler-mechanical) → AUTO_APPROVE.
+      3. ``AGENT`` (NL-prompt-creative) → HITL.
+      4. ``UI`` (manual human authoring) → HITL.
+         (DQ Author's flow naturally lands in DRAFT first, but the policy
+         answer for "user clicked Submit" is HITL.)
+
+    Callers may override per-call (e.g. a senior steward bulk-importing
+    trusted expectations can pass ``mode=ApprovalMode.AUTO_APPROVE``
+    explicitly).
+    """
+    if is_edit_of_live:
+        return ApprovalMode.HITL
+    if source is SuiteSource.BASELINE_PYTHON:
+        return ApprovalMode.AUTO_APPROVE
+    return ApprovalMode.HITL
+
+
 class DqDimension(StrEnum):
     """The 6 data-quality dimensions from DataQuality_Metrics.docx."""
 
@@ -292,6 +346,176 @@ class SuiteRegistry:
         )
         self._audit(suite_id, SuiteStatus.DRAFT, SuiteStatus.DRAFT, actor, "draft edited")
 
+    # ------------------------------------------------------------------
+    # Phase 10.2 — per-expectation CRUD
+    #
+    # Surgical edits on a DRAFT's expectations array. Use these when the
+    # UI exposes per-row edit/delete buttons rather than a full-array
+    # textarea (the old update_draft path is kept for bulk paste/import).
+    #
+    # All three methods enforce status == DRAFT. Editing a LIVE suite
+    # requires fork_for_edit() first to create a new editable version —
+    # a hard guarantee that LIVE expectations are immutable.
+    # ------------------------------------------------------------------
+
+    def fork_for_edit(self, source_suite_id: str, *, actor: str) -> str:
+        """Clone an existing version into a new DRAFT for editing.
+
+        The source can be in any status (LIVE, APPROVED, PENDING_REVIEW,
+        ARCHIVED, REJECTED) — we read its expectations and create a new
+        DRAFT with version = max(version) + 1. The source row is NOT
+        mutated — its status stays exactly as before until the new draft
+        is approved and activated, at which point ``activate()`` will
+        archive whatever was LIVE for the same (client_id, suite_name).
+
+        Returns the new ``suite_id`` (a fresh UUID, distinct from source).
+        """
+        src = self._require(source_suite_id)
+        existing = self.list_versions(src.client_id, src.suite_name)
+        next_version = (existing[0].version + 1) if existing else 1
+        new_id = str(uuid.uuid4())
+        self._wh.execute(
+            f"INSERT INTO {CONTROL_SCHEMA}.dq_suites "
+            "(suite_id, client_id, suite_name, version, status, expectations, "
+            " dq_dimensions, source_type, source, schema_fingerprint, "
+            " created_by, created_at) "
+            "VALUES ($id, $c, $s, $v, $st, $e, $d, $srct, $src, $fp, $cb, $ts)",
+            {
+                "id": new_id,
+                "c": src.client_id,
+                "s": src.suite_name,
+                "v": next_version,
+                "st": SuiteStatus.DRAFT.value,
+                "e": json.dumps(src.expectations),
+                "d": json.dumps(src.dq_dimensions),
+                "srct": src.source_type,
+                "src": src.source.value,
+                "fp": src.schema_fingerprint,
+                "cb": actor,
+                "ts": datetime.now(UTC),
+            },
+        )
+        self._audit(
+            new_id,
+            None,
+            SuiteStatus.DRAFT,
+            actor,
+            f"forked from suite_id={source_suite_id} v{src.version} ({src.status.value})",
+        )
+        _log.info(
+            "dq_suite.forked_for_edit",
+            new_suite_id=new_id,
+            source_suite_id=source_suite_id,
+            client_id=src.client_id,
+            suite_name=src.suite_name,
+            new_version=next_version,
+        )
+        return new_id
+
+    def add_expectation(
+        self,
+        suite_id: str,
+        expectation: dict[str, Any],
+        *,
+        actor: str,
+    ) -> None:
+        """Append one expectation to a DRAFT's array. Audits the addition."""
+        current = self._require_draft(suite_id)
+        new_exps = [*current.expectations, expectation]
+        new_dims = _recompute_dimensions(new_exps)
+        self._wh.execute(
+            f"UPDATE {CONTROL_SCHEMA}.dq_suites "
+            "SET expectations = $e, dq_dimensions = $d WHERE suite_id = $i",
+            {"e": json.dumps(new_exps), "d": json.dumps(new_dims), "i": suite_id},
+        )
+        exp_type = expectation.get("expectation_type", "?")
+        col = expectation.get("kwargs", {}).get("column", "?")
+        self._audit(
+            suite_id,
+            SuiteStatus.DRAFT,
+            SuiteStatus.DRAFT,
+            actor,
+            f"added expectation #{len(new_exps) - 1}: {exp_type} on {col}",
+        )
+
+    def update_expectation(
+        self,
+        suite_id: str,
+        index: int,
+        expectation: dict[str, Any],
+        *,
+        actor: str,
+    ) -> None:
+        """Replace one expectation by index in a DRAFT. Audits the swap."""
+        current = self._require_draft(suite_id)
+        if not 0 <= index < len(current.expectations):
+            raise IndexError(
+                f"expectation index {index} out of range for suite {suite_id!r} "
+                f"(has {len(current.expectations)} expectations)"
+            )
+        old = current.expectations[index]
+        new_exps = list(current.expectations)
+        new_exps[index] = expectation
+        new_dims = _recompute_dimensions(new_exps)
+        self._wh.execute(
+            f"UPDATE {CONTROL_SCHEMA}.dq_suites "
+            "SET expectations = $e, dq_dimensions = $d WHERE suite_id = $i",
+            {"e": json.dumps(new_exps), "d": json.dumps(new_dims), "i": suite_id},
+        )
+        old_type = old.get("expectation_type", "?")
+        new_type = expectation.get("expectation_type", "?")
+        self._audit(
+            suite_id,
+            SuiteStatus.DRAFT,
+            SuiteStatus.DRAFT,
+            actor,
+            f"updated expectation #{index}: {old_type} → {new_type}",
+        )
+
+    def delete_expectation(
+        self,
+        suite_id: str,
+        index: int,
+        *,
+        actor: str,
+    ) -> None:
+        """Remove one expectation by index from a DRAFT. Audits the removal."""
+        current = self._require_draft(suite_id)
+        if not 0 <= index < len(current.expectations):
+            raise IndexError(
+                f"expectation index {index} out of range for suite {suite_id!r} "
+                f"(has {len(current.expectations)} expectations)"
+            )
+        removed = current.expectations[index]
+        new_exps = [e for i, e in enumerate(current.expectations) if i != index]
+        new_dims = _recompute_dimensions(new_exps)
+        self._wh.execute(
+            f"UPDATE {CONTROL_SCHEMA}.dq_suites "
+            "SET expectations = $e, dq_dimensions = $d WHERE suite_id = $i",
+            {"e": json.dumps(new_exps), "d": json.dumps(new_dims), "i": suite_id},
+        )
+        exp_type = removed.get("expectation_type", "?")
+        col = removed.get("kwargs", {}).get("column", "?")
+        self._audit(
+            suite_id,
+            SuiteStatus.DRAFT,
+            SuiteStatus.DRAFT,
+            actor,
+            f"deleted expectation #{index}: {exp_type} on {col}",
+        )
+
+    def _require_draft(self, suite_id: str) -> SuiteVersion:
+        """Helper: load a suite and assert it's a DRAFT — used by all
+        per-expectation CRUD methods to centralise the guard."""
+        v = self._require(suite_id)
+        if v.status is not SuiteStatus.DRAFT:
+            raise ValueError(
+                f"per-expectation CRUD requires DRAFT status, "
+                f"suite {suite_id!r} is {v.status.value} — "
+                f"call fork_for_edit() first to create an editable version"
+            )
+        return v
+
     def submit_for_review(self, suite_id: str, actor: str) -> None:
         self._transition(
             suite_id,
@@ -399,7 +623,7 @@ class SuiteRegistry:
             client_id=v.client_id,
             suite_name=v.suite_name,
             status=v.status.value if hasattr(v.status, "value") else str(v.status),
-            source=row_for_text["source"],
+            source=str(row_for_text["source"]),
             source_type=v.source_type,
             source_text=text,
         )
@@ -455,6 +679,62 @@ class SuiteRegistry:
             notes=reason or "manually archived",
             extra_sets={"archived_at": datetime.now(UTC)},
         )
+
+    def submit_with_policy(
+        self,
+        suite_id: str,
+        *,
+        mode: ApprovalMode,
+        actor: str,
+        approval_notes: str | None = None,
+    ) -> None:
+        """Walk a fresh DRAFT to the terminal state dictated by ``mode``.
+
+        Phase 10.1. Consolidates the state-walk that used to be open-coded
+        in ``baseline_seeder`` (always walked to LIVE) and in
+        ``accept_proposal`` (walked based on a string ``target_status``).
+        Centralising the logic here means every author path goes through
+        the same audit trail and the same legality checks.
+
+        * ``ApprovalMode.DRAFT`` — no-op. Suite stays DRAFT.
+        * ``ApprovalMode.HITL`` — walks DRAFT → PENDING_REVIEW.
+        * ``ApprovalMode.AUTO_APPROVE`` — walks DRAFT → PENDING_REVIEW →
+          APPROVED → LIVE. The intermediate transitions are still
+          recorded in the audit log so even auto-approved suites have
+          a full state-history.
+
+        Idempotent on re-entry: if the suite is already past the target
+        terminal, this returns silently rather than raising. That keeps
+        ``baseline_seeder`` safe to re-run on every container start.
+        """
+        current = self._require(suite_id)
+
+        if mode is ApprovalMode.DRAFT:
+            return
+
+        if mode is ApprovalMode.HITL:
+            if current.status is SuiteStatus.DRAFT:
+                self.submit_for_review(suite_id, actor=actor)
+            # if already PENDING_REVIEW or further, no-op.
+            return
+
+        if mode is ApprovalMode.AUTO_APPROVE:
+            current = self._require(suite_id)  # refresh
+            if current.status is SuiteStatus.DRAFT:
+                self.submit_for_review(suite_id, actor=actor)
+            current = self._require(suite_id)
+            if current.status is SuiteStatus.PENDING_REVIEW:
+                self.approve(
+                    suite_id,
+                    actor=actor,
+                    notes=approval_notes or "auto-approved by policy",
+                )
+            current = self._require(suite_id)
+            if current.status is SuiteStatus.APPROVED:
+                self.activate(suite_id, actor=actor)
+            return
+
+        raise ValueError(f"Unknown ApprovalMode: {mode!r}")
 
     # ------------------------------------------------------------------
     # INTERNAL
@@ -523,6 +803,23 @@ class SuiteRegistry:
 # ----------------------------------------------------------------------------
 # Row ↔ dataclass
 # ----------------------------------------------------------------------------
+
+
+def _recompute_dimensions(expectations: list[dict[str, Any]]) -> list[str]:
+    """Phase 10.2 — derive ``dq_dimensions`` from the expectation array.
+
+    Walks every expectation's ``meta.dq_dimension`` and returns the unique
+    sorted set. Called after every per-expectation CRUD op so the suite's
+    dimension tags stay coherent with what's actually inside it. Empty
+    string and missing values are filtered out.
+    """
+    dims: set[str] = set()
+    for e in expectations:
+        meta = e.get("meta", {}) or {}
+        d = meta.get("dq_dimension")
+        if d:
+            dims.add(d)
+    return sorted(dims)
 
 
 def _row_to_version(row: dict[str, Any]) -> SuiteVersion:

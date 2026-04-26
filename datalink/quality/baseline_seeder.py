@@ -30,6 +30,7 @@ from typing import Any
 from datalink.adapters.protocols import Warehouse
 from datalink.logging import get_logger
 from datalink.quality.registry import (
+    ApprovalMode,
     DqDimension,
     SuiteDraft,
     SuiteRegistry,
@@ -422,13 +423,13 @@ def seed_baselines(warehouse: Warehouse, client_id: str = DEFAULT_CLIENT) -> int
             source_type=source_type,
         )
         suite_id = reg.create_draft(draft)
-        reg.submit_for_review(suite_id, actor="system:baseline_seeder")
-        reg.approve(
+        # Phase 10.1 — profiler-mechanical baselines auto-approve via policy.
+        reg.submit_with_policy(
             suite_id,
+            mode=ApprovalMode.AUTO_APPROVE,
             actor="system:baseline_seeder",
-            notes="baseline python suite — auto-approved on first seed",
+            approval_notes="baseline python suite — auto-approved on first seed",
         )
-        reg.activate(suite_id, actor="system:baseline_seeder")
         seeded += 1
         _log.info(
             "dq_suite.baseline_seeded",
@@ -460,13 +461,13 @@ def seed_baselines(warehouse: Warehouse, client_id: str = DEFAULT_CLIENT) -> int
             source_type=None,  # legacy aggregate — no per-source tag
         )
         suite_id = reg.create_draft(draft)
-        reg.submit_for_review(suite_id, actor="system:baseline_seeder")
-        reg.approve(
+        # Phase 10.1 — legacy aggregate baselines auto-approve via policy.
+        reg.submit_with_policy(
             suite_id,
+            mode=ApprovalMode.AUTO_APPROVE,
             actor="system:baseline_seeder",
-            notes="legacy aggregate suite — retained for Phase 5.8 scripts",
+            approval_notes="legacy aggregate suite — retained for Phase 5.8 scripts",
         )
-        reg.activate(suite_id, actor="system:baseline_seeder")
         seeded += 1
         _log.info(
             "dq_suite.legacy_baseline_seeded",

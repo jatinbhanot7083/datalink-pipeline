@@ -314,6 +314,170 @@ _DDL = [
         ts              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     )
     """,
+    # Phase 11.1 — Schema contracts. The agreed-upon Bronze schema for
+    # each (client_id, source_type). Versioned: register_contract()
+    # bumps `contract_version` and flips the prior row to is_active=FALSE
+    # atomically. Exactly one is_active=TRUE row per (client, source) at
+    # a time — invariant enforced in code (DuckDB lacks partial-unique
+    # indexes; same pattern as dq_suites).
+    #
+    #   columns_json  JSON array of {name, logical_type, nullable}
+    #                  (ColumnContract.to_dict()). Logical types:
+    #                  TEXT | INTEGER | DECIMAL | DATE | TIMESTAMP | BOOLEAN.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.source_schema_contracts (
+        contract_id        VARCHAR PRIMARY KEY,
+        client_id          VARCHAR NOT NULL,
+        source_type        VARCHAR NOT NULL,
+        contract_version   INTEGER NOT NULL,
+        columns_json       VARCHAR NOT NULL,
+        is_active          BOOLEAN NOT NULL DEFAULT TRUE,
+        created_by         VARCHAR NOT NULL,
+        created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        notes              VARCHAR
+    )
+    """,
+    # Phase 13.2 — AI Smart Mapper sessions. One row per mapping
+    # conversation: source profile snapshot, NL Gold contract, multi-turn
+    # chat history, currently-proposed Silver/Gold/On-Prem artifacts,
+    # and the HITL approval state. JSON columns (conversation_json,
+    # source_profile_json, sample_preview_json) keep the long, evolving
+    # text payloads readable and queryable without a side-table per
+    # field. Status walks DRAFT → PENDING_REVIEW → APPROVED → DEPLOYED
+    # (terminal); mirrors the pattern from Phase 10 / 12.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.mapping_sessions (
+        session_id              VARCHAR PRIMARY KEY,
+        client_id               VARCHAR NOT NULL,
+        source_qualified_table  VARCHAR NOT NULL,
+        gold_contract_text      VARCHAR,
+        target_mode             VARCHAR NOT NULL,
+        status                  VARCHAR NOT NULL,
+        source_profile_json     VARCHAR,
+        conversation_json       VARCHAR,
+        silver_sql              VARCHAR,
+        gold_sql                VARCHAR,
+        onprem_postgres_sql     VARCHAR,
+        onprem_mssql_sql        VARCHAR,
+        sample_preview_json     VARCHAR,
+        silver_target_table     VARCHAR,
+        gold_target_table       VARCHAR,
+        created_by              VARCHAR NOT NULL,
+        created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at              TIMESTAMP,
+        submitted_at            TIMESTAMP,
+        reviewed_by             VARCHAR,
+        reviewed_at             TIMESTAMP,
+        review_notes            VARCHAR,
+        deployed_at             TIMESTAMP,
+        archived_at             TIMESTAMP,
+        notes                   VARCHAR
+    )
+    """,
+    # Phase 13.2 — Mapper session audit log. Same shape as
+    # dq_suite_audit_log / policy_audit_log; one row per state
+    # transition + content edit.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.mapping_session_audit_log (
+        audit_id        VARCHAR PRIMARY KEY,
+        session_id      VARCHAR NOT NULL,
+        from_status     VARCHAR,
+        to_status       VARCHAR NOT NULL,
+        actor           VARCHAR NOT NULL,
+        notes           VARCHAR,
+        ts              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # Phase 13.8 — Deployment artifacts. One row per file-write event
+    # from the deployer. Tracks which session produced which files +
+    # the content hash so re-deployments are detectable. Re-runs of the
+    # same session insert NEW rows (not UPSERT) — idempotent at the file
+    # level (overwrite) but auditable at the deployment-event level.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.mapping_artifacts (
+        artifact_id     VARCHAR PRIMARY KEY,
+        session_id      VARCHAR NOT NULL,
+        files_written   VARCHAR,
+        content_hash    VARCHAR,
+        deployed_by     VARCHAR NOT NULL,
+        deployed_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # Phase 12.1 — Pipeline-control threshold policies. Versioned config
+    # for "when does the pipeline pause vs abort". Mirrors dq_suites's
+    # state machine (DRAFT → PENDING_REVIEW → APPROVED → LIVE → ARCHIVED)
+    # and same single-LIVE-row-per-tuple invariant. Edit via the Pipeline
+    # Control UI (Phase 12.3) — every change goes through HITL review.
+    #
+    # Reads via PipelineControlPolicyRegistry.get_or_default() which falls
+    # back to the synthetic DEFAULT_POLICY when no LIVE row exists, so
+    # tenants without a registered policy keep behaving exactly as today.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.pipeline_control_policies (
+        policy_id            VARCHAR PRIMARY KEY,
+        client_id            VARCHAR NOT NULL,
+        pipeline_id          VARCHAR NOT NULL,
+        version              INTEGER NOT NULL,
+        status               VARCHAR NOT NULL,
+        fail_rate_pause_pct  DOUBLE NOT NULL,
+        fail_rate_abort_pct  DOUBLE NOT NULL,
+        schema_drift_action  VARCHAR NOT NULL,
+        row_count_drop_pct   DOUBLE NOT NULL,
+        created_by           VARCHAR NOT NULL,
+        created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        submitted_at         TIMESTAMP,
+        reviewed_by          VARCHAR,
+        reviewed_at          TIMESTAMP,
+        review_notes         VARCHAR,
+        activated_at         TIMESTAMP,
+        archived_at          TIMESTAMP,
+        notes                VARCHAR
+    )
+    """,
+    # Phase 12.1 — Audit trail for every policy state transition. Distinct
+    # from pipeline_control_audit_log (runtime RUNNING/PAUSED transitions).
+    # This table records who-changed-what at the CONFIG level.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.policy_audit_log (
+        audit_id        VARCHAR PRIMARY KEY,
+        policy_id       VARCHAR NOT NULL,
+        from_status     VARCHAR,
+        to_status       VARCHAR NOT NULL,
+        actor           VARCHAR NOT NULL,
+        notes           VARCHAR,
+        ts              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # Phase 11.3 — Schema drift audit log. One row per detected drift
+    # event (clean batches do NOT emit a row — would dilute the table on
+    # every successful load). Keyed by drift_id; queried by detected_at
+    # for the operator UI.
+    #
+    #   drift_type      ADDITIVE | SUBTRACTIVE | DESTRUCTIVE | MIXED
+    #   severity        INFO | WARNING | FATAL
+    #   added_columns   JSON array of column names appended vs contract
+    #   removed_columns JSON array of contracted columns missing
+    #   type_changes    JSON array of {column, expected, actual}
+    #   action_taken    LOGGED  — additive, ingest continued
+    #                   HALTED  — fatal, batch raised SchemaDriftError
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.schema_drift_log (
+        drift_id           VARCHAR PRIMARY KEY,
+        detected_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        client_id          VARCHAR NOT NULL,
+        source_type        VARCHAR NOT NULL,
+        source_file        VARCHAR,
+        batch_id           VARCHAR,
+        contract_version   INTEGER,
+        drift_type         VARCHAR NOT NULL,
+        severity           VARCHAR NOT NULL,
+        added_columns      VARCHAR,
+        removed_columns    VARCHAR,
+        type_changes       VARCHAR,
+        action_taken       VARCHAR NOT NULL,
+        notes              VARCHAR
+    )
+    """,
 ]
 
 
@@ -836,6 +1000,39 @@ class TaskProgressTracker:
                 "error": error[:4000],  # truncate huge stack traces
             },
             key_values={"run_id": run_id, "task_name": task_name},
+        )
+
+    def _upsert(
+        self,
+        *,
+        table: str,
+        key_cols: list[str],
+        all_cols: list[str],
+        values: dict[str, Any],
+        key_values: dict[str, Any],
+    ) -> None:
+        """Phase 9.4 / Phase 13 hygiene — idempotent INSERT via DELETE-then-INSERT.
+
+        Snowflake- and DuckDB-portable. Mark started/done/failed call this
+        with the same ``key_cols`` (always ``[run_id, task_name]``) so a
+        retry of the same task overwrites the prior row instead of
+        violating the unique-key invariant.
+
+        Single-statement DELETE + INSERT per call. The two writes happen
+        in sequence; on a crash between them the row is gone — caller's
+        next mark_started attempt will simply succeed because the DELETE
+        is a no-op on already-empty key. Idempotent on re-entry.
+        """
+        where = " AND ".join(f"{k} = ${k}" for k in key_cols)
+        cols_sql = ", ".join(all_cols)
+        placeholders = ", ".join(f"${c}" for c in all_cols)
+        self._wh.execute(
+            f"DELETE FROM {CONTROL_SCHEMA}.{table} WHERE {where}",
+            key_values,
+        )
+        self._wh.execute(
+            f"INSERT INTO {CONTROL_SCHEMA}.{table} ({cols_sql}) VALUES ({placeholders})",
+            values,
         )
 
 

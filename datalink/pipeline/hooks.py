@@ -159,18 +159,34 @@ def run_checkpoint_with_hooks(
             post_val_results = run_post_validation(
                 adapters, settings, run_id=run_id, checkpoint_name=checkpoint_name
             )
-        # Transition pipeline state — always done on BREACH regardless of
-        # agents flag. Phase 9.4: graduated severity, client-scoped state.
-        # If fail_pct > 25%, ABORT (terminal — operator must force_resume).
-        # Otherwise PAUSE (operator can Resume in Control Tower).
-        abort_threshold_pct = 25.0  # configurable via settings later
+        # Phase 12.2 — runtime threshold check fires against the active
+        # ``ThresholdPolicy`` (config-time HITL approved at edit). Three
+        # outcomes drive the state machine:
+        #
+        #   fail_pct > abort_pct  → ABORT (terminal, force-resume to re-arm)
+        #   fail_pct > pause_pct  → PAUSE (operator can Resume)
+        #   else                  → continue silently — neither threshold
+        #                           breached, the BREACH itself is the
+        #                           sub-threshold signal
+        #
+        # No-policy tenants keep behaving as Phase 9.4: pause_pct=0,
+        # abort_pct=25, so any failure pauses, > 25% aborts. Zero
+        # behavioral change for clients that haven't authored a policy.
+        from datalink.pipeline.control_policy import (
+            PipelineControlPolicyRegistry,
+        )
+
+        policy_registry = PipelineControlPolicyRegistry(adapters.warehouse)
+        policy = policy_registry.get_or_default(client_id, pipeline_id)
         breach_reason = (
             f"checkpoint {checkpoint_name} breached: "
             f"{checkpoint.failed_expectations}/{checkpoint.total_expectations} "
             f"failed ({checkpoint.fail_pct}%)"
+            f" [policy v{policy.version} "
+            f"pause>{policy.fail_rate_pause_pct}% abort>{policy.fail_rate_abort_pct}%]"
         )
         try:
-            if checkpoint.fail_pct > abort_threshold_pct:
+            if checkpoint.fail_pct > policy.fail_rate_abort_pct:
                 control.abort(
                     pipeline_id,
                     client_id=client_id,
@@ -182,16 +198,37 @@ def run_checkpoint_with_hooks(
                     pipeline_id=pipeline_id,
                     client_id=client_id,
                     fail_pct=checkpoint.fail_pct,
-                    abort_threshold=abort_threshold_pct,
+                    abort_threshold=policy.fail_rate_abort_pct,
+                    policy_version=policy.version,
                 )
-            else:
+                paused = True
+            elif checkpoint.fail_pct > policy.fail_rate_pause_pct:
                 control.pause(
                     pipeline_id,
                     client_id=client_id,
                     reason=breach_reason,
                     actor="gx-checkpoint-callback",
                 )
-            paused = True
+                _log.warning(
+                    "hooks.pipeline_paused",
+                    pipeline_id=pipeline_id,
+                    client_id=client_id,
+                    fail_pct=checkpoint.fail_pct,
+                    pause_threshold=policy.fail_rate_pause_pct,
+                    policy_version=policy.version,
+                )
+                paused = True
+            else:
+                # Sub-threshold breach — log it but don't change state.
+                # The BREACH was a soft signal; policy says don't act.
+                _log.info(
+                    "hooks.breach_below_pause_threshold",
+                    pipeline_id=pipeline_id,
+                    client_id=client_id,
+                    fail_pct=checkpoint.fail_pct,
+                    pause_threshold=policy.fail_rate_pause_pct,
+                    policy_version=policy.version,
+                )
         except ValueError as exc:
             _log.warning("hooks.pause_skipped", reason=str(exc))
 

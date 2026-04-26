@@ -26,9 +26,11 @@ from datalink.adapters.protocols import LlmProvider, Warehouse
 from datalink.agents.dq_author.proposer import DqProposerAgent
 from datalink.logging import get_logger
 from datalink.quality.registry import (
+    ApprovalMode,
     SuiteDraft,
     SuiteRegistry,
     SuiteSource,
+    default_approval_mode,
 )
 
 _log = get_logger(__name__)
@@ -133,8 +135,10 @@ def propose_expectation(
                 }
                 for h in hits
             ]
-            embedding_model = getattr(memory, "_embedder", None)
-            embedding_model = getattr(embedding_model, "model", "")
+            # Read the embedder model name in one step so mypy keeps the
+            # variable's type as str. Two-step getattr was Any → could shadow.
+            _embedder = getattr(memory, "_embedder", None)
+            embedding_model = str(getattr(_embedder, "model", "")) if _embedder else ""
             _log.info(
                 "agent_authored.grounding_retrieved",
                 client_id=client_id,
@@ -145,7 +149,7 @@ def propose_expectation(
             _log.warning("agent_authored.grounding_failed", error=str(e))
             grounding = []
 
-    agent = DqProposerAgent(llm=llm, warehouse=warehouse)  # type: ignore[arg-type]
+    agent = DqProposerAgent(llm=llm, warehouse=warehouse)
     result = agent.run(
         {
             "client_id": client_id,
@@ -214,39 +218,60 @@ def accept_proposal(
     suite_name: str,
     source_prompt: str,
     author: str,
-    target_status: str = "DRAFT",
+    mode: ApprovalMode | None = None,
+    target_status: str | None = None,  # deprecated alias — see below
 ) -> str:
     """Persist the proposal as a versioned suite.
 
-    ``target_status`` controls the final state of the suite:
+    Phase 10.1 — source-aware approval policy.
 
-      * ``"DRAFT"``           — leaves it editable on DQ Author. Default.
-      * ``"PENDING_REVIEW"``  — submits to the DQ Review queue for an
-                                 independent approver. Two-eye control.
-      * ``"LIVE"``            — full auto-pilot: DRAFT → PENDING_REVIEW →
-                                 APPROVED → LIVE in a single round-trip.
-                                 Useful for solo operators or trusted
-                                 ad-hoc rules; skips peer review.
+    ``mode`` controls where the suite lands. When ``None``, defaults to
+    ``default_approval_mode(SuiteSource.AGENT)`` which under Option C =
+    ``HITL`` (PENDING_REVIEW). Callers may override:
+
+      * ``ApprovalMode.DRAFT``        — leaves it editable on DQ Author.
+      * ``ApprovalMode.HITL``         — submits to the DQ Review queue.
+      * ``ApprovalMode.AUTO_APPROVE`` — full auto-pilot. Reserved for
+                                        trusted senior stewards on
+                                        narrowly-scoped expectations.
+
+    Backward compatibility: ``target_status`` accepts the legacy strings
+    ``"DRAFT"`` / ``"PENDING_REVIEW"`` / ``"LIVE"`` and is mapped onto
+    ``mode``. Will be removed in Phase 10.4 once UI migration is done.
 
     Returns the new ``suite_id``.
     """
-    if target_status not in {"DRAFT", "PENDING_REVIEW", "LIVE"}:
-        raise ValueError(
-            f"target_status must be DRAFT | PENDING_REVIEW | LIVE, " f"got {target_status!r}."
-        )
+    # Legacy adapter: support callers still passing ``target_status``.
+    if target_status is not None:
+        if mode is not None:
+            raise ValueError("Pass either `mode` or `target_status`, not both.")
+        legacy_map = {
+            "DRAFT": ApprovalMode.DRAFT,
+            "PENDING_REVIEW": ApprovalMode.HITL,
+            "LIVE": ApprovalMode.AUTO_APPROVE,
+        }
+        if target_status not in legacy_map:
+            raise ValueError(
+                f"target_status must be DRAFT | PENDING_REVIEW | LIVE, got {target_status!r}."
+            )
+        mode = legacy_map[target_status]
+
+    if mode is None:
+        mode = default_approval_mode(SuiteSource.AGENT, is_edit_of_live=False)
 
     expectation = {
         "expectation_type": proposal.expectation_type,
         "kwargs": dict(proposal.kwargs),
         "meta": proposal.to_meta_block(source_prompt=source_prompt, author=author),
     }
+    dim = proposal.meta.get("dq_dimension", "")
     draft = SuiteDraft(
         client_id=client_id,
         suite_name=suite_name,
         expectations=[expectation],
         created_by=author,
         source=SuiteSource.AGENT,
-        dq_dimensions=[proposal.meta.get("dq_dimension", "")] or [],
+        dq_dimensions=[dim] if dim else [],
         source_type=proposal.meta.get("source_type"),
     )
     suite_id = registry.create_draft(draft)
@@ -256,19 +281,20 @@ def accept_proposal(
         client_id=client_id,
         suite_name=suite_name,
         author=author,
-        target_status=target_status,
+        mode=mode.value,
     )
 
-    # Walk the state machine to the requested final state. Each step is
-    # idempotent on its preceding state, so callers don't have to reason
-    # about partial transitions.
-    if target_status in {"PENDING_REVIEW", "LIVE"}:
-        registry.submit_for_review(suite_id, actor=author)
-    if target_status == "LIVE":
-        registry.approve(suite_id, actor=author, notes="Auto-approved by agent author.")
-        registry.activate(suite_id, actor=author)
+    registry.submit_with_policy(
+        suite_id,
+        mode=mode,
+        actor=author,
+        approval_notes="Auto-approved by agent author."
+        if mode is ApprovalMode.AUTO_APPROVE
+        else None,
+    )
+    if mode is ApprovalMode.AUTO_APPROVE:
         _log.info("agent_authored.auto_activated", suite_id=suite_id)
-    elif target_status == "PENDING_REVIEW":
+    elif mode is ApprovalMode.HITL:
         _log.info("agent_authored.submitted_for_review", suite_id=suite_id)
 
     return suite_id
@@ -278,6 +304,6 @@ def _stringify(value: Any) -> Any:
     """Coerce sample-row values to JSON-friendly scalars for the UI."""
     if value is None:
         return None
-    if isinstance(value, (str, int, float, bool)):
+    if isinstance(value, str | int | float | bool):
         return value
     return str(value)

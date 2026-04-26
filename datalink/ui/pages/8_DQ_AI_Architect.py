@@ -64,7 +64,7 @@ from datalink.quality.agent_authored import (  # noqa: E402
     accept_proposal,
     propose_expectation,
 )
-from datalink.quality.registry import SuiteRegistry  # noqa: E402
+from datalink.quality.registry import ApprovalMode, SuiteRegistry  # noqa: E402
 from datalink.tenancy import Layer, schema_for  # noqa: E402
 from datalink.ui._nav import render_sidebar, require_client  # noqa: E402
 from datalink.ui._query import warehouse_ctx  # noqa: E402
@@ -215,22 +215,26 @@ with c2:
         "Re-using a name creates a new VERSION; new names create a fresh suite.",
     )
 with c3:
-    target_status = st.radio(
+    # Phase 10.1 — radio now operates on ApprovalMode directly. Default
+    # is HITL per Option C (agent-authored = creative content = review).
+    approval_mode = st.radio(
         "On Approve, save as:",
-        options=["DRAFT", "PENDING_REVIEW", "LIVE"],
-        index=1,  # default = submit for review (the audit-friendly choice)
-        format_func=lambda s: {
-            "DRAFT": "📝 DRAFT (edit later)",
-            "PENDING_REVIEW": "👁️ PENDING_REVIEW (route to DQ Review)",
-            "LIVE": "⚡ LIVE (auto-approve & activate)",
-        }[s],
+        options=[ApprovalMode.DRAFT, ApprovalMode.HITL, ApprovalMode.AUTO_APPROVE],
+        index=1,  # default = HITL (audit-friendly Option C)
+        format_func=lambda m: {
+            ApprovalMode.DRAFT: "📝 DRAFT (edit later)",
+            ApprovalMode.HITL: "👁️ HITL (route to DQ Review)",
+            ApprovalMode.AUTO_APPROVE: "⚡ AUTO_APPROVE (skip review, go LIVE)",
+        }[m],
         help=(
-            "DRAFT — saves it editable on the DQ Author page; you can refine "
-            "and submit later.\n\n"
-            "PENDING_REVIEW — routes to the DQ Review queue for an "
-            "independent reviewer. This is the audit-friendly default.\n\n"
-            "LIVE — skips peer review and activates immediately. Use for "
-            "trusted ad-hoc rules where you're both author and approver."
+            "DRAFT — saves it editable on the DQ Author page; you can "
+            "refine and submit later.\n\n"
+            "HITL — routes to the DQ Review queue for an independent "
+            "reviewer. This is the audit-friendly default for "
+            "agent-authored content (Option C).\n\n"
+            "AUTO_APPROVE — skips peer review and activates immediately. "
+            "Reserved for trusted ad-hoc rules where you are both author "
+            "and approver. Logged with explicit auto-approval audit."
         ),
     )
 
@@ -381,9 +385,17 @@ if propose_clicked and prompt.strip():
                     memory_store = None
 
             with warehouse_ctx(readonly=True) as wh_for_agent:
-                proposal = propose_expectation(
+                # ``warehouse_ctx`` yields the project's _Warehouse facade;
+                # ``propose_expectation`` annotates against the protocol
+                # ``Warehouse``. They are duck-equivalent (query / execute);
+                # cast for mypy's structural check.
+                from typing import cast as _cast
+
+                from datalink.adapters.protocols import Warehouse as _WarehouseProto
+
+                proposal_out = propose_expectation(
                     llm=llm,
-                    warehouse=wh_for_agent,
+                    warehouse=_cast(_WarehouseProto, wh_for_agent),
                     client_id=selected_client,
                     qualified_table=qualified_table,
                     columns=columns_for_agent,
@@ -396,10 +408,10 @@ if propose_clicked and prompt.strip():
                     grounding_k=int(ai_grounding_k),
                     grounding_enabled=bool(ai_grounding_on),
                 )
-            st.session_state["workshop_proposal"] = proposal
+            st.session_state["workshop_proposal"] = proposal_out
             agent_summary = (
-                f"**{proposal.expectation_type}** &mdash; "
-                f"{proposal.meta.get('description', '')}"
+                f"**{proposal_out.expectation_type}** &mdash; "
+                f"{proposal_out.meta.get('description', '')}"
             )
             st.session_state["workshop_history"].append(
                 {"role": "assistant", "content": agent_summary}
@@ -500,17 +512,17 @@ if proposal is not None:
 
     st.markdown("</div>", unsafe_allow_html=True)
 
-    # Approve / Edit / Reject buttons. Approve label adapts to chosen target.
+    # Approve / Edit / Reject buttons. Approve label adapts to chosen mode.
     approve_label = {
-        "DRAFT": "💾 Save as DRAFT",
-        "PENDING_REVIEW": "👁️ Submit for Review",
-        "LIVE": "⚡ Approve & Go LIVE",
-    }[target_status]
+        ApprovalMode.DRAFT: "💾 Save as DRAFT",
+        ApprovalMode.HITL: "👁️ Submit for Review",
+        ApprovalMode.AUTO_APPROVE: "⚡ Approve & Go LIVE",
+    }[approval_mode]
     next_destination_hint = {
-        "DRAFT": "DQ Author (editable)",
-        "PENDING_REVIEW": "DQ Review (reviewer queue)",
-        "LIVE": "DQ Suite Registry (active)",
-    }[target_status]
+        ApprovalMode.DRAFT: "DQ Author (editable)",
+        ApprovalMode.HITL: "DQ Review (reviewer queue)",
+        ApprovalMode.AUTO_APPROVE: "DQ Suite Registry (LIVE)",
+    }[approval_mode]
 
     a1, a2, a3, _ = st.columns([1.2, 1, 1, 1.8])
     if a1.button(
@@ -519,7 +531,7 @@ if proposal is not None:
         use_container_width=True,
         help=(
             "Writes the proposal to CONTROL.dq_suites with source=AGENT and "
-            f"walks the state machine to **{target_status}**. "
+            f"walks the state machine per **{approval_mode.value}** policy. "
             f"Next stop after this click: {next_destination_hint}."
         ),
     ):
@@ -534,11 +546,11 @@ if proposal is not None:
                     ),
                     source_prompt=st.session_state["workshop_last_prompt"],
                     author=f"workshop:{os.environ.get('USER', 'operator')}",
-                    target_status=target_status,
+                    mode=approval_mode,
                 )
             st.success(
                 f"Suite persisted — `{suite_id}` "
-                f"(status: **{target_status}**). "
+                f"(policy: **{approval_mode.value}**). "
                 f"Find it on **{next_destination_hint}**."
             )
             st.session_state["workshop_proposal"] = None
@@ -575,7 +587,7 @@ try:
     with _registry(readonly=True) as reg:
         names = [n for n in reg.list_suite_names(selected_client) if n.startswith("custom_")]
         rows: list[dict[str, Any]] = []
-        all_versions: list = []  # keep SuiteVersion refs for actions
+        all_versions: list[Any] = []  # keep SuiteVersion refs for actions
         for n in names:
             for v in reg.list_versions(selected_client, n):
                 rows.append(

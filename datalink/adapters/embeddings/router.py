@@ -29,6 +29,7 @@ def get_embedder() -> EmbeddingProvider:
       unset                                                       ->  Stub (default)
     """
     requested = os.environ.get("DL_ADAPTERS__EMBEDDINGS__TYPE", "stub").lower()
+    embedder: EmbeddingProvider
     if requested == "voyage" and os.environ.get("VOYAGE_API_KEY"):
         from datalink.adapters.embeddings.voyage import VoyageEmbedder
 

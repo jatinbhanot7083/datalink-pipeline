@@ -94,6 +94,7 @@ INTERNAL_PAGE_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         "cat-operate",  # amber wash — "active ops"
         [
             ("Control Tower", "/", "🏛️"),
+            ("Pipeline Control", "/Pipeline_Control", "🚦"),  # Phase 12 — thresholds + state
         ],
     ),
     (
@@ -104,6 +105,8 @@ INTERNAL_PAGE_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
             ("DQ Author", "/DQ_Author", "📝"),  # grid editor for power users
             ("DQ Review", "/DQ_Review", "👁️"),  # reviewer queue
             ("DQ Suite Registry", "/DQ_Suite_Registry", "📚"),  # read-only inventory
+            ("Schema Drift", "/Schema_Drift", "🧬"),  # Phase 11 — contracts + drift
+            ("Smart Mapper", "/Smart_Mapper", "🧠"),  # Phase 13 — NL → dbt + push
         ],
     ),
     (
