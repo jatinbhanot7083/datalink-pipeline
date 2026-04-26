@@ -350,20 +350,27 @@ def task_gold_checkpoint(ctx: TaskContext) -> dict[str, Any]:
 def task_router_push(ctx: TaskContext) -> dict[str, Any]:
     """Fan Gold UM out to every target in features.warehouse_router.targets.
 
-    Phase-6 multi-tenancy: the Silver/Gold dbt models write to
-    `SILVER_gold_um_{CLIENT}` (uppercase client suffix) for non-default
-    clients, and plain `SILVER_gold_um` for `default`. The router's
-    `push_gold_um_to_operational` defaults to the no-suffix schema —
-    without this client-aware override we'd silently push 0 rows on every
-    non-default tenant. See datalink/pipeline/router/bulk_push.py:50.
+    Phase 9.3: switched to the outbox-driven egress pattern. The outbox
+    (``outbox_gold_patient_auth``, built by dbt) carries only DELTA rows
+    — net-new auth_codes, attribute updates, and DEACTIVATE markers for
+    rows whose Silver SCD2 ``is_active`` flipped to FALSE. This means
+    the cross-network push is sized to the day's actual changes, not
+    the entire active roster. Audit trail in
+    ``CONTROL.egress_batch_log``.
 
-    NOTE: this fix ensures rows flow to SQL Server / Postgres. The target
-    tables themselves (`UM.PatientAuth` etc) have no `client_id` column
-    today, so a subsequent run for another client OVERWRITES the previous
-    client's rows on the same PK. Multi-tenant target DDL is a separate
-    design decision — flagged as a follow-up.
+    Legacy bulk_push path is still importable for the other gold tables
+    (auth_code, auth_decision, auth_diagnoses, auth_provider) which
+    don't yet have outbox models. We run BOTH for now: outbox-based
+    PatientAuth + legacy direct-push for the rest. Phase 9.3 follow-up
+    will migrate the remaining 4 tables.
+
+    Phase-6 multi-tenancy: schema name resolved per ``client_id``.
     """
     from datalink.pipeline.router import push_gold_um_to_operational
+    from datalink.pipeline.router.outbox_egress import (
+        ENTITY_PATIENT_AUTH,
+        push_outbox_to_operational,
+    )
 
     client = (ctx.client_id or "default").strip()
     if client and client != "default":
@@ -376,14 +383,37 @@ def task_router_push(ctx: TaskContext) -> dict[str, Any]:
         client_id=client,
         source_schema=source_schema,
     )
-    result = push_gold_um_to_operational(ctx.adapters, ctx.settings, source_schema=source_schema)
+
+    # Phase 9.3: outbox-based PatientAuth egress (Phase 9.3 entity).
+    outbox_result = push_outbox_to_operational(
+        adapters=ctx.adapters,
+        settings=ctx.settings,
+        client_id=client,
+        pipeline_run_id=ctx.run_id,
+        source_schema=source_schema,
+        entity=ENTITY_PATIENT_AUTH,
+    )
+
+    # Legacy direct-push for the remaining 4 gold tables (auth_code,
+    # auth_decision, auth_diagnoses, auth_provider). Until they have
+    # their own outbox models, they continue to follow the Phase 6
+    # full-table push contract.
+    legacy_result = push_gold_um_to_operational(
+        ctx.adapters, ctx.settings, source_schema=source_schema
+    )
+
     return {
-        "all_green": result.all_green,
+        "all_green": outbox_result.all_green and legacy_result.all_green,
         "client_id": client,
         "source_schema": source_schema,
-        "targets_requested": result.targets_requested,
-        "targets_skipped": result.targets_skipped,
-        "per_target_row_totals": {t.target: t.total_rows for t in result.per_target},
+        # Outbox result (Phase 9.3 — gold_patient_auth)
+        "outbox_entity": outbox_result.entity,
+        "outbox_delta_count": outbox_result.delta_count,
+        "outbox_per_target": outbox_result.per_target,
+        # Legacy direct-push (other 4 gold tables)
+        "legacy_targets_requested": legacy_result.targets_requested,
+        "legacy_targets_skipped": legacy_result.targets_skipped,
+        "legacy_per_target_row_totals": {t.target: t.total_rows for t in legacy_result.per_target},
     }
 
 

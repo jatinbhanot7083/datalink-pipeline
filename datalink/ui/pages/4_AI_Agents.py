@@ -1,4 +1,10 @@
-"""CrewAI Dashboard — Phase 6 (narrative-feed redesign).
+"""AI Agents dashboard — Phase 6 (narrative-feed redesign).
+
+Phase 8 rename: was "CrewAI Dashboard". The CrewAI PyPI package was a
+declared-but-unused dependency; the agent layer is a custom AgentBase /
+CrewBase implementation. The dashboard surfaces those agents — naming
+them "AI Agents" is the honest label.
+
 
 Every agent invocation translated into a HUMAN-READABLE CARD that says:
 what was asked, what the agent concluded, what action (if any) was
@@ -40,7 +46,7 @@ from datalink.ui._query import query_silent as _wh_query_silent  # noqa: E402
 ensure_warehouse_exists(WAREHOUSE_PATH)
 
 st.set_page_config(
-    page_title="DataLink — CrewAI Dashboard",
+    page_title="DataLink — AI Agents",
     page_icon="🤖",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -49,7 +55,7 @@ st.set_page_config(
 # Shared sidebar nav (defined in datalink/ui/_nav.py).
 from datalink.ui._nav import render_sidebar  # noqa: E402
 
-render_sidebar(active="CrewAI Dashboard")
+render_sidebar(active="AI Agents")
 
 # ============================================================================
 # THEME
@@ -301,7 +307,7 @@ if crew_sel != "<all>":
 # ============================================================================
 # HERO + DISCLOSURE
 # ============================================================================
-st.title("🤖 CrewAI Dashboard")
+st.title("🤖 AI Agents")
 st.markdown(
     '<div class="ai-hero">'
     "<h2>Agentic Data Quality Operations</h2>"
@@ -351,6 +357,53 @@ st.markdown(
     f'<div class="{_banner_cls}">{_banner_text}</div>',
     unsafe_allow_html=True,
 )
+
+# ============================================================================
+# Phase 8 — AI Memory tile (RAG state, no agent activity needed to populate)
+# Read straight from agent_memory schema in Postgres. Failures degrade
+# gracefully so a missing pgvector setup never crashes the dashboard.
+# ============================================================================
+mem_col1, mem_col2, mem_col3, mem_col4 = st.columns(4)
+try:
+    from datalink.adapters.embeddings.router import get_embedder
+    from datalink.memory import AgentMemoryStore
+
+    _mem = AgentMemoryStore(embedder=get_embedder())
+    _mem_stats = _mem.stats()
+    mem_col1.metric(
+        "🧠 Suite embeddings",
+        _mem_stats.get("suite_embeddings", 0),
+        help="Tier A — every LIVE/ARCHIVED suite is embedded so the DQ AI Architect "
+        "can ground new proposals on similar past suites for the same client.",
+    )
+    mem_col2.metric(
+        "🧠 Reasoning embeddings",
+        _mem_stats.get("reasoning_embeddings", 0),
+        help="Tier B — past agent invocations (breach classifications, "
+        "remediations) embedded so the Post-Val crew can recall similar "
+        "past breaches when diagnosing a new failure.",
+    )
+    mem_col3.metric(
+        "Embedding model",
+        _mem_stats.get("model", "—"),
+        help="`stub-1024` is the offline deterministic fallback. Set "
+        "DL_ADAPTERS__EMBEDDINGS__TYPE=voyage + VOYAGE_API_KEY for "
+        "production-quality retrieval.",
+    )
+    _latest = _mem_stats.get("latest_embed") or "—"
+    mem_col4.metric(
+        "Latest embed",
+        _latest[:16].replace("T", " ") if _latest != "—" else "—",
+        help="Most recent embedding write. Auto-updates on every "
+        "SuiteRegistry.activate() (Phase 8 hook).",
+    )
+except Exception as _mem_err:
+    mem_col1.warning(
+        f"Agent memory store unreachable ({type(_mem_err).__name__}). "
+        f"Run `python -m scripts.backfill_embeddings` once to provision "
+        f"the pgvector tables, or check `docker exec datalink-postgres "
+        f'psql -U datalink -d datalink_um -c "\\dx vector"`.'
+    )
 
 # ============================================================================
 # HOW IT WORKS — expandable explainer

@@ -108,6 +108,17 @@ class LlmConfig(BaseModel):
     api_key: str | None = None  # loaded from ANTHROPIC_API_KEY at runtime when type=anthropic
 
 
+class EmbeddingsConfig(BaseModel):
+    """Phase 8 — RAG embedding adapter (Tier A + Tier B retrieval)."""
+
+    model_config = ConfigDict(extra="forbid")
+    type: Literal["stub", "voyage"] = "stub"
+    # Default Voyage model — Anthropic-recommended; 1024-dim, $0.02/M tokens.
+    model: str = "voyage-3-lite"
+    # api_key resolved from VOYAGE_API_KEY env var at runtime when type=voyage.
+    api_key: str | None = None
+
+
 class SecretProviderConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: Literal["env", "keyvault"] = "env"
@@ -125,6 +136,7 @@ class AdapterConfig(BaseModel):
     operational_dbs: dict[str, OperationalDbConfig] = Field(default_factory=dict)
     notifier: NotifierConfig = Field(default_factory=NotifierConfig)
     llm: LlmConfig = Field(default_factory=LlmConfig)
+    embeddings: EmbeddingsConfig = Field(default_factory=EmbeddingsConfig)
     secrets: SecretProviderConfig = Field(default_factory=SecretProviderConfig)
 
 

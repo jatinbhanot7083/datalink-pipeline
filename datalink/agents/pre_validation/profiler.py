@@ -26,17 +26,11 @@ class ProfilerAgent(AgentBase):
 
     def execute(self, context: dict[str, Any]) -> dict[str, Any]:
         table = context["table"]  # e.g. "BRONZE.RAW_CLAIMS"
-        # Run a SQL aggregate per column. We discover columns first.
-        cols_result = self._wh.query(f"DESCRIBE {table}")
-        # DuckDB DESCRIBE returns column_name / column_type. Some adapters
-        # use lowercase keys, so we defensively normalise.
-        col_specs: list[tuple[str, str]] = [
-            (
-                str(r.get("column_name") or r.get("name") or ""),
-                str(r.get("column_type") or r.get("type") or ""),
-            )
-            for r in cols_result
-        ]
+        # Discover columns + types via the backend-agnostic helper —
+        # works on DuckDB (DESCRIBE) and Snowflake (INFORMATION_SCHEMA).
+        from datalink.adapters._describe import list_columns_typed
+
+        col_specs: list[tuple[str, str]] = list_columns_typed(self._wh, table)
         col_names: list[str] = [c for c, _ in col_specs]
         col_types: dict[str, str] = {c: t for c, t in col_specs}
 

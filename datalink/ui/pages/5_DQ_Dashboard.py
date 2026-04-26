@@ -8,7 +8,7 @@ Jatin flagged:
      Consistency / Validity), across the last N days?"
 
 Separate from the Executive Dashboard (which is cross-tenant rollup)
-and the CrewAI Dashboard (which is agent-layer focus). This page is
+and the AI Agents dashboard (which is agent-layer focus). This page is
 where a DQ analyst lives — the drill-down that the rules + suites in
 CONTROL.dq_suites produce.
 

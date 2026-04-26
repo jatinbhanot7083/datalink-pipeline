@@ -86,17 +86,22 @@ class StateTransition:
 
 _DDL = [
     f"CREATE SCHEMA IF NOT EXISTS {CONTROL_SCHEMA}",
-    # Current state (one row per pipeline)
+    # Current state (one row per (pipeline, client) tuple — Phase 9.4).
+    # Migration of legacy single-PK tables is handled idempotently by
+    # scripts/migrate_pipeline_control_state.py: backfills client_id =
+    # 'default' for existing rows then re-establishes the composite PK.
     f"""
     CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.pipeline_control_state (
-        pipeline_id     VARCHAR PRIMARY KEY,
+        pipeline_id     VARCHAR NOT NULL,
+        client_id       VARCHAR NOT NULL DEFAULT 'default',
         status          VARCHAR NOT NULL,
         checkpoint_id   VARCHAR,
         paused_at       TIMESTAMP,
         paused_reason   VARCHAR,
         paused_by       VARCHAR,
         severity        VARCHAR,
-        updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (pipeline_id, client_id)
     )
     """,
     # Checkpoint markers (one row per pipeline run x checkpoint).
@@ -193,6 +198,73 @@ _DDL = [
         tokens_used     INTEGER,
         duration_ms     INTEGER,
         phi_check       VARCHAR
+    )
+    """,
+    # Phase 9.5: Bronze retention audit log. One row per
+    # (table, prune_run_id) — append-only. Surfaces "what got pruned,
+    # when, and how much" so operators can answer audit questions
+    # ("did we delete claim X's raw row before its retention deadline?")
+    # with a single SQL query. Cutoff_dt + watermark_dt together
+    # establish that Silver had read past the cutoff before deletion.
+    #
+    #   prune_run_id      one ID per script invocation
+    #   table_schema      e.g. BRONZE_AETNA
+    #   table_name        e.g. RAW_MEMBERSHIP
+    #   retention_days    config at time of prune
+    #   cutoff_dt         _load_dt < this was eligible for delete
+    #   watermark_dt      latest Silver completion time consulted
+    #   rows_pruned       count actually deleted (0 in dry-run)
+    #   oldest_kept_dt    smallest _load_dt remaining after prune
+    #   started_at / finished_at
+    #   status            DRY_RUN | PRUNED | SKIPPED_NO_SILVER | FAILED
+    #   error             non-null on FAILED
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.bronze_retention_log (
+        prune_run_id      VARCHAR,
+        table_schema      VARCHAR NOT NULL,
+        table_name        VARCHAR NOT NULL,
+        retention_days    INTEGER NOT NULL,
+        cutoff_dt         TIMESTAMP,
+        watermark_dt      TIMESTAMP,
+        rows_pruned       INTEGER,
+        oldest_kept_dt    TIMESTAMP,
+        started_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        finished_at       TIMESTAMP,
+        status            VARCHAR NOT NULL,
+        error             VARCHAR,
+        PRIMARY KEY (prune_run_id, table_schema, table_name)
+    )
+    """,
+    # Phase 9.3: Egress audit log. One row per (egress_batch_id, target,
+    # entity). Append-only. Records every attempt to push Gold deltas to
+    # an On-Prem operational DB so operators can prove "what landed on
+    # Postgres / SQL Server" for any historical batch.
+    #
+    #   egress_batch_id   one ID per (run_id, entity, target) push attempt
+    #   pipeline_run_id   Airflow run_id that triggered the push
+    #   client_id         which tenant
+    #   entity            'gold_patient_auth' | 'gold_um_member' | ...
+    #   target            'postgres' | 'sqlserver' | 'postgres_replica'
+    #   row_count         rows actually written this batch (0 if no deltas)
+    #   started_at        when the push began
+    #   finished_at       when it completed (NULL on still-running)
+    #   status            PENDING | PUSHED | FAILED | NOOP (no rows)
+    #   cutoff_dts        Silver effective_start_date watermark used to
+    #                     pick deltas — drives the NEXT batch's cutoff
+    #   error             non-null on FAILED
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.egress_batch_log (
+        egress_batch_id     VARCHAR PRIMARY KEY,
+        pipeline_run_id     VARCHAR,
+        client_id           VARCHAR,
+        entity              VARCHAR,
+        target              VARCHAR,
+        row_count           INTEGER,
+        started_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        finished_at         TIMESTAMP,
+        status              VARCHAR NOT NULL,
+        cutoff_dts          TIMESTAMP,
+        error               VARCHAR
     )
     """,
     # Phase 5.8: DQ Control Plane — UI-authored, version-tracked, multi-tenant
@@ -297,29 +369,54 @@ class PipelineControl:
     def ensure(self) -> None:
         create_control_tables(self._wh)
 
-    def current(self, pipeline_id: str) -> PipelineState | None:
+    # ------------------------------------------------------------------
+    # State lookup — Phase 9.4: client-scoped. Default 'default' keeps
+    # back-compat with legacy single-key calls (sensors, demos pre-9.4).
+    # ------------------------------------------------------------------
+    def current(self, pipeline_id: str, client_id: str = "default") -> PipelineState | None:
         rows = self._wh.query(
-            f"SELECT status FROM {CONTROL_SCHEMA}.pipeline_control_state WHERE pipeline_id = $p",
-            {"p": pipeline_id},
+            f"SELECT status FROM {CONTROL_SCHEMA}.pipeline_control_state "
+            "WHERE pipeline_id = $p AND client_id = $c",
+            {"p": pipeline_id, "c": client_id},
         )
         if not rows:
             return None
         return PipelineState(rows[0]["status"])
 
-    def start(self, pipeline_id: str) -> None:
-        """Initialize (or reset) a pipeline to RUNNING. Idempotent."""
-        existing = self.current(pipeline_id)
+    def list_all_states(self) -> list[dict[str, Any]]:
+        """Phase 9.4: feed the Control Tower Pipeline Status panel.
+
+        Returns one dict per (pipeline_id, client_id) row with full state
+        + metadata. UI sorts/filters from here.
+        """
+        return list(
+            self._wh.query(
+                f"SELECT pipeline_id, client_id, status, paused_at, "
+                f"       paused_reason, paused_by, severity, updated_at "
+                f"FROM {CONTROL_SCHEMA}.pipeline_control_state "
+                f"ORDER BY pipeline_id, client_id"
+            )
+        )
+
+    def start(self, pipeline_id: str, client_id: str = "default") -> None:
+        """Initialize (or reset) a pipeline to RUNNING. Idempotent.
+
+        Phase 9.4: client-scoped. ``client_id`` defaults to 'default' so
+        old callers (and tests) keep working without modification.
+        """
+        existing = self.current(pipeline_id, client_id)
         if existing == PipelineState.RUNNING:
             return
         now = datetime.now(UTC)
         self._wh.execute(
-            f"DELETE FROM {CONTROL_SCHEMA}.pipeline_control_state WHERE pipeline_id = $p",
-            {"p": pipeline_id},
+            f"DELETE FROM {CONTROL_SCHEMA}.pipeline_control_state "
+            "WHERE pipeline_id = $p AND client_id = $c",
+            {"p": pipeline_id, "c": client_id},
         )
         self._wh.execute(
             f"INSERT INTO {CONTROL_SCHEMA}.pipeline_control_state "
-            "(pipeline_id, status, updated_at) VALUES ($p, $s, $t)",
-            {"p": pipeline_id, "s": PipelineState.RUNNING.value, "t": now},
+            "(pipeline_id, client_id, status, updated_at) VALUES ($p, $c, $s, $t)",
+            {"p": pipeline_id, "c": client_id, "s": PipelineState.RUNNING.value, "t": now},
         )
         self._log_transition(
             StateTransition(
@@ -327,21 +424,25 @@ class PipelineControl:
                 from_state=existing or PipelineState.RUNNING,
                 to_state=PipelineState.RUNNING,
                 actor="system",
-                reason="pipeline start",
+                reason=f"pipeline start (client={client_id})",
                 severity=Severity.LOW,
             )
         )
 
-    def transition(self, t: StateTransition) -> None:
-        current = self.current(t.pipeline_id) or PipelineState.RUNNING
+    def transition(self, t: StateTransition, client_id: str = "default") -> None:
+        current = self.current(t.pipeline_id, client_id) or PipelineState.RUNNING
         if t.to_state not in self._LEGAL_TRANSITIONS.get(current, set()):
-            raise ValueError(f"illegal transition {current} → {t.to_state} for {t.pipeline_id!r}")
+            raise ValueError(
+                f"illegal transition {current} → {t.to_state} for "
+                f"{t.pipeline_id!r}/{client_id!r}"
+            )
         now = datetime.now(UTC)
         if t.to_state == PipelineState.PAUSED:
             self._wh.execute(
                 f"UPDATE {CONTROL_SCHEMA}.pipeline_control_state SET "
                 "status = $s, paused_at = $t, paused_reason = $r, paused_by = $a, "
-                "severity = $sv, updated_at = $t WHERE pipeline_id = $p",
+                "severity = $sv, updated_at = $t "
+                "WHERE pipeline_id = $p AND client_id = $c",
                 {
                     "s": t.to_state.value,
                     "t": now,
@@ -349,22 +450,194 @@ class PipelineControl:
                     "a": t.actor,
                     "sv": t.severity.value,
                     "p": t.pipeline_id,
+                    "c": client_id,
                 },
             )
         else:
             self._wh.execute(
                 f"UPDATE {CONTROL_SCHEMA}.pipeline_control_state SET "
-                "status = $s, updated_at = $t WHERE pipeline_id = $p",
-                {"s": t.to_state.value, "t": now, "p": t.pipeline_id},
+                "status = $s, updated_at = $t "
+                "WHERE pipeline_id = $p AND client_id = $c",
+                {"s": t.to_state.value, "t": now, "p": t.pipeline_id, "c": client_id},
             )
         self._log_transition(t)
         _log.info(
             "pipeline_control.transition",
             pipeline_id=t.pipeline_id,
+            client_id=client_id,
             from_state=current.value,
             to_state=t.to_state.value,
             actor=t.actor,
             severity=t.severity.value,
+        )
+
+    # ------------------------------------------------------------------
+    # Phase 9.4: public state-machine helpers — operator-facing API.
+    # Each method validates the source state, writes the transition, and
+    # logs to pipeline_control_audit_log via _log_transition. Use these
+    # from UI buttons + auto-pause hooks; never poke the table directly.
+    # ------------------------------------------------------------------
+
+    def pause(
+        self,
+        pipeline_id: str,
+        *,
+        client_id: str = "default",
+        reason: str,
+        actor: str,
+        severity: Severity = Severity.HIGH,
+    ) -> None:
+        """Move a RUNNING pipeline to PAUSED. Used by auto-breach hooks."""
+        self.transition(
+            StateTransition(
+                pipeline_id=pipeline_id,
+                from_state=PipelineState.RUNNING,
+                to_state=PipelineState.PAUSED,
+                actor=actor,
+                reason=reason,
+                severity=severity,
+            ),
+            client_id=client_id,
+        )
+
+    def resume(
+        self,
+        pipeline_id: str,
+        *,
+        client_id: str = "default",
+        actor: str,
+        notes: str = "",
+    ) -> None:
+        """Move a PAUSED pipeline back to RUNNING. Operator-initiated.
+
+        The state machine forbids PAUSED → RUNNING directly — it goes
+        through an intermediate RESUMING state so an audit reader can
+        always tell "operator clicked Resume" (RESUMING) apart from
+        "fresh DAG run" (RUNNING). We walk both transitions in this
+        method so the caller sees a single atomic operation.
+        """
+        reason = notes or "operator resume"
+        # PAUSED → RESUMING (operator intent recorded).
+        self.transition(
+            StateTransition(
+                pipeline_id=pipeline_id,
+                from_state=PipelineState.PAUSED,
+                to_state=PipelineState.RESUMING,
+                actor=actor,
+                reason=reason,
+                severity=Severity.LOW,
+            ),
+            client_id=client_id,
+        )
+        # RESUMING → RUNNING (work allowed to proceed). Sensor's next
+        # poke (≤10 s later) sees RUNNING and unblocks the gate.
+        self.transition(
+            StateTransition(
+                pipeline_id=pipeline_id,
+                from_state=PipelineState.RESUMING,
+                to_state=PipelineState.RUNNING,
+                actor=actor,
+                reason=reason,
+                severity=Severity.LOW,
+            ),
+            client_id=client_id,
+        )
+        # Clear paused_* columns so audit fields don't lie.
+        self._wh.execute(
+            f"UPDATE {CONTROL_SCHEMA}.pipeline_control_state SET "
+            "paused_at = NULL, paused_reason = NULL, paused_by = NULL, severity = NULL "
+            "WHERE pipeline_id = $p AND client_id = $c",
+            {"p": pipeline_id, "c": client_id},
+        )
+
+    def abort(
+        self,
+        pipeline_id: str,
+        *,
+        client_id: str = "default",
+        reason: str,
+        actor: str,
+        severity: Severity = Severity.CRITICAL,
+    ) -> None:
+        """Mark a pipeline as ABORTED. Terminal; future runs require
+        explicit ``force_resume`` to re-arm. Use for catastrophic
+        breaches (>25% fail rate, contract violations, etc.)."""
+        self.transition(
+            StateTransition(
+                pipeline_id=pipeline_id,
+                from_state=self.current(pipeline_id, client_id) or PipelineState.RUNNING,
+                to_state=PipelineState.ABORTED,
+                actor=actor,
+                reason=reason,
+                severity=severity,
+            ),
+            client_id=client_id,
+        )
+
+    def force_resume(
+        self,
+        pipeline_id: str,
+        *,
+        client_id: str = "default",
+        actor: str,
+        reason: str,
+    ) -> None:
+        """Bring an ABORTED pipeline back to RUNNING. **Bypasses the
+        normal state machine** — written explicitly so the audit log
+        carries the operator name + justification (compliance trail).
+        Use sparingly; this is the "I know what I'm doing" override."""
+        now = datetime.now(UTC)
+        self._wh.execute(
+            f"UPDATE {CONTROL_SCHEMA}.pipeline_control_state SET "
+            "status = $s, paused_at = NULL, paused_reason = NULL, "
+            "paused_by = NULL, severity = NULL, updated_at = $t "
+            "WHERE pipeline_id = $p AND client_id = $c",
+            {"s": PipelineState.RUNNING.value, "t": now, "p": pipeline_id, "c": client_id},
+        )
+        self._log_transition(
+            StateTransition(
+                pipeline_id=pipeline_id,
+                from_state=PipelineState.ABORTED,
+                to_state=PipelineState.RUNNING,
+                actor=actor,
+                reason=f"FORCE RESUME: {reason}",
+                severity=Severity.CRITICAL,
+            )
+        )
+        _log.warning(
+            "pipeline_control.force_resume",
+            pipeline_id=pipeline_id,
+            client_id=client_id,
+            actor=actor,
+            reason=reason,
+        )
+
+    def _upsert(
+        self,
+        table: str,
+        key_cols: list[str],
+        all_cols: list[str],
+        values: dict[str, Any],
+        key_values: dict[str, Any],
+    ) -> None:
+        """Portable UPSERT: DELETE matching keys, then INSERT the fresh row.
+
+        ``INSERT OR REPLACE`` is DuckDB/SQLite syntax — Snowflake rejects it.
+        DELETE-then-INSERT works identically on both backends. Not atomic at
+        the row level, but acceptable for CONTROL audit tables where a brief
+        "gap" between delete and insert is inconsequential (these are polled,
+        not read in a hot loop).
+        """
+        where = " AND ".join(f"{c} = ${c}" for c in key_cols)
+        self._wh.execute(
+            f"DELETE FROM {CONTROL_SCHEMA}.{table} WHERE {where}",
+            key_values,
+        )
+        placeholders = ", ".join(f"${c}" for c in all_cols)
+        cols_sql = ", ".join(all_cols)
+        self._wh.execute(
+            f"INSERT INTO {CONTROL_SCHEMA}.{table} ({cols_sql}) VALUES ({placeholders})",
+            values,
         )
 
     def record_checkpoint(
@@ -384,22 +657,32 @@ class PipelineControl:
         MEMBERSHIP/PROVIDER so dashboards can slice per-(client, source).
         Both optional for Phase-5.x back-compat.
         """
-        self._wh.execute(
-            f"INSERT OR REPLACE INTO {CONTROL_SCHEMA}.pipeline_checkpoints "
-            "(run_id, pipeline_id, checkpoint_name, client_id, source_type, "
-            " completed_at, row_count, fail_pct, status) "
-            "VALUES ($r, $p, $c, $ci, $src, $t, $rc, $fp, $s)",
-            {
-                "r": run_id,
-                "p": pipeline_id,
-                "c": checkpoint_name,
-                "ci": client_id,
-                "src": source_type,
-                "t": datetime.now(UTC),
-                "rc": row_count,
-                "fp": fail_pct,
-                "s": status,
+        self._upsert(
+            table="pipeline_checkpoints",
+            key_cols=["run_id", "checkpoint_name"],
+            all_cols=[
+                "run_id",
+                "pipeline_id",
+                "checkpoint_name",
+                "client_id",
+                "source_type",
+                "completed_at",
+                "row_count",
+                "fail_pct",
+                "status",
+            ],
+            values={
+                "run_id": run_id,
+                "pipeline_id": pipeline_id,
+                "checkpoint_name": checkpoint_name,
+                "client_id": client_id,
+                "source_type": source_type,
+                "completed_at": datetime.now(UTC),
+                "row_count": row_count,
+                "fail_pct": fail_pct,
+                "status": status,
             },
+            key_values={"run_id": run_id, "checkpoint_name": checkpoint_name},
         )
 
     def _log_transition(self, t: StateTransition) -> None:
@@ -468,18 +751,19 @@ class TaskProgressTracker:
         return {r["task_name"]: _row_to_progress(r) for r in rows}
 
     def mark_started(self, run_id: str, pipeline_id: str, task_name: str) -> None:
-        """Record that a task has begun. Safe to call multiple times (INSERT OR REPLACE)."""
-        self._wh.execute(
-            f"INSERT OR REPLACE INTO {CONTROL_SCHEMA}.pipeline_task_progress "
-            "(run_id, pipeline_id, task_name, status, started_at) "
-            "VALUES ($r, $p, $t, $s, $ts)",
-            {
-                "r": run_id,
-                "p": pipeline_id,
-                "t": task_name,
-                "s": "RUNNING",
-                "ts": datetime.now(UTC),
+        """Record that a task has begun. Safe to call multiple times (upsert)."""
+        self._upsert(
+            table="pipeline_task_progress",
+            key_cols=["run_id", "task_name"],
+            all_cols=["run_id", "pipeline_id", "task_name", "status", "started_at"],
+            values={
+                "run_id": run_id,
+                "pipeline_id": pipeline_id,
+                "task_name": task_name,
+                "status": "RUNNING",
+                "started_at": datetime.now(UTC),
             },
+            key_values={"run_id": run_id, "task_name": task_name},
         )
 
     def mark_done(
@@ -491,21 +775,31 @@ class TaskProgressTracker:
         duration_ms: int,
     ) -> None:
         """Record task SUCCESS. On auto-resume this row causes the task to be skipped."""
-        self._wh.execute(
-            f"INSERT OR REPLACE INTO {CONTROL_SCHEMA}.pipeline_task_progress "
-            "(run_id, pipeline_id, task_name, status, started_at, completed_at, "
-            " duration_ms, output_json) "
-            "VALUES ($r, $p, $t, $s, $st, $ct, $d, $o)",
-            {
-                "r": run_id,
-                "p": pipeline_id,
-                "t": task_name,
-                "s": "SUCCESS",
-                "st": datetime.now(UTC),
-                "ct": datetime.now(UTC),
-                "d": duration_ms,
-                "o": json.dumps(output, default=str),
+        now = datetime.now(UTC)
+        self._upsert(
+            table="pipeline_task_progress",
+            key_cols=["run_id", "task_name"],
+            all_cols=[
+                "run_id",
+                "pipeline_id",
+                "task_name",
+                "status",
+                "started_at",
+                "completed_at",
+                "duration_ms",
+                "output_json",
+            ],
+            values={
+                "run_id": run_id,
+                "pipeline_id": pipeline_id,
+                "task_name": task_name,
+                "status": "SUCCESS",
+                "started_at": now,
+                "completed_at": now,
+                "duration_ms": duration_ms,
+                "output_json": json.dumps(output, default=str),
             },
+            key_values={"run_id": run_id, "task_name": task_name},
         )
 
     def mark_failed(
@@ -517,21 +811,31 @@ class TaskProgressTracker:
         duration_ms: int,
     ) -> None:
         """Record task FAILURE. Row is overwritten on a resume-retry."""
-        self._wh.execute(
-            f"INSERT OR REPLACE INTO {CONTROL_SCHEMA}.pipeline_task_progress "
-            "(run_id, pipeline_id, task_name, status, started_at, completed_at, "
-            " duration_ms, error) "
-            "VALUES ($r, $p, $t, $s, $st, $ct, $d, $e)",
-            {
-                "r": run_id,
-                "p": pipeline_id,
-                "t": task_name,
-                "s": "FAILED",
-                "st": datetime.now(UTC),
-                "ct": datetime.now(UTC),
-                "d": duration_ms,
-                "e": error[:4000],  # truncate huge stack traces
+        now = datetime.now(UTC)
+        self._upsert(
+            table="pipeline_task_progress",
+            key_cols=["run_id", "task_name"],
+            all_cols=[
+                "run_id",
+                "pipeline_id",
+                "task_name",
+                "status",
+                "started_at",
+                "completed_at",
+                "duration_ms",
+                "error",
+            ],
+            values={
+                "run_id": run_id,
+                "pipeline_id": pipeline_id,
+                "task_name": task_name,
+                "status": "FAILED",
+                "started_at": now,
+                "completed_at": now,
+                "duration_ms": duration_ms,
+                "error": error[:4000],  # truncate huge stack traces
             },
+            key_values={"run_id": run_id, "task_name": task_name},
         )
 
 

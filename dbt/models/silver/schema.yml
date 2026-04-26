@@ -63,9 +63,11 @@ models:
   - name: sat_claim_details
     description: |
       Satellite: claim attributes (CPT, ICDs, amount, status, auth).
-      Composite uniqueness (hub_claim_hk, load_dts) enforced by
-      tests/sat_unique_composite.sql (dbt-core 1.8 has no native
-      composite-unique test without dbt_utils).
+      Phase 9.2: SCD2. Each row carries explicit
+      effective_start_date / effective_end_date / is_active so simple
+      ``WHERE is_active = TRUE`` returns current state — no LEAD/QUALIFY
+      gymnastics needed downstream. Soft-delete is NOT applied to claims
+      (claims are events, not state — they don't disappear from source).
     columns:
       - name: hub_claim_hk
         tests:
@@ -77,8 +79,21 @@ models:
         tests: [not_null]
       - name: hash_diff
         tests: [not_null]
+      # Phase 9.2 SCD2 columns
+      - name: effective_start_date
+        tests: [not_null]
+      - name: effective_end_date
+        # Nullable — NULL means "current version".
+        tests: []
+      - name: is_active
+        tests: [not_null]
 
   - name: sat_member_demographics
+    description: |
+      Satellite: member demographic attributes. Phase 9.2 SCD2 with
+      soft-delete: any (member_id, plan_id) absent from the most recent
+      FULL Bronze batch automatically gets is_active=FALSE on its latest
+      Sat row. INCREMENTAL/UNKNOWN batches do NOT trigger soft-delete.
     columns:
       - name: hub_member_hk
         tests:
@@ -90,8 +105,18 @@ models:
         tests: [not_null]
       - name: hash_diff
         tests: [not_null]
+      - name: effective_start_date
+        tests: [not_null]
+      - name: effective_end_date
+        tests: []
+      - name: is_active
+        tests: [not_null]
 
   - name: sat_provider_info
+    description: |
+      Satellite: provider registry attributes (network status, address,
+      specialty). Phase 9.2 SCD2 with soft-delete on FULL: providers
+      absent from the latest FULL Bronze batch flip to is_active=FALSE.
     columns:
       - name: hub_provider_hk
         tests:
@@ -102,6 +127,12 @@ models:
       - name: load_dts
         tests: [not_null]
       - name: hash_diff
+        tests: [not_null]
+      - name: effective_start_date
+        tests: [not_null]
+      - name: effective_end_date
+        tests: []
+      - name: is_active
         tests: [not_null]
 
   # ===================================================================

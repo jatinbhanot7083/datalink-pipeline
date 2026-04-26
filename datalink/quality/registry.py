@@ -349,6 +349,61 @@ class SuiteRegistry:
             extra_sets={"activated_at": datetime.now(UTC)},
         )
 
+        # Phase 8 — opportunistically embed the new LIVE suite into the
+        # agent_memory store so future authoring runs can retrieve it as
+        # an EXAMPLE. Failure is NEVER a blocker: a memory-store outage
+        # must not prevent a valid suite from going live. We eat the
+        # exception, log it, move on. The backfill script is the
+        # safety net that catches anything skipped here.
+        try:
+            self._embed_for_memory(suite_id)
+        except Exception as e:
+            from datalink.logging import get_logger as _gl
+
+            _gl(__name__).warning(
+                "registry.activate.memory_embed_failed",
+                suite_id=suite_id,
+                error=str(e),
+            )
+
+    def _embed_for_memory(self, suite_id: str) -> None:
+        """Embed a freshly-activated suite into the RAG store.
+
+        Imported lazily so the registry doesn't pull psycopg / Voyage on
+        modules that just need the state machine (tests, CI lint, the
+        plug-out path). Reads the suite back via the registry to use the
+        same humanised text builder as the backfill script — embeddings
+        from the live path and the backfill path stay byte-identical.
+        """
+        from datalink.adapters.embeddings.router import get_embedder
+        from datalink.memory import AgentMemoryStore
+        from datalink.memory.store import suite_source_text
+
+        v = self._require(suite_id)
+        # Build the same dict shape suite_source_text() expects from a row.
+        row_for_text = {
+            "client_id": v.client_id,
+            "suite_name": v.suite_name,
+            "source": v.source.value if hasattr(v.source, "value") else str(v.source),
+            "source_type": v.source_type,
+            "dq_dimensions": v.dq_dimensions,
+            "expectations": v.expectations,
+        }
+        text = suite_source_text(row_for_text)
+
+        embedder = get_embedder()
+        memory = AgentMemoryStore(embedder=embedder)
+        memory.ensure_schema()
+        memory.upsert_suite(
+            suite_id=suite_id,
+            client_id=v.client_id,
+            suite_name=v.suite_name,
+            status=v.status.value if hasattr(v.status, "value") else str(v.status),
+            source=row_for_text["source"],
+            source_type=v.source_type,
+            source_text=text,
+        )
+
     def reject(self, suite_id: str, actor: str, notes: str) -> None:
         self._transition(
             suite_id,
@@ -374,6 +429,31 @@ class SuiteRegistry:
                 "reviewed_at": datetime.now(UTC),
                 "review_notes": notes,
             },
+        )
+
+    def archive(self, suite_id: str, actor: str, reason: str = "") -> None:
+        """Soft-delete a suite — moves it to ARCHIVED.
+
+        Healthcare DQ requires a tamper-proof audit trail (HIPAA / SOC 2),
+        so suites are never hard-deleted. ARCHIVED suites are filtered out
+        of every checkpoint query (which all match ``status = LIVE``) but
+        the row stays in CONTROL.dq_suites for forever for compliance.
+
+        Legal from any non-terminal state — DRAFT, PENDING_REVIEW, APPROVED,
+        LIVE all permit transition to ARCHIVED per ``_LEGAL_TRANSITIONS``.
+
+        Note: when a NEW version is activated for the same (client_id,
+        suite_name), the previous LIVE is auto-archived by ``activate()``
+        — operators rarely need to call this explicitly. Use this for
+        ad-hoc retirement of an experimental DRAFT or a misguided LIVE
+        that won't be replaced.
+        """
+        self._transition(
+            suite_id,
+            SuiteStatus.ARCHIVED,
+            actor,
+            notes=reason or "manually archived",
+            extra_sets={"archived_at": datetime.now(UTC)},
         )
 
     # ------------------------------------------------------------------

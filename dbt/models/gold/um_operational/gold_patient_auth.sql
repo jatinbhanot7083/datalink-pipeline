@@ -66,7 +66,7 @@ SELECT
     lu_auth_type_id                    AS auth_type_id,
     lu_auth_status_id                  AS auth_status_id,
     service_date                       AS auth_from_date,
-    DATE_ADD(service_date, INTERVAL 72 HOUR) AS auth_due_date,  -- 72h standard TAT per UM-Gold-v2
+    DATEADD(HOUR, 72, service_date)    AS auth_due_date,        -- 72h TAT per UM-Gold-v2; DATEADD works on both DuckDB + Snowflake
     npi                                AS provider_npi,
     billed_amount                      AS requested_amount,
     claim_id                           AS source_claim_id,

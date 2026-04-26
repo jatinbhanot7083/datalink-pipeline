@@ -23,12 +23,10 @@ from datalink.quality import (
     CheckpointResult,
     CheckpointStatus,
     PipelineControl,
-    PipelineState,
     run_checkpoint,
     seed_baselines,
 )
 from datalink.quality.checkpoint import skipped_result
-from datalink.quality.control import Severity, StateTransition
 
 if TYPE_CHECKING:
     from great_expectations.core.expectation_suite import ExpectationSuite
@@ -70,7 +68,9 @@ def run_checkpoint_with_hooks(
     agents_enabled = settings.features.agents.enabled
     control = PipelineControl(adapters.warehouse)
     control.ensure()
-    control.start(pipeline_id)
+    # Phase 9.4: per-client state. Each tenant gets its own row; aetna
+    # being PAUSED never blocks cano_health.
+    control.start(pipeline_id, client_id=client_id)
     # Phase 6: idempotently create the tenant's BRONZE / SILVER_silver /
     # SILVER_gold_um schemas before the pipeline touches them. No-op for
     # client_id=='default' on re-runs.
@@ -159,22 +159,38 @@ def run_checkpoint_with_hooks(
             post_val_results = run_post_validation(
                 adapters, settings, run_id=run_id, checkpoint_name=checkpoint_name
             )
-        # Transition pipeline state — always done on BREACH regardless of agents flag.
+        # Transition pipeline state — always done on BREACH regardless of
+        # agents flag. Phase 9.4: graduated severity, client-scoped state.
+        # If fail_pct > 25%, ABORT (terminal — operator must force_resume).
+        # Otherwise PAUSE (operator can Resume in Control Tower).
+        abort_threshold_pct = 25.0  # configurable via settings later
+        breach_reason = (
+            f"checkpoint {checkpoint_name} breached: "
+            f"{checkpoint.failed_expectations}/{checkpoint.total_expectations} "
+            f"failed ({checkpoint.fail_pct}%)"
+        )
         try:
-            control.transition(
-                StateTransition(
-                    pipeline_id=pipeline_id,
-                    from_state=PipelineState.RUNNING,
-                    to_state=PipelineState.PAUSED,
+            if checkpoint.fail_pct > abort_threshold_pct:
+                control.abort(
+                    pipeline_id,
+                    client_id=client_id,
+                    reason=breach_reason,
                     actor="gx-checkpoint-callback",
-                    reason=(
-                        f"checkpoint {checkpoint_name} breached: "
-                        f"{checkpoint.failed_expectations}/{checkpoint.total_expectations} "
-                        f"failed ({checkpoint.fail_pct}%)"
-                    ),
-                    severity=Severity.HIGH,
                 )
-            )
+                _log.error(
+                    "hooks.pipeline_aborted",
+                    pipeline_id=pipeline_id,
+                    client_id=client_id,
+                    fail_pct=checkpoint.fail_pct,
+                    abort_threshold=abort_threshold_pct,
+                )
+            else:
+                control.pause(
+                    pipeline_id,
+                    client_id=client_id,
+                    reason=breach_reason,
+                    actor="gx-checkpoint-callback",
+                )
             paused = True
         except ValueError as exc:
             _log.warning("hooks.pause_skipped", reason=str(exc))

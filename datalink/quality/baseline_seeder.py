@@ -34,6 +34,7 @@ from datalink.quality.registry import (
     SuiteDraft,
     SuiteRegistry,
     SuiteSource,
+    SuiteStatus,
 )
 
 _log = get_logger(__name__)
@@ -152,6 +153,46 @@ def _row_count_between(lo: int, hi: int, severity: str, desc: str) -> dict[str, 
     }
 
 
+# ---------- Phase 9.1: shared audit-column expectations -------------------
+# Every Bronze suite validates that the 7 audit cols are populated. Phase
+# 9.1 added _load_type / _file_row_number / _record_hash; legacy rows (pre-
+# migration) have NULL for these so we use mostly=0.99 to tolerate the
+# small backfill gap. Once history rolls past the migration date, we can
+# tighten to mostly=1.0.
+#
+# IMPORTANT: post Phase 9.1 we removed the natural-key uniqueness asserts
+# from Bronze (claim_id, npi). Bronze is now an immutable APPEND-ONLY
+# ledger — same key WILL legitimately appear in multiple batches. Natural-
+# key uniqueness moved to Silver Hub (Phase 9.2).
+
+_BRONZE_AUDIT_COLS: list[dict[str, Any]] = [
+    _not_null("_load_dt", "HIGH", "Audit: every row must carry a load timestamp.", mostly=1.0),
+    _not_null("_batch_id", "HIGH", "Audit: every row must carry a batch_id.", mostly=1.0),
+    _not_null(
+        "_source_file", "HIGH", "Audit: every row must record its source filename.", mostly=1.0
+    ),
+    _not_null("_load_type", "MEDIUM", "Audit: load_type must be set (Phase 9.1).", mostly=0.99),
+    _in_set(
+        "_load_type",
+        ["FULL", "INCREMENTAL", "UNKNOWN"],
+        "MEDIUM",
+        "load_type must be one of three controlled values.",
+    ),
+    _not_null(
+        "_record_hash",
+        "MEDIUM",
+        "Audit: record_hash powers Silver SCD2 diffing (Phase 9.1).",
+        mostly=0.99,
+    ),
+    _not_null(
+        "_file_row_number",
+        "LOW",
+        "Audit: row position within source file (Phase 9.1).",
+        mostly=0.99,
+    ),
+]
+
+
 # ---------- BRONZE_CLAIMS — validates BRONZE.RAW_CLAIMS ----------
 
 BRONZE_CLAIMS_BASELINE: list[dict[str, Any]] = [
@@ -159,7 +200,8 @@ BRONZE_CLAIMS_BASELINE: list[dict[str, Any]] = [
     _not_null("claim_id", "HIGH", "Every claim must have a natural key."),
     _not_null("member_id", "HIGH", "Every claim must tie to a member."),
     _not_null("provider_npi", "HIGH", "Every claim must name a provider."),
-    _unique("claim_id", "HIGH", "claim_id is the Bronze PK — duplicates break MERGE."),
+    # claim_id uniqueness moved to Silver Hub (Phase 9.1) — Bronze can
+    # legitimately have the same claim_id in multiple batches.
     _regex("provider_npi", r"^\d{10}$", "HIGH", "NPI must be 10 digits (CMS).", mostly=0.98),
     _between(
         "billed_amount", 0, 2_000_000, "MEDIUM", "Billed amount non-negative + fraud-threshold."
@@ -170,6 +212,7 @@ BRONZE_CLAIMS_BASELINE: list[dict[str, Any]] = [
         "HIGH",
         "Claim status must be one of 4 standard codes.",
     ),
+    *_BRONZE_AUDIT_COLS,
 ]
 
 
@@ -179,9 +222,11 @@ BRONZE_MEMBERSHIP_BASELINE: list[dict[str, Any]] = [
     _row_count_between(100, 10_000_000, "MEDIUM", "Enrollment volume sanity."),
     _not_null("member_id", "HIGH", "Every enrollment row must name a member."),
     _not_null("plan_id", "HIGH", "Enrollment requires a plan reference."),
-    # member_id+plan_id is the composite PK; validate member_id uniqueness isn't strict
-    # (one member can be on multiple plans in history). Validate that no row has NULL keys.
-    _not_null("enrollment_start", "HIGH", "Enrollment-start date required."),
+    # member_id + plan_id uniqueness is a Silver Hub concern; in Bronze
+    # the same (member_id, plan_id) pair appears in every batch the
+    # member shows up in.
+    _not_null("effective_date", "HIGH", "Effective date required."),
+    *_BRONZE_AUDIT_COLS,
 ]
 
 
@@ -190,8 +235,9 @@ BRONZE_MEMBERSHIP_BASELINE: list[dict[str, Any]] = [
 BRONZE_PROVIDER_BASELINE: list[dict[str, Any]] = [
     _row_count_between(1, 10_000_000, "LOW", "Provider registry row-count sanity."),
     _not_null("npi", "HIGH", "Every provider row requires an NPI."),
-    _unique("npi", "HIGH", "NPI is the Bronze PK in the provider registry."),
+    # NPI uniqueness moved to Silver Hub (Phase 9.1).
     _regex("npi", r"^\d{10}$", "HIGH", "NPI must be 10 digits (CMS)."),
+    *_BRONZE_AUDIT_COLS,
 ]
 
 
@@ -202,6 +248,27 @@ BRONZE_PROVIDER_BASELINE: list[dict[str, Any]] = [
 # sat_provider_info. Each suite targets its own satellite. Accuracy +
 # Consistency checks require cross-system joins so they surface at Silver+.
 # ============================================================================
+
+# Phase 9.2: shared SCD2 expectations applied to every Silver Sat. Each
+# Sat now carries explicit ``effective_start_date`` / ``effective_end_date``
+# / ``is_active`` columns; we assert they're populated. These are the
+# columns Gold reads to materialize "current state" tables, so a missing
+# value here = a broken downstream contract.
+_SILVER_SCD2_COLS: list[dict[str, Any]] = [
+    _not_null(
+        "effective_start_date",
+        "HIGH",
+        "SCD2: every Silver row must have effective_start_date.",
+    ),
+    _not_null(
+        "is_active",
+        "HIGH",
+        "SCD2: every Silver row must declare its is_active state (TRUE/FALSE).",
+    ),
+    # effective_end_date is NULL on the active row by design, so no
+    # not-null check on that column.
+]
+
 
 SILVER_CLAIMS_BASELINE: list[dict[str, Any]] = [
     _regex(
@@ -226,23 +293,24 @@ SILVER_CLAIMS_BASELINE: list[dict[str, Any]] = [
         "Silver claims must have strictly-positive billed amounts.",
     ),
     _not_null("cpt_code", "HIGH", "Silver requires CPT — cleaning happened at this tier."),
+    *_SILVER_SCD2_COLS,
 ]
 
 
 SILVER_MEMBERSHIP_BASELINE: list[dict[str, Any]] = [
-    _not_null("member_id", "HIGH", "Silver member row requires a member_id."),
-    _not_null("plan_id", "HIGH", "Silver member row requires a plan_id."),
+    # Phase 9.2: sat_member_demographics doesn't expose member_id/plan_id
+    # (those live on hub_member). We assert hub_member_hk presence + the
+    # descriptive attrs that the Sat actually carries.
+    _not_null("hub_member_hk", "HIGH", "Every Silver member row must reference its hub."),
+    _not_null("dob", "MEDIUM", "DOB required for UM workflows.", mostly=0.99),
+    *_SILVER_SCD2_COLS,
 ]
 
 
 SILVER_PROVIDER_BASELINE: list[dict[str, Any]] = [
-    _not_null("npi", "HIGH", "Silver provider row requires NPI."),
-    _regex(
-        "npi",
-        r"^\d{10}$",
-        "HIGH",
-        "Silver NPI must still conform to 10-digit format after cleaning.",
-    ),
+    _not_null("hub_provider_hk", "HIGH", "Every Silver provider row must reference its hub."),
+    _not_null("provider_name", "MEDIUM", "Provider name required.", mostly=0.99),
+    *_SILVER_SCD2_COLS,
 ]
 
 
@@ -334,8 +402,14 @@ def seed_baselines(warehouse: Warehouse, client_id: str = DEFAULT_CLIENT) -> int
 
     # Seed 9 per-source suites first.
     for (suite_name, source_type), expectations in BASELINES_PER_SOURCE.items():
+        # Skip only if an ACTIVE version exists (LIVE / APPROVED / PENDING_REVIEW
+        # / DRAFT). If every prior version is ARCHIVED or REJECTED — e.g.
+        # after a Phase 9.1-style baseline refresh — we DO want to create
+        # a fresh version with the latest expectations. The state machine
+        # auto-bumps version numbers, so this never collides.
         existing = reg.list_versions(client_id, suite_name)
-        if existing:
+        terminal = {SuiteStatus.ARCHIVED, SuiteStatus.REJECTED}
+        if any(v.status not in terminal for v in existing):
             continue
         dims = sorted({e["meta"].get("dq_dimension") for e in expectations if e.get("meta")})
         draft = SuiteDraft(
@@ -366,8 +440,14 @@ def seed_baselines(warehouse: Warehouse, client_id: str = DEFAULT_CLIENT) -> int
 
     # Seed 3 legacy aggregate suites for backward compat. source_type=NULL.
     for suite_name, expectations in LEGACY_BASELINES.items():
+        # Skip only if an ACTIVE version exists (LIVE / APPROVED / PENDING_REVIEW
+        # / DRAFT). If every prior version is ARCHIVED or REJECTED — e.g.
+        # after a Phase 9.1-style baseline refresh — we DO want to create
+        # a fresh version with the latest expectations. The state machine
+        # auto-bumps version numbers, so this never collides.
         existing = reg.list_versions(client_id, suite_name)
-        if existing:
+        terminal = {SuiteStatus.ARCHIVED, SuiteStatus.REJECTED}
+        if any(v.status not in terminal for v in existing):
             continue
         dims = sorted({e["meta"].get("dq_dimension") for e in expectations if e.get("meta")})
         draft = SuiteDraft(

@@ -114,13 +114,23 @@ class AgentBase(ABC):
     # --- PHI-guarded LLM call --------------------------------------------
 
     def _ask_llm(
-        self, instruction: str, safe_payload: dict[str, Any], max_tokens: int = 1024
+        self,
+        instruction: str,
+        safe_payload: dict[str, Any],
+        max_tokens: int = 1024,
+        temperature: float = 0.0,
     ) -> str:
         """Send `instruction` + `safe_payload` to the LLM. Raises
         PhiBoundaryViolationError if the payload tries to smuggle PHI.
 
         Phase 6: accumulates input_tokens + output_tokens on self._tokens_this_run
         so AgentBase.run() can persist the total to agent_reasoning_log.tokens_used.
+
+        Phase 8: ``temperature`` is now a per-call knob (was hard-coded 0.0).
+        Subclasses that drive interactive UIs (DQ AI Architect) thread the
+        user-chosen value through; structural agents (Profiler, RootCause,
+        etc.) keep the deterministic default unless they have a reason
+        to deviate.
         """
         self._phi.assert_clean(safe_payload)
         from datalink.adapters.protocols import LlmMessage
@@ -134,7 +144,10 @@ class AgentBase(ABC):
             ),
         ]
         completion = self._llm.complete(
-            messages, max_tokens=max_tokens, thinking_mode=self._thinking_mode
+            messages,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            thinking_mode=self._thinking_mode,
         )
         # Accumulate tokens — multiple _ask_llm calls in one execute() sum up.
         # Thinking tokens count too since Anthropic bills them as output.
@@ -159,7 +172,7 @@ class AgentBase(ABC):
         error: str | None,
     ) -> None:
         # PHI-safe preview — key names + values. Truncation widened to 3KB
-        # in Phase 6 so the CrewAI Dashboard can render human-readable
+        # in Phase 6 so the AI Agents dashboard can render human-readable
         # narrative (full action-list, full classification, full suite_name)
         # instead of cut-off strings. Still metadata-only — no row data.
         preview = json.dumps(

@@ -84,9 +84,10 @@ USER_FACING = {
 # STYLING
 # =============================================================================
 
+_FAVICON_PATH = Path(__file__).resolve().parent / "static" / "datalink-logo-color.png"
 st.set_page_config(
-    page_title="DataLink Control Tower",
-    page_icon="🏛️",
+    page_title="DataLink Command Center",
+    page_icon=str(_FAVICON_PATH) if _FAVICON_PATH.exists() else "🏛️",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -181,7 +182,12 @@ def _duckdb_count(schema: str, table: str) -> ProbeResult:
         if schema.upper() not in _existing_schemas_upper():
             return ProbeResult(ok=False, error=f"{schema} schema does not exist")
 
-        val = query_scalar(f'SELECT COUNT(*) FROM "{schema}"."{table}"')
+        # Don't quote identifiers — DuckDB is case-insensitive without
+        # quotes, and Snowflake folds unquoted names to UPPER which matches
+        # the stored objects (dbt creates SILVER_SILVER_AETNA.SAT_*, but
+        # Python computes the mixed-case "SILVER_silver_AETNA"; quoted, the
+        # query would search for the literal mixed case and miss).
+        val = query_scalar(f"SELECT COUNT(*) FROM {schema}.{table}")
         if val is None:
             return ProbeResult(ok=False, error=f"{schema}.{table} not found")
         return ProbeResult(ok=True, value=int(val))
@@ -339,9 +345,51 @@ def _fmt_count(p: ProbeResult) -> tuple[str, str]:
 
 def main() -> None:
     # --- Header ---------------------------------------------------------------
+    # Backend badge — read env at render time so flips are visible without
+    # rebuilding the image. Big and loud so there's no ambiguity about which
+    # warehouse is driving the dashboards.
+    _backend = os.environ.get("DL_ADAPTERS__WAREHOUSE__TYPE", "duckdb").lower()
+    if _backend == "snowflake":
+        _badge_color = "#29b5e8"  # Snowflake brand blue
+        _badge_text = "❄️ SNOWFLAKE"
+    elif _backend == "duckdb":
+        _badge_color = "#fff100"  # DuckDB brand yellow
+        _badge_text = "🦆 DUCKDB"
+    else:
+        _badge_color = "#dc2626"  # red — unknown backend
+        _badge_text = f"⚠️ {_backend.upper()}"
+
+    # Embed the official blue logo as a data: URI so the hero is
+    # self-contained (no runtime CDN call). Same asset the sidebar uses.
+    import base64 as _b64
+
+    _logo_path = Path(__file__).resolve().parent / "static" / "datalink-logo-color.png"
+    _logo_data_uri = (
+        f"data:image/png;base64,{_b64.b64encode(_logo_path.read_bytes()).decode('ascii')}"
+        if _logo_path.exists()
+        else ""
+    )
+    _logo_img = (
+        f'<img src="{_logo_data_uri}" alt="DataLink" '
+        f'style="height:48px;width:auto;margin-right:.4rem;">'
+        if _logo_data_uri
+        else "🏛️"
+    )
+
     st.markdown(
-        f"<h1>🏛️ <span style='color:{_NAVY}'>DataLink</span> "
-        f"<span style='color:{_GOLD}'>Control Tower</span></h1>",
+        f"""
+        <div style="display:flex;align-items:center;gap:1rem;">
+          {_logo_img}
+          <h1 style="margin:0"><span style='color:{_NAVY}'>Command</span>
+            <span style='color:{_GOLD}'>Center</span></h1>
+          <div style="background:{_badge_color};color:#000;padding:.35rem .8rem;
+                      border-radius:6px;font-weight:800;font-size:.95rem;
+                      letter-spacing:.05em;border:2px solid #000;
+                      box-shadow:0 2px 4px rgba(0,0,0,.15)">
+            BACKEND: {_badge_text}
+          </div>
+        </div>
+        """,
         unsafe_allow_html=True,
     )
     col_a, col_b = st.columns([3, 1])
@@ -478,6 +526,171 @@ def main() -> None:
         )
 
     # ========================================================================
+    # PIPELINE CONTROL — Phase 9.4 operator panel.
+    # Per-(pipeline, client) state with Resume / Abort / Force Resume
+    # buttons. Auto-pause + auto-abort fire from the GX checkpoint hooks
+    # (see datalink.pipeline.hooks); this UI is the human-in-the-loop
+    # counterpart that lets operators clear pauses and unstick aborted
+    # pipelines without dropping into SQL.
+    # ========================================================================
+    st.markdown("## 🚦 Pipeline Control")
+    st.caption(
+        "Auto-pause fires when GX fail_pct exceeds threshold; auto-abort "
+        "when fail_pct > 25%. Both transitions write to "
+        "`CONTROL.pipeline_control_audit_log`."
+    )
+    try:
+        from contextlib import contextmanager as _cm
+
+        from datalink.quality.control import PipelineControl
+        from datalink.ui._query import warehouse_ctx as _wctx
+
+        @_cm
+        def _control_ctx():
+            with _wctx(readonly=False) as _wh:
+                yield PipelineControl(_wh)  # type: ignore[arg-type]
+
+        with _control_ctx() as _pc:
+            _pc.ensure()
+            _states = _pc.list_all_states()
+
+        if not _states:
+            st.info("No pipeline runs yet — trigger a DAG below and a row " "will appear here.")
+        else:
+            # State-color palette for the status badge. Renamed away from
+            # `_state_color` because the file already has a same-named
+            # FUNCTION at line 325 used by the Recent DAG Runs panel —
+            # shadowing it as a dict broke that panel.
+            _pipeline_state_palette = {
+                "RUNNING": "#16a34a",  # green
+                "PAUSED": "#d97706",  # amber
+                "ABORTED": "#dc2626",  # red
+                "RESUMING": "#2563eb",  # blue
+                "COMPLETED": "#64748b",  # slate
+            }
+            for st_row in _states:
+                pid = st_row["pipeline_id"]
+                cid = st_row["client_id"]
+                status = st_row["status"]
+                paused_reason = st_row.get("paused_reason") or ""
+                paused_at = st_row.get("paused_at") or ""
+                color = _pipeline_state_palette.get(status, "#64748b")
+                key_prefix = f"pc_{pid}_{cid}"
+
+                hdr_col, badge_col = st.columns([4, 1])
+                with hdr_col:
+                    st.markdown(
+                        f"**{pid}** · client `{cid}` · " f"updated `{st_row.get('updated_at','—')}`"
+                    )
+                with badge_col:
+                    st.markdown(
+                        f'<span style="background:{color};color:#fff;'
+                        f"padding:.2rem .55rem;border-radius:4px;"
+                        f'font-weight:700;font-size:.78rem;letter-spacing:.05em">'
+                        f"{status}</span>",
+                        unsafe_allow_html=True,
+                    )
+
+                if status in ("PAUSED", "ABORTED") and paused_reason:
+                    st.caption(
+                        f"⚠ {paused_reason}" + (f" · paused at {paused_at}" if paused_at else "")
+                    )
+
+                # Per-state operator buttons.
+                if status == "PAUSED":
+                    rb_col, ab_col, _ = st.columns([1, 1, 4])
+                    confirm_resume = rb_col.toggle(
+                        "▶ Resume",
+                        value=False,
+                        key=f"{key_prefix}_resume_toggle",
+                        help="Two-click: ON enables the Resume button.",
+                    )
+                    if confirm_resume and rb_col.button(
+                        "Confirm resume",
+                        key=f"{key_prefix}_resume_btn",
+                        type="primary",
+                        use_container_width=True,
+                    ):
+                        try:
+                            with _control_ctx() as _pc:
+                                _pc.resume(
+                                    pid,
+                                    client_id=cid,
+                                    actor=f"operator:{os.environ.get('USER','op')}",
+                                    notes="resumed via Control Tower",
+                                )
+                            st.success(f"Resumed `{pid}/{cid}`. Sensor will pick it up within 10s.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Resume failed: {e}")
+
+                    confirm_abort = ab_col.toggle(
+                        "🛑 Abort",
+                        value=False,
+                        key=f"{key_prefix}_abort_toggle",
+                        help="Two-click: ON enables the Abort button. "
+                        "ABORT is terminal — DAG must be re-triggered "
+                        "after a Force Resume.",
+                    )
+                    if confirm_abort and ab_col.button(
+                        "Confirm abort",
+                        key=f"{key_prefix}_abort_btn",
+                        type="secondary",
+                        use_container_width=True,
+                    ):
+                        try:
+                            with _control_ctx() as _pc:
+                                _pc.abort(
+                                    pid,
+                                    client_id=cid,
+                                    reason=f"manual abort from Control Tower (paused_reason: {paused_reason[:200]})",
+                                    actor=f"operator:{os.environ.get('USER','op')}",
+                                )
+                            st.success(f"Aborted `{pid}/{cid}`.")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Abort failed: {e}")
+
+                elif status == "ABORTED":
+                    st.warning(
+                        "Pipeline is ABORTED. Force Resume requires an "
+                        "explicit reason — this writes to the audit log "
+                        "with `FORCE RESUME:` prefix."
+                    )
+                    fr_col1, fr_col2 = st.columns([2, 1])
+                    fr_reason = fr_col1.text_input(
+                        "Force resume reason",
+                        key=f"{key_prefix}_force_reason",
+                        placeholder="e.g. data validated offline, safe to resume",
+                    )
+                    if fr_col2.button(
+                        "⚠ Force Resume",
+                        key=f"{key_prefix}_force_btn",
+                        type="primary",
+                        disabled=not fr_reason.strip(),
+                        use_container_width=True,
+                    ):
+                        try:
+                            with _control_ctx() as _pc:
+                                _pc.force_resume(
+                                    pid,
+                                    client_id=cid,
+                                    actor=f"operator:{os.environ.get('USER','op')}",
+                                    reason=fr_reason.strip(),
+                                )
+                            st.success(
+                                f"Force-resumed `{pid}/{cid}`. "
+                                "Re-trigger the DAG to start a fresh run."
+                            )
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Force resume failed: {e}")
+                # RUNNING / RESUMING / COMPLETED → no buttons.
+                st.markdown("---")
+    except Exception as _pc_err:
+        st.warning(f"Pipeline control panel unavailable: {_pc_err}")
+
+    # ========================================================================
     # GX + AGENT STATUS
     # ========================================================================
     st.markdown("## 🛡️ Quality Gates  &  🤖 Agent Activity")
@@ -486,6 +699,11 @@ def main() -> None:
 
     with gx_col:
         st.markdown("**Last Great Expectations Checkpoint Results**")
+        # DATEADD(HOUR, -24, CURRENT_TIMESTAMP()) works on both DuckDB and
+        # Snowflake. The previous `CURRENT_TIMESTAMP - INTERVAL 24 HOUR`
+        # (unquoted-literal form) is DuckDB-only — Snowflake parses it as
+        # a syntax error and the query silently failed, surfacing the
+        # "No checkpoint runs yet" empty-state.
         gx_df = _control_query(
             """
             SELECT checkpoint_name,
@@ -494,7 +712,7 @@ def main() -> None:
                    ROUND(AVG(unexpected_pct),2)         AS avg_unexpected_pct,
                    MAX(ts)                             AS last_ts
             FROM CONTROL.gx_validation_results
-            WHERE ts >= CURRENT_TIMESTAMP - INTERVAL 24 HOUR
+            WHERE ts >= DATEADD(HOUR, -24, CURRENT_TIMESTAMP())
             GROUP BY checkpoint_name
             ORDER BY checkpoint_name
             """
@@ -507,7 +725,7 @@ def main() -> None:
         st.link_button("Open Great Expectations Data Docs ↗", USER_FACING["GX Data Docs"])
 
     with agent_col:
-        st.markdown("**Recent CrewAI Agent Invocations**")
+        st.markdown("**Recent AI Agent Invocations**")
         agent_df = _control_query(
             """
             SELECT agent_name, crew_name,
@@ -515,7 +733,7 @@ def main() -> None:
                    SUBSTR(output_preview, 1, 60) AS output_preview,
                    ts
             FROM CONTROL.agent_reasoning_log
-            WHERE ts >= CURRENT_TIMESTAMP - INTERVAL 24 HOUR
+            WHERE ts >= DATEADD(HOUR, -24, CURRENT_TIMESTAMP())
             ORDER BY ts DESC
             LIMIT 12
             """

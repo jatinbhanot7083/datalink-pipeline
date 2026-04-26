@@ -134,21 +134,28 @@ class DuckDBWarehouse:
         has_header: bool = True,
         delimiter: str = ",",
     ) -> int:
-        """Load a local CSV into target_table with 4 audit columns appended.
+        """Load a local CSV into target_table with 7 audit columns appended.
 
-        Phase 7 Day 4: adapter-dispatched Bronze ingest. DuckDB reads the
-        local file directly via ``read_csv_auto``; the Snowflake adapter
-        implements the same method using PUT + COPY INTO. Callers in
-        pipeline/bronze/ingest.py just invoke this method; the backend
-        choice is transparent.
+        Phase 9.1: extended from 4 → 7 audit columns. The 3 new columns
+        complete the Snowflake-native immutable-bronze contract:
+
+          _load_type         provided by caller via audit_values
+          _file_row_number   ROW_NUMBER() OVER () — DuckDB doesn't expose
+                             a true source-file position; this is a
+                             best-effort approximation. Snowflake adapter
+                             uses METADATA$FILE_ROW_NUMBER for ground truth.
+          _record_hash       MD5(CONCAT_WS('|', col1, col2, ..., colN))
+                             over the BUSINESS columns — excludes audit
+                             cols so the same payload always hashes the
+                             same regardless of when it was loaded.
 
         ``source_cols`` are the CSV columns in target-order (every target
-        column except the 4 trailing audit columns).
-        ``audit_values`` provides `source_file`, `batch_id`, `record_source`;
-        `_load_dt` is always CURRENT_TIMESTAMP.
+        column except the 7 trailing audit columns).
+        ``audit_values`` keys: ``source_file``, ``batch_id``,
+        ``record_source``, ``load_type`` (Phase 9.1).
+        ``_load_dt`` is always CURRENT_TIMESTAMP.
 
-        Returns the total row count of target_table AFTER load (caller
-        typically computes delta against a pre-load count).
+        Returns the total row count of target_table AFTER load.
         """
         from pathlib import Path as PathCls
 
@@ -158,12 +165,24 @@ class DuckDBWarehouse:
             "_source_file",
             "_batch_id",
             "_record_source",
+            "_load_type",
+            "_file_row_number",
+            "_record_hash",
         ]
         col_list = ", ".join(target_cols)
         src_list = ", ".join(source_cols)
+        # Hash expression — CAST every business col to VARCHAR so NULLs
+        # become 'NULL' strings (CONCAT_WS skips NULLs which would make
+        # row attrs collide with row missing). md5() is portable.
+        hash_concat = ", ".join(f"COALESCE(CAST({c} AS VARCHAR), '∅')" for c in source_cols)
         sql = (
             f"INSERT INTO {target_table} ({col_list}) "
-            f"SELECT {src_list}, CURRENT_TIMESTAMP, $source_file, $batch_id, $record_source "
+            f"SELECT "
+            f"  {src_list}, "
+            f"  CURRENT_TIMESTAMP, "
+            f"  $source_file, $batch_id, $record_source, $load_type, "
+            f"  ROW_NUMBER() OVER () AS _file_row_number, "
+            f"  md5(concat_ws('|', {hash_concat})) AS _record_hash "
             f"FROM read_csv_auto($csv_path, header = $header, delim = $delim)"
         )
         self.execute(
@@ -175,6 +194,10 @@ class DuckDBWarehouse:
                 "source_file": audit_values["source_file"],
                 "batch_id": audit_values["batch_id"],
                 "record_source": audit_values["record_source"],
+                # Phase 9.1: caller computes load_type before invoking.
+                # Default to 'UNKNOWN' so the column never holds NULL even
+                # when an older caller hasn't been updated yet.
+                "load_type": audit_values.get("load_type", "UNKNOWN"),
             },
         )
         return self.row_count(target_table)

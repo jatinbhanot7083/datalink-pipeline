@@ -283,6 +283,40 @@ else:
     )
     st.dataframe(live_df, use_container_width=True, hide_index=True)
 
+    # Direct archive of a LIVE suite — for retiring rules without
+    # replacing them via clone-edit-activate. Two-click confirm so
+    # nobody nukes a critical baseline by accident.
+    arc1, arc2 = st.columns([1, 4])
+    with arc1:
+        confirm_arc = st.toggle(
+            "🗄️ Archive LIVE",
+            value=False,
+            key=f"arc_toggle_{live.suite_id}",
+            help="Two-click confirm: ON enables the Archive button. "
+            "Archiving a LIVE suite stops it from gating future "
+            "checkpoint runs. Audit row preserved.",
+        )
+    with arc2:
+        if confirm_arc and st.button(
+            f"Archive v{live.version} now",
+            key=f"arc_btn_{live.suite_id}",
+            type="secondary",
+        ):
+            try:
+                with _registry(readonly=False) as reg:
+                    reg.archive(
+                        live.suite_id,
+                        actor=st.session_state.get("user", "anonymous@local"),
+                        reason="manually archived from DQ Author (LIVE → ARCHIVED)",
+                    )
+                st.success(
+                    f"Archived `{live.suite_name}` v{live.version}. "
+                    f"This suite no longer gates pipeline runs."
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(f"Archive failed: {e}")
+
 
 st.markdown("## Edit DRAFT")
 
@@ -386,7 +420,7 @@ else:
             key=f"actor_{active.suite_id}",
         )
 
-        btn_save, btn_submit, _ = st.columns([1, 1, 3])
+        btn_save, btn_submit, btn_archive, _ = st.columns([1, 1, 1, 2])
         with btn_save:
             if st.button("💾 Save Draft", use_container_width=True, type="secondary"):
                 try:
@@ -427,6 +461,27 @@ else:
                     st.rerun()
                 except Exception as e:
                     st.error(f"Submit failed: {e}")
+        with btn_archive:
+            # Soft-delete the DRAFT — it stays in the audit table but is
+            # filtered out of every checkpoint query and the active-draft
+            # session pointer.
+            if st.button(
+                "🗄️ Archive",
+                use_container_width=True,
+                help="Soft-delete this DRAFT — moves it to ARCHIVED. Audit row preserved.",
+            ):
+                try:
+                    with _registry(readonly=False) as reg:
+                        reg.archive(
+                            active.suite_id,
+                            actor=actor,
+                            reason="archived from DQ Author",
+                        )
+                    st.success(f"Archived draft `{active.suite_id[:8]}`.")
+                    st.session_state.pop("active_draft_id", None)
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Archive failed: {e}")
 
 
 # ----------------------------------------------------------------------------

@@ -49,6 +49,9 @@ RUN pip install --no-cache-dir \
     "pandas>=2.2,<3.0" \
     "dbt-core>=1.8,<1.9" \
     "dbt-duckdb>=1.8,<1.9" \
+    "dbt-snowflake>=1.8,<1.9" \
+    "snowflake-connector-python>=3.11,<4.0" \
+    "voyageai>=0.3,<1.0" \
     "great-expectations>=1.0,<2.0" \
     "structlog>=24.1,<25.0" \
     "pydantic>=2.7,<3.0" \

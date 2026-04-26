@@ -22,7 +22,6 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
 
 from datalink.adapters.factory import AdapterSet
 from datalink.adapters.protocols import Warehouse
@@ -67,19 +66,91 @@ class BronzeIngestResult:
     object_store_key: str  # e.g., raw/claims/2026-04-19/claims_20260419.csv
 
 
-def _audit_columns_sql() -> str:
-    """Expression list added to source during load — builds the 4 audit cols.
+def _audit_columns_sql(business_cols: list[str] | None = None) -> str:
+    """Expression list added to source during load — builds the 7 audit cols.
 
-    Uses DuckDB-style named params ($name). Snowflake supports the same
-    syntax in prepared statements. Placeholders bind to the dict keys in
-    the params passed to warehouse.execute().
+    Phase 9.1: extended from 4 to 7 audit columns. Order MUST match the
+    Bronze DDL trailing-column order:
+      _load_dt / _source_file / _batch_id / _record_source / _load_type /
+      _file_row_number / _record_hash
+
+    Uses DuckDB-style named params ($name); Snowflake adapter rewrites to
+    pyformat at execute time. The `_record_hash` expression needs the
+    business column list to compose its CONCAT_WS argument set; pass via
+    ``business_cols`` parameter.
+
+    This helper is the FALLBACK path (used when the warehouse adapter
+    doesn't have its own ``load_csv_with_audit``). Production uses the
+    per-adapter implementation in DuckDB / Snowflake adapters above.
     """
+    business_cols = business_cols or []
+    if business_cols:
+        hash_concat = ", ".join(f"COALESCE(CAST({c} AS VARCHAR), '∅')" for c in business_cols)
+        hash_expr = f"md5(concat_ws('|', {hash_concat}))"
+    else:
+        hash_expr = "NULL"
     return (
         "CURRENT_TIMESTAMP AS _load_dt, "
         "$source_file AS _source_file, "
         "$batch_id AS _batch_id, "
-        "$record_source AS _record_source"
+        "$record_source AS _record_source, "
+        "$load_type AS _load_type, "
+        "ROW_NUMBER() OVER () AS _file_row_number, "
+        f"{hash_expr} AS _record_hash"
     )
+
+
+def _detect_load_type(
+    remote_path: str,
+    rows_in_source: int | None = None,
+    rows_in_last_batch: int | None = None,
+) -> str:
+    """Decide whether this batch is FULL or INCREMENTAL.
+
+    Phase 9.1: vendors are inconsistent — some name files
+    ``membership_full_2026-04-26.csv``, others ``membership_inc_…``,
+    others have no convention. Layered detection:
+
+      1. Filename pattern (case-insensitive): ``_full_`` / ``-full-`` /
+         ``.full.``  →  'FULL'.  ``_inc_`` / ``incremental``  →
+         'INCREMENTAL'.
+      2. Row-count heuristic: if the incoming batch is ≥ 5x the previous
+         batch for the same source_type, it's almost certainly a fresh
+         full file even if the filename doesn't say so.
+      3. Default to ``UNKNOWN`` so the operator can investigate, rather
+         than silently mis-classify.
+
+    The decision is recorded on every row of the batch via the
+    ``_LOAD_TYPE`` audit column — Silver SCD2 logic later branches on
+    FULL (compute soft-deletes) vs INCREMENTAL (no soft-delete logic;
+    missing rows are not-yet-arrived, not deleted).
+    """
+    name = (remote_path or "").lower()
+    full_markers = ("_full_", "-full-", ".full.", "_full.", "/full/")
+    inc_markers = (
+        "_inc_",
+        "-inc-",
+        ".inc.",
+        "_inc.",
+        "/inc/",
+        "_incremental_",
+        "-incremental-",
+        ".incremental.",
+        "_delta_",
+        "-delta-",
+    )
+    if any(marker in name for marker in full_markers):
+        return "FULL"
+    if any(marker in name for marker in inc_markers):
+        return "INCREMENTAL"
+    if (
+        rows_in_source is not None
+        and rows_in_last_batch is not None
+        and rows_in_last_batch > 0
+        and rows_in_source >= 5 * rows_in_last_batch
+    ):
+        return "FULL"
+    return "UNKNOWN"
 
 
 def _load_to_staging(
@@ -91,14 +162,20 @@ def _load_to_staging(
     batch_id: str,
     record_source: str,
     fmt: SourceFormatConfig,
+    load_type: str = "UNKNOWN",
 ) -> int:
-    """Load a CSV file into a staging table with the 4 audit columns appended.
+    """Load a CSV into a staging table with the 7 audit columns appended.
 
-    Phase 7 Day 4: backend-agnostic via ``warehouse.load_csv_with_audit``.
-    DuckDB reads the local file directly; Snowflake PUTs then COPY INTOs.
-    The staging table is a TEMP clone of the target (full column list
-    including audit cols) — MERGE downstream uses the same table layout
-    so no schema divergence between backends.
+    Phase 9.1: extended from 4 → 7 audit columns. Audit contract:
+
+        [..business cols.., _load_dt, _source_file, _batch_id,
+         _record_source, _load_type, _file_row_number, _record_hash]
+
+    Backend-agnostic via ``warehouse.load_csv_with_audit``: DuckDB reads
+    the local file via ``read_csv_auto``; Snowflake PUT + COPY INTO with
+    ``METADATA$FILE_ROW_NUMBER`` for ground-truth row positions. The
+    staging table is a TEMP clone of the target — INSERT-into-target on
+    the way out keeps schemas in lockstep.
     """
     # Clone target schema into staging — empty, no rows.
     warehouse.execute(
@@ -106,18 +183,35 @@ def _load_to_staging(
     )
 
     target_cols = _get_columns(warehouse, target_table)
-    if len(target_cols) < 4:
+    if len(target_cols) < 7:
         raise RuntimeError(
-            f"Target {target_table} has fewer than 4 columns; expected 4 audit cols at end"
+            f"Target {target_table} has fewer than 7 columns; expected 7 audit cols at end. "
+            f"Did you forget to run scripts/migrate_bronze_audit_cols.py?"
         )
-    source_col_names = list(target_cols[:-4])  # all but last 4 (audit)
-    audit_col_names = target_cols[-4:]
-    if audit_col_names != ["_load_dt", "_source_file", "_batch_id", "_record_source"]:
+    source_col_names = list(target_cols[:-7])  # all but last 7 (audit)
+    audit_col_names = target_cols[-7:]
+    # Compare case-insensitively: DuckDB preserves DDL casing,
+    # Snowflake folds unquoted identifiers to upper. Either form matches
+    # the contract; what matters is order + lowercase equality.
+    expected_audit = [
+        "_load_dt",
+        "_source_file",
+        "_batch_id",
+        "_record_source",
+        "_load_type",
+        "_file_row_number",
+        "_record_hash",
+    ]
+    if [c.lower() for c in audit_col_names] != expected_audit:
         raise RuntimeError(
-            f"Target {target_table} audit columns in wrong order or missing: got {audit_col_names!r}"
+            f"Target {target_table} audit columns in wrong order or missing: "
+            f"got {audit_col_names!r}, expected {expected_audit!r}"
         )
 
-    # Prefer the adapter's native implementation if present.
+    # Prefer the adapter's native implementation if present (DuckDB +
+    # Snowflake both ship one). Audit-values dict carries the 4 caller-
+    # provided fields; the loader generates _load_dt, _file_row_number,
+    # and _record_hash internally per-backend.
     loader = getattr(warehouse, "load_csv_with_audit", None)
     if callable(loader):
         before = _row_count(warehouse, staging_table)
@@ -129,6 +223,7 @@ def _load_to_staging(
                 "source_file": source_file,
                 "batch_id": batch_id,
                 "record_source": record_source,
+                "load_type": load_type,
             },
             has_header=fmt.has_header,
             delimiter=fmt.delimiter,
@@ -142,7 +237,7 @@ def _load_to_staging(
     col_list_source = ", ".join(source_col_names)
     sql = (
         f"INSERT INTO {staging_table} ({col_list_full}) "
-        f"SELECT {col_list_source}, {_audit_columns_sql()} "
+        f"SELECT {col_list_source}, {_audit_columns_sql(source_col_names)} "
         f"FROM read_csv_auto($csv_path, header = $header, delim = $delim)"
     )
     warehouse.execute(
@@ -154,6 +249,7 @@ def _load_to_staging(
             "source_file": source_file,
             "batch_id": batch_id,
             "record_source": record_source,
+            "load_type": load_type,
         },
     )
     count_sql = f"SELECT COUNT(*) AS c FROM {staging_table}"
@@ -162,21 +258,10 @@ def _load_to_staging(
 
 
 def _get_columns(warehouse: Warehouse, qualified_table: str) -> list[str]:
-    """Return ordered column names of a table. Works on DuckDB (DESCRIBE)
-    and Snowflake (INFORMATION_SCHEMA.COLUMNS)."""
-    # DuckDB returns 'column_name' in the DESCRIBE result.
-    try:
-        rows = warehouse.query(f"DESCRIBE {qualified_table}")
-        return [cast(str, r["column_name"]) for r in rows]
-    except Exception:
-        # Snowflake path
-        schema, name = qualified_table.split(".", 1)
-        rows = warehouse.query(
-            "SELECT column_name FROM information_schema.columns "
-            "WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position",
-            {"1": schema.upper(), "2": name.upper()},
-        )
-        return [cast(str, r["COLUMN_NAME"]) for r in rows]
+    """Return ordered column names of a table. Backend-agnostic."""
+    from datalink.adapters._describe import list_columns
+
+    return list_columns(warehouse, qualified_table)
 
 
 def ingest_file(
@@ -270,6 +355,39 @@ def ingest_file(
         # audit column untouched, so the audit-trail link is preserved.
         safe_batch = _sanitize_identifier(batch_id)
         staging_table = f"_stg_{source_type.lower()}_{safe_batch}"
+        # Phase 9.1: detect FULL vs INCREMENTAL by filename + row-count
+        # heuristic. Recorded on every row in the batch via the
+        # _LOAD_TYPE audit column. Silver SCD2 logic later branches on
+        # this (FULL → compute soft-deletes, INCREMENTAL → no soft-del).
+        # rows_in_last_batch lookup is best-effort — falls back to
+        # filename-only detection if the warehouse query fails.
+        rows_in_last_batch: int | None = None
+        try:
+            last_rows = adapters.warehouse.query(
+                f"SELECT COUNT(*) AS c FROM {target} "
+                f"WHERE _batch_id = (SELECT MAX(_batch_id) FROM {target} "
+                f"                   WHERE _batch_id <> $bid AND _source_file LIKE $pattern)",
+                {"bid": batch_id, "pattern": f"%{source_type.lower()}%"},
+            )
+            rows_in_last_batch = (
+                int(last_rows[0]["c"]) if last_rows and last_rows[0].get("c") else None
+            )
+        except Exception:
+            rows_in_last_batch = None
+
+        load_type = _detect_load_type(
+            remote_path=remote_path,
+            rows_in_source=None,  # known after the load; filename usually decides
+            rows_in_last_batch=rows_in_last_batch,
+        )
+        _log.info(
+            "bronze_ingest.load_type",
+            source_type=source_type,
+            load_type=load_type,
+            remote_path=remote_path,
+            rows_in_last_batch=rows_in_last_batch,
+        )
+
         rows_in_source = _load_to_staging(
             adapters.warehouse,
             local_staged,
@@ -279,10 +397,42 @@ def ingest_file(
             batch_id=batch_id,
             record_source=record_source,
             fmt=fmt_cfg,
+            load_type=load_type,
         )
 
-        # 5. MERGE staging → target on natural key. Idempotent.
-        adapters.warehouse.merge(target, staging_table, table.key_columns)
+        # Re-run detection now that we know the actual row count, ONLY
+        # if the filename-based decision was UNKNOWN. The row-count
+        # heuristic kicks in here. We then UPDATE the staging rows so the
+        # final INSERT INTO target carries the corrected _LOAD_TYPE.
+        if load_type == "UNKNOWN" and rows_in_last_batch:
+            corrected = _detect_load_type(
+                remote_path=remote_path,
+                rows_in_source=rows_in_source,
+                rows_in_last_batch=rows_in_last_batch,
+            )
+            if corrected != "UNKNOWN":
+                adapters.warehouse.execute(
+                    f"UPDATE {staging_table} SET _load_type = $lt", {"lt": corrected}
+                )
+                _log.info(
+                    "bronze_ingest.load_type_corrected",
+                    from_=load_type,
+                    to=corrected,
+                    rows_in_source=rows_in_source,
+                )
+                load_type = corrected
+
+        # 5. APPEND staging → target. Bronze is an immutable, append-only
+        # ledger (Snowflake-native pattern). Every batch — full or
+        # incremental — lands as new physical rows tagged with audit
+        # columns (_load_dt, _batch_id, _source_file, _record_source) so
+        # downstream Silver can replay/dedup at will. The previous code
+        # MERGE'd on natural key, which destroyed raw-history attributes
+        # on every re-arrival of the same key. Bronze ≠ system of record
+        # for current state; Bronze IS the audit trail of what arrived.
+        # Silver Hub dedups via QUALIFY ROW_NUMBER OVER(PARTITION BY
+        # natural_key ORDER BY _load_dt DESC) = 1.
+        adapters.warehouse.execute(f"INSERT INTO {target} SELECT * FROM {staging_table}")
 
     rows_after = _row_count(adapters.warehouse, target)
     result = BronzeIngestResult(

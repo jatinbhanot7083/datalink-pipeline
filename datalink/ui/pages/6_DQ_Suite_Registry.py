@@ -21,7 +21,7 @@ What this page intentionally excludes
 -------------------------------------
 * Actual data values → use the Warehouse Explorer
 * Pass/fail statistics per suite → see the DQ Dashboard
-* Agent reasoning logs → see the CrewAI Dashboard
+* Agent reasoning logs → see the AI Agents dashboard
 """
 
 from __future__ import annotations
@@ -318,6 +318,46 @@ for (client, source), group in grouped:
                 f"</div>",
                 unsafe_allow_html=True,
             )
+
+            # Archive action — only on non-terminal statuses. Two-click
+            # confirm pattern (toggle + button) so a stray click on a LIVE
+            # baseline can't take a check offline by accident.
+            if status not in ("ARCHIVED", "REJECTED"):
+                arc_id = row["suite_id"]
+                arc_c1, arc_c2 = st.columns([1, 5])
+                with arc_c1:
+                    arc_on = st.toggle(
+                        "🗄️ Archive",
+                        value=False,
+                        key=f"reg_arc_toggle_{arc_id}",
+                        help="Two-click confirm: enable, then click the button.",
+                    )
+                with arc_c2:
+                    if arc_on and st.button(
+                        f"Confirm: archive '{row['suite_name']}' v{row['version']}",
+                        type="secondary",
+                        key=f"reg_arc_btn_{arc_id}",
+                    ):
+                        try:
+                            from datalink.quality.registry import SuiteRegistry
+                            from datalink.ui._query import warehouse_ctx
+
+                            with warehouse_ctx(readonly=False) as wh_w:
+                                SuiteRegistry(wh_w).archive(  # type: ignore[arg-type]
+                                    arc_id,
+                                    actor=f"registry:{os.environ.get('USER', 'operator')}",
+                                    reason="archived from DQ Suite Registry",
+                                )
+                            st.success(
+                                f"Archived `{row['suite_name']}` v{row['version']}. "
+                                "Audit row preserved; suite no longer gates pipeline runs."
+                            )
+                            from datalink.ui._query import clear_query_cache
+
+                            clear_query_cache()
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Archive failed: {e}")
 
             # Expectation drill-down — inline, not collapsed, because that's the
             # whole point of this page.

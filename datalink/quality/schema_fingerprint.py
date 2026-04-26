@@ -41,27 +41,21 @@ class _WarehouseQuery(Protocol):
 def compute_fingerprint(warehouse: _WarehouseQuery, qualified_table: str) -> str:
     """Return a 16-char hex fingerprint of the table's column layout.
 
-    Raises RuntimeError if DESCRIBE produces no columns — that indicates
+    Raises RuntimeError if the table has no columns — that indicates
     either a missing table OR a warehouse adapter bug. Silently returning
     "empty" here would risk cache poisoning (one run gets empty hash,
     next run sees new columns, drift wrongly flagged).
     """
-    rows = warehouse.query(f"DESCRIBE {qualified_table}")
-    if not rows:
+    # Routes through datalink.adapters._describe so this works on both
+    # DuckDB (DESCRIBE) and Snowflake (INFORMATION_SCHEMA fallback).
+    from datalink.adapters._describe import list_columns_typed
+
+    col_pairs = sorted(list_columns_typed(warehouse, qualified_table))
+    if not col_pairs:
         raise RuntimeError(
-            f"DESCRIBE {qualified_table} returned zero columns — "
+            f"{qualified_table} returned zero columns — "
             f"cannot fingerprint a missing / unreadable table."
         )
-    # Normalise column name casing (DuckDB sometimes returns mixed case).
-    # Column type kept verbatim — type drift (VARCHAR -> INTEGER) is
-    # exactly what we want the fingerprint to catch.
-    col_pairs = sorted(
-        (
-            str(r.get("column_name") or r.get("name") or "").lower(),
-            str(r.get("column_type") or r.get("type") or ""),
-        )
-        for r in rows
-    )
     raw = "|".join(f"{name}:{dtype}" for name, dtype in col_pairs).encode()
     return hashlib.sha256(raw).hexdigest()[:16]
 
@@ -74,11 +68,6 @@ def columns_from_fingerprint_debug(
     Useful for log messages when drift is detected — operators want to
     see exactly WHICH columns changed. Not used by the caching hot-path.
     """
-    rows = warehouse.query(f"DESCRIBE {qualified_table}")
-    return sorted(
-        (
-            str(r.get("column_name") or r.get("name") or "").lower(),
-            str(r.get("column_type") or r.get("type") or ""),
-        )
-        for r in rows
-    )
+    from datalink.adapters._describe import list_columns_typed
+
+    return sorted(list_columns_typed(warehouse, qualified_table))

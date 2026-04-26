@@ -57,7 +57,11 @@ RUN pip install \
     "structlog>=24.1,<25.0" \
     "click>=8.1,<9.0" \
     "python-dotenv>=1.0,<2.0" \
-    "hatchling>=1.24,<2.0"
+    "hatchling>=1.24,<2.0" \
+    "editables>=0.5,<1.0" \
+    "snowflake-connector-python>=3.11,<4.0" \
+    "anthropic>=0.40,<1.0" \
+    "voyageai>=0.3,<1.0"
 
 WORKDIR /opt/datalink
 

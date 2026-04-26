@@ -48,13 +48,18 @@ prod-adapters = [
     "dbt-postgres>=1.8,<1.9",
 ]
 
-# Phase 5: GX + CrewAI plug-in layer
+# Phase 5/8: GX + AI agent plug-in layer.
+# NOTE: the agent layer is implemented natively (datalink.agents.AgentBase /
+# CrewBase) — the third-party `crewai` package was a declared-but-unused
+# dependency through Phase 7 and was removed in Phase 8 to slim the image.
+# Add `crewai>=0.80,<1.0` back here only if you migrate AgentBase to the
+# real CrewAI runtime.
 quality = [
     "great-expectations>=1.0,<2.0",
 ]
 agents = [
-    "crewai>=0.80,<1.0",
     "anthropic>=0.40,<1.0",
+    "voyageai>=0.3,<1.0",
 ]
 
 # Large-batch processing (Pandas → PySpark threshold)
@@ -161,7 +166,7 @@ exclude = ["dbt/", "gx/uncommitted/", "build/", "dist/"]
 
 [[tool.mypy.overrides]]
 module = [
-    "crewai.*", "paramiko.*", "pyodbc.*", "psycopg.*", "snowflake.*", "dbt.*",
+    "paramiko.*", "pyodbc.*", "psycopg.*", "snowflake.*", "dbt.*", "voyageai.*",
     "pandas.*", "pandas",
     "great_expectations.*",
     "airflow.*", "airflow",

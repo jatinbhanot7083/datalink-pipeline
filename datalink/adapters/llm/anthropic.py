@@ -2,7 +2,7 @@
 
 Phase 5/6. Reads ANTHROPIC_API_KEY from env. Honours model + max_tokens from
 LlmConfig. Returns real `input_tokens` + `output_tokens` in the
-`LlmCompletion` so the agent_reasoning_log and CrewAI Dashboard show
+`LlmCompletion` so the agent_reasoning_log and AI Agents dashboard show
 actual token spend + cost estimates.
 
 Contract (per datalink.adapters.protocols.LlmProvider):
@@ -14,7 +14,7 @@ Contract (per datalink.adapters.protocols.LlmProvider):
 Error handling:
   * Auth / rate-limit / invalid-request errors raise LlmProviderError
     with the wrapped anthropic exception. The agent framework records the
-    failure in agent_reasoning_log so the CrewAI Dashboard surfaces it.
+    failure in agent_reasoning_log so the AI Agents dashboard surfaces it.
 """
 
 from __future__ import annotations

@@ -134,9 +134,17 @@ class SnowflakeWarehouse:
                 "role": self._cfg.role or os.environ.get("SNOWFLAKE_ROLE"),
                 "warehouse": self._cfg.warehouse or os.environ.get("SNOWFLAKE_WAREHOUSE"),
                 "database": self._cfg.database or os.environ.get("SNOWFLAKE_DATABASE"),
+                # Default schema — Snowflake refuses unqualified DDL (e.g.
+                # CREATE TEMPORARY TABLE) when the session has no current
+                # schema. PUBLIC is auto-created by every Snowflake DB so
+                # it's the safe default; override via SNOWFLAKE_SCHEMA.
+                "schema": os.environ.get("SNOWFLAKE_SCHEMA", "PUBLIC"),
             }
 
-            missing = [k for k, v in resolved.items() if not v]
+            # schema isn't required from config — it has a sane default. Only
+            # fail on the 6 credential-tier fields.
+            required = ("account", "user", "password", "role", "warehouse", "database")
+            missing = [k for k in required if not resolved.get(k)]
             if missing:
                 raise RuntimeError(
                     f"SnowflakeWarehouse: missing required credential(s): "
@@ -152,6 +160,7 @@ class SnowflakeWarehouse:
                 role=resolved["role"],
                 warehouse=resolved["warehouse"],
                 database=resolved["database"],
+                schema=resolved["schema"],
             )
             self._conn = snowflake.connector.connect(
                 account=resolved["account"],
@@ -160,6 +169,7 @@ class SnowflakeWarehouse:
                 role=resolved["role"],
                 warehouse=resolved["warehouse"],
                 database=resolved["database"],
+                schema=resolved["schema"],
                 # Safety timeouts — fail fast rather than hang for minutes.
                 login_timeout=20,
                 network_timeout=60,
@@ -311,16 +321,28 @@ class SnowflakeWarehouse:
         has_header: bool = True,
         delimiter: str = ",",
     ) -> int:
-        """Load a local CSV into target_table, appending 4 audit cols.
+        """Load a local CSV into target_table, appending 7 audit cols.
 
         Two-step on Snowflake:
           1. PUT the local file to the target's table-level internal stage
              (``@%TABLE_NAME``). Uses AUTO_COMPRESS so the driver gzips on
              the fly and transmits over HTTPS.
           2. COPY INTO target(all_cols) FROM a SELECT over @stage that
-             supplies $1..$N from the CSV plus literals for audit cols.
+             supplies $1..$N from the CSV plus literals + Snowflake-native
+             metadata expressions for audit cols.
 
-        After COPY, the stage is purged so re-runs don't accumulate files.
+        Phase 9.1: extended from 4 → 7 audit columns. The 3 new columns
+        complete the Snowflake-native immutable-bronze contract:
+
+          _load_type         literal from audit_values['load_type']
+          _file_row_number   METADATA$FILE_ROW_NUMBER — Snowflake's
+                             native source-row position (ground truth)
+          _record_hash       MD5(CONCAT_WS('|', col1, ..., colN)) over
+                             BUSINESS columns. Audit-cols excluded so the
+                             same row always hashes the same regardless
+                             of when/how it was loaded.
+
+        After COPY the stage is purged so re-runs don't accumulate files.
         Returns the row count of target_table AFTER load.
         """
         from pathlib import Path as PathCls
@@ -333,6 +355,9 @@ class SnowflakeWarehouse:
             "_source_file",
             "_batch_id",
             "_record_source",
+            "_load_type",
+            "_file_row_number",
+            "_record_hash",
         ]
         col_list = ", ".join(target_cols)
         select_src = ", ".join(f"${i + 1}" for i in range(n_src))
@@ -344,17 +369,29 @@ class SnowflakeWarehouse:
         source_file = _q(str(audit_values["source_file"]))
         batch_id = _q(str(audit_values["batch_id"]))
         record_source = _q(str(audit_values["record_source"]))
+        load_type = _q(str(audit_values.get("load_type", "UNKNOWN")))
+
+        # Hash over the business columns ($1..$N as VARCHARs joined with
+        # '|'). NVL with a sentinel so NULL columns don't get silently
+        # dropped by CONCAT_WS — a row of (a, NULL) must hash differently
+        # from (a, '').
+        hash_args = ", ".join(f"NVL(${i + 1}::VARCHAR, '∅')" for i in range(n_src))
+        record_hash_expr = f"MD5(CONCAT_WS('|', {hash_args}))"
 
         stage_ref = f"@%{target_table.split('.')[-1]}"  # table-level stage
         # Snowflake needs forward slashes in file:// URIs regardless of OS.
         posix_path = str(local_path).replace("\\", "/")
         # PUT uploads the local file to the table stage.
         self.execute(f"PUT 'file://{posix_path}' {stage_ref} AUTO_COMPRESS = TRUE OVERWRITE = TRUE")
-        # COPY INTO with inline transform for audit cols.
+        # COPY INTO with inline transform for audit cols. Audit-col order
+        # MUST match target_cols above (the COPY's column list).
         copy_sql = (
             f"COPY INTO {target_table} ({col_list}) "
             f"FROM (SELECT {select_src}, "
-            f"CURRENT_TIMESTAMP(), '{source_file}', '{batch_id}', '{record_source}' "
+            f"CURRENT_TIMESTAMP(), "
+            f"'{source_file}', '{batch_id}', '{record_source}', '{load_type}', "
+            f"METADATA$FILE_ROW_NUMBER, "
+            f"{record_hash_expr} "
             f"FROM {stage_ref}/{local_path.name}) "
             f"FILE_FORMAT = (TYPE = 'CSV' "
             f"FIELD_DELIMITER = '{delimiter}' "
