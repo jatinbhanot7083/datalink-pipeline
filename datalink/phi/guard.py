@@ -73,6 +73,15 @@ SAFE_FIELDS: frozenset[str] = frozenset(
         "classification",  # DATA_QUALITY | CONFIG_ERROR | SCHEMA_CHANGE | VOLUME_ANOMALY
         "recommendation",  # PROCEED | FIX_AND_RESUME | PARTIAL_LOAD | ABORT_AND_INVESTIGATE
         "review_queue",  # list of flagged expectations (no row data)
+        # --- Phase 14 Data Contract Architect extensions (all PHI-safe metadata) ---
+        "client_id",  # tenant identifier (e.g. "aetna") — not patient data
+        "source_type",  # CLAIMS | MEMBERSHIP | PROVIDER (entity domain)
+        "mode",  # FILE_DRIVEN | CONTRACT_FIRST (operational flag)
+        "anchored_standards",  # list of standard codes (fhir-r4, x12, ...)
+        "temperature",  # float — sampling temperature for the LLM
+        "strictness",  # float — how aggressively to flag standard deviations
+        "grounding_chunk_count",  # int — # of RAG chunks injected
+        "grounding_k",  # int — top-k retrieval parameter
     }
 )
 
