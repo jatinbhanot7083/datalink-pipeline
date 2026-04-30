@@ -370,6 +370,105 @@ from session-end summary).
 
 ---
 
+## Phase 14 — Data Contract Architect (DELIVERED 2026-04-30)
+
+**The marquee Phase 14 deliverable.** Lets operators design Bronze table
+contracts BEFORE files arrive, with an AI agent grounded against
+industry-standard healthcare references (FHIR R4, X12 EDI, NCPDP D.0,
+CMS dictionaries, Data Vault 2.0, NCQA HEDIS) plus operator-uploaded
+custom standards.
+
+### What it does
+
+Two operator entry modes share the same RAG-grounded core:
+
+- **Mode A (FILE_DRIVEN)** — vendor sends a sample file. AI profiles
+  the headers + samples, retrieves top-k standard chunks, proposes a
+  Bronze DDL with column-by-column reasoning. Vendor abbreviations like
+  `MbrNo`, `SvcDt`, `BilledAmt` get RENAMEd to canonical `member_id`,
+  `service_date`, `billed_amount` with citations to specific X12 segment
+  / FHIR field definitions.
+
+- **Mode B (CONTRACT_FIRST)** — no file yet. Operator describes the
+  source in natural language ("Aetna will send us a daily 834 enrollment
+  feed..."). AI proposes a complete contract from scratch — including
+  fields the operator didn't mention but the standard requires/permits
+  (`maintenance_type_code`, `marital_status`, `pcp_npi`, etc.).
+
+### Architecture (5 layers)
+
+| Layer | Component |
+|---|---|
+| Reference corpus | 6 industry standards in markdown under `corpora/<code>/`, chunked + embedded into `agent_memory.standard_references` (pgvector, voyage-3.5-lite, 1024-dim, 88 chunks total) |
+| Standards registry | `CONTROL.standard_registry` — display name + version + chunk count per registered standard (industry + operator-uploaded custom) |
+| Custom uploads | `CONTROL.custom_standards_registry` (table) + a `Custom Standard Upload` flow for operators to add their own org-specific spec docs |
+| Agent | `datalink.agents.contract_architect.ContractArchitectAgent` — Claude haiku-4.5, temperature/strictness/grounding_k controls, JSON contract enforced |
+| UI | `datalink/ui/pages/12_Data_Contract_Architect.py` — file uploader / NL textarea, anchored standards multi-select, AI controls expander, proposal card with editable column grid, side-by-side deviation log, Approval flow producing 5 artifacts |
+
+### 5 artifacts emitted on Approve
+
+| # | Artifact | Location |
+|---|---|---|
+| 1 | Bronze DDL committed file | `datalink/pipeline/bronze/ddl/<client>_<source>_<table>.sql` |
+| 2 | Schema contract row | `CONTROL.source_schema_contracts` (drift detection now active) |
+| 3 | GX expectation suite | `CONTROL.dq_suites` PENDING_REVIEW with auto-derived NPI/ICD-10/CPT regex + NOT NULL on PKs |
+| 4 | dbt Silver model stub | `dbt/models/silver/<client>/silver_<table>.sql` (Smart Mapper extends from here) |
+| 5 | Vendor Data Contract Spec | `docs/specs/<client>_<source>_v1.md` + `.html` (operator opens in browser, prints to PDF, hands to vendor) |
+
+### Verifier — `scripts/runbook_verify_phase14.py`
+
+24/24 assertions PASS across 6 sections:
+1. CONTROL DDL exists + has all required columns
+2. 6 industry standards registered with chunks
+3. RAG retrieval returns relevant hits with monotonic distances within anchor scope
+4. Agent JSON contract validation (good accepted, bad rejected, fences stripped)
+5. Audit-column injection (7 cols, idempotent)
+6. Full approval flow with real LLM produces all 5 artifacts + Snowflake rows + audit log
+
+### Production safety
+
+| Production-portable code | Touched? |
+|---|---|
+| `datalink/agents/contract_architect/*` | ✅ Yes — ships to production. Agent + bridge are pure Python, work against any warehouse + any LLM via existing protocol. |
+| Phase 14 CONTROL DDL (4 new tables) | ✅ Yes — created idempotently by `create_control_tables()`. Ships. |
+| `agent_memory.standard_references` | ✅ Yes — pgvector table created by `AgentMemoryStore.ensure_schema()`. Ships. |
+| `corpora/*` markdown reference docs | ✅ Yes — committed to repo, loaded at deploy time by `scripts/load_industry_standards.py`. |
+| UI page | ✅ Yes — Streamlit page like every other in `datalink/ui/pages/`. |
+| Custom standard uploads | ✅ Yes — `agent_memory.standard_references` is the same table for industry + custom; operator uploads land at runtime. |
+
+**Net production effect**: ships cleanly on any Linux deployment that
+already has Postgres+pgvector and Snowflake. Same configuration as
+the rest of the stack.
+
+### Demo storyline integration
+
+When demoing on operator day:
+
+1. Open `/Data_Contract_Architect`. Pick `aetna` / `CLAIMS`. Anchor on
+   `fhir-r4` + `x12`.
+2. Drag-drop a sample claims CSV (use the included `data/generated/aetna_claims.csv`).
+3. Show AI proposal: column-by-column with deviation pills, citation hover.
+4. Edit one column inline (rename or add a column).
+5. Approve as AUTO_APPROVE — show all 5 artifacts emitted.
+6. Switch to Mode B → describe a 270/271 eligibility feed → show how the
+   agent adds standard-mandated fields the operator didn't list.
+
+This is the WOW moment of the demo. The audience sees:
+- Real industry standards driving AI proposals (not a model hallucinating)
+- Citation-by-citation traceability
+- Vendor spec PDF the client team gets back
+
+### Pre-warm before demo
+
+```bash
+docker exec datalink-control-tower python3 scripts/load_industry_standards.py
+docker exec datalink-control-tower python3 scripts/runbook_verify_phase14.py
+```
+
+If both come back green, you're demo-ready.
+
+---
+
 ## Phase 12.5 — Pipeline Control granularity (DELIVERED 2026-04-27)
 
 ### What changed
