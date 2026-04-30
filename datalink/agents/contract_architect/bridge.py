@@ -376,6 +376,24 @@ def approve_design(
     _chown_to_host_user(spec_path)
     artifact_paths["vendor_spec_md"] = str(spec_path.relative_to(repo_root))
 
+    # Phase 14.7 — also emit a print-ready HTML rendering of the markdown.
+    # The operator opens it in a browser, hits Cmd/Ctrl+P, and saves as
+    # PDF. This avoids the WeasyPrint / wkhtmltopdf native dependency
+    # hell while producing a high-quality deliverable.
+    html_path = spec_path.with_suffix(".html")
+    html_path.write_text(
+        _render_vendor_spec_html(
+            md_text=spec_md,
+            client_id=client_id,
+            source_type=source_type,
+            design_id=design_id,
+            contract_id=contract_id,
+        ),
+        encoding="utf-8",
+    )
+    _chown_to_host_user(html_path)
+    artifact_paths["vendor_spec_html"] = str(html_path.relative_to(repo_root))
+
     # --- Update the contract_designs row with artifact pointers + status -
     warehouse.execute(
         f"""
@@ -681,6 +699,158 @@ def _build_dbt_silver_stub(
         + ",\n  _load_dt,\n  _source_file,\n  _batch_id,\n  _record_source\n"
         + f"from {{{{ source('{bronze_schema.lower()}', '{table_name.lower()}') }}}}\n"
     )
+
+
+def _render_vendor_spec_html(
+    *,
+    md_text: str,
+    client_id: str,
+    source_type: str,
+    design_id: str,
+    contract_id: str,
+) -> str:
+    """Convert the agent's markdown vendor spec into a print-ready HTML
+    document. The operator opens this in a browser and prints it as PDF
+    (Cmd/Ctrl+P → "Save as PDF"). Avoids the native PDF library
+    dependency tree while producing a clean, branded deliverable.
+    """
+    import markdown as md_lib  # type: ignore[import-untyped]
+
+    body_html = md_lib.markdown(
+        md_text,
+        extensions=["tables", "fenced_code", "toc", "attr_list", "sane_lists"],
+    )
+    generated_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M UTC")
+    title = f"{client_id.upper()} {source_type} — Vendor Data Contract Specification"
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>{title}</title>
+<style>
+  @page {{ size: Letter; margin: 0.7in 0.6in; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    color: #1f2937;
+    line-height: 1.55;
+    max-width: 7.2in;
+    margin: 0 auto;
+    padding: 1.5rem;
+  }}
+  .doc-header {{
+    border-bottom: 3px solid #d4af37;
+    padding-bottom: .8rem;
+    margin-bottom: 1.5rem;
+  }}
+  .doc-header .brand {{
+    color: #0a1a3e;
+    font-size: 1.3rem;
+    font-weight: 700;
+    letter-spacing: .02em;
+  }}
+  .doc-header .gold {{ color: #d4af37; }}
+  .doc-header .meta {{
+    color: #64748b;
+    font-size: .85rem;
+    margin-top: .4rem;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }}
+  h1 {{ color: #0a1a3e; border-bottom: 2px solid #d4af37; padding-bottom: .3rem; }}
+  h2 {{ color: #0a1a3e; margin-top: 1.6rem; }}
+  h3 {{ color: #0a1a3e; }}
+  code {{
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    background: #f3f4f6;
+    padding: .1rem .35rem;
+    border-radius: 3px;
+    font-size: .9em;
+  }}
+  pre {{
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-left: 3px solid #d4af37;
+    padding: .8rem 1rem;
+    border-radius: 4px;
+    overflow-x: auto;
+  }}
+  pre code {{ background: transparent; padding: 0; }}
+  table {{
+    border-collapse: collapse;
+    width: 100%;
+    margin: .8rem 0;
+    font-size: .9rem;
+  }}
+  th, td {{
+    border: 1px solid #d1d5db;
+    padding: .5rem .7rem;
+    text-align: left;
+    vertical-align: top;
+  }}
+  th {{
+    background: #0a1a3e;
+    color: #ffffff;
+    font-weight: 600;
+  }}
+  tr:nth-child(even) td {{ background: #f9fafb; }}
+  blockquote {{
+    border-left: 3px solid #d4af37;
+    padding: .5rem 1rem;
+    margin: .8rem 0;
+    background: #fffbeb;
+    color: #4b5563;
+  }}
+  .doc-footer {{
+    margin-top: 3rem;
+    padding-top: 1rem;
+    border-top: 1px solid #e5e7eb;
+    font-size: .75rem;
+    color: #6b7280;
+    text-align: center;
+  }}
+  .print-instr {{
+    background: #fffbeb;
+    border: 1px solid #fde68a;
+    color: #78350f;
+    padding: .75rem 1rem;
+    border-radius: 4px;
+    margin-bottom: 1.2rem;
+    font-size: .85rem;
+  }}
+  @media print {{
+    .print-instr {{ display: none; }}
+    body {{ max-width: none; padding: 0; }}
+  }}
+</style>
+</head>
+<body>
+  <div class="print-instr">
+    <strong>To export as PDF:</strong> Press
+    <kbd>Cmd</kbd>+<kbd>P</kbd> (Mac) or <kbd>Ctrl</kbd>+<kbd>P</kbd>
+    (Windows) → choose "Save as PDF" → Save. This message is hidden in
+    the printed output.
+  </div>
+  <div class="doc-header">
+    <div class="brand">DataLink <span class="gold">Command Center</span></div>
+    <div class="meta">
+      Generated: {generated_at}
+      &nbsp;·&nbsp; Design: <code>{design_id[:8]}…</code>
+      &nbsp;·&nbsp; Contract: <code>{contract_id[:8]}…</code>
+      &nbsp;·&nbsp; Tenant: <code>{client_id}</code>
+      &nbsp;·&nbsp; Source: <code>{source_type}</code>
+    </div>
+  </div>
+
+  {body_html}
+
+  <div class="doc-footer">
+    Vendor Data Contract Specification — generated by DataLink Data Contract
+    Architect (Phase 14). Auto-generated; do not edit by hand. Re-approve the
+    design from the UI to regenerate.
+  </div>
+</body>
+</html>
+"""
 
 
 def _build_default_vendor_spec_md(

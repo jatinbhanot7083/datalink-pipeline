@@ -649,12 +649,21 @@ if proposal_dict:
                         actor=actor,
                         notes="auto-approved at submit time",
                     )
-            st.success(
-                f"✅ Design saved as `{design_id[:8]}…`. Status: "
-                f"**{('APPROVED' if approval_mode == 'AUTO_APPROVE' else 'PENDING_REVIEW')}**. "
-                f"Phase 14.6 will emit the 5 artifacts (DDL, contract, GX, dbt, vendor spec) "
-                f"on approval."
-            )
+            if approval_mode == "AUTO_APPROVE":
+                st.success(
+                    f"✅ Design `{design_id[:8]}…` APPROVED. All 5 artifacts emitted:\n\n"
+                    f"  - 📄 `datalink/pipeline/bronze/ddl/{selected_client}_{source_type.lower()}_*.sql`\n"
+                    f"  - 📌 `CONTROL.source_schema_contracts` (drift detection now active)\n"
+                    f"  - 🛡 `CONTROL.dq_suites` (PENDING_REVIEW — review on DQ Review page)\n"
+                    f"  - 🔧 `dbt/models/silver/{selected_client}/silver_*.sql`\n"
+                    f"  - 📜 `docs/specs/{selected_client}_{source_type.lower()}_v1.md` + `.html` "
+                    f"(open `.html` in browser, Cmd/Ctrl+P → Save as PDF for the vendor)"
+                )
+            else:
+                st.success(
+                    f"✅ Design saved as `{design_id[:8]}…`. Status: "
+                    f"**PENDING_REVIEW** — approve in DQ Review to emit the 5 artifacts."
+                )
         except Exception as e:
             st.error(f"Save failed: {type(e).__name__}: {e}")
 

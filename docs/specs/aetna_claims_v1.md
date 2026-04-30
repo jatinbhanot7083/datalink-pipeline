@@ -1,97 +1,54 @@
-# Aetna Claims Data Contract Specification
+# Aetna Claims Data Contract — Bronze Layer
 
 ## Overview
-This Bronze-layer data contract defines the schema for Aetna professional health care claims (837P equivalent) ingested via CSV file feed.
+This contract defines the structure and validation rules for Aetna claims data ingested via CSV file feed. The schema is anchored to FHIR R4 Claim Resource with medium-strictness conformance.
 
-## File Characteristics
-- **Format**: CSV (comma-separated values)
-- **Encoding**: UTF-8 (assumed)
-- **Header**: Present (7 columns)
-- **Sample file**: `aetna_claims_smoke.csv`
-- **Expected frequency**: Daily or batch-driven
+## File Specifications
+- **Format**: CSV (comma-delimited)
+- **Encoding**: UTF-8
+- **Header**: Yes (column names in first row)
+- **Expected Frequency**: Daily or batch
+- **Sample File**: `aetna_claims_test.csv`
 
 ## Column Specifications
 
-| Column | Vendor Name | Standard | Type | Nullable | Validation | Notes |
-|--------|-------------|----------|------|----------|------------|-------|
-| claim_id | ClaimNumber | X12 837P CLM01; FHIR Claim.identifier | VARCHAR | NO | Unique per claim; alphanumeric | Primary key; must be unique across all loads |
-| member_id | MbrNo | X12 837P Loop 2010BA NM109; FHIR Claim.patient | VARCHAR | NO | Alphanumeric; matches member master | Foreign key to member dimension |
-| provider_npi | ProviderNPI | X12 837P Loop 2310B NM109; FHIR Claim.provider | VARCHAR | NO | Exactly 10 digits; valid NPI | Rendering provider; must be valid NPI |
-| cpt_code | CPT | X12 837P Loop 2400 SV101-2; FHIR Claim.item.productOrService | VARCHAR | NO | 5 digits + optional 2-char modifier; matches AMA CPT | Procedure code; must be valid CPT-4 |
-| icd10_primary | ICD10 | X12 837P Loop 2300 HI01-2 (ABK); FHIR Claim.diagnosis[0] | VARCHAR | YES | ICD-10-CM format (e.g., E11.9); matches CMS ICD-10 | Primary diagnosis; nullable if not provided |
-| icd10_secondary | (not in vendor file) | X12 837P Loop 2300 HI02-2 (ABF); FHIR Claim.diagnosis[1..n] | VARCHAR | YES | ICD-10-CM format; matches CMS ICD-10 | Secondary diagnosis; **MISSING from vendor file—recommend requesting** |
-| service_date | SvcDt | X12 837P Loop 2400 DTP*472; FHIR Claim.item.servicedDate | DATE | NO | ISO 8601 (YYYY-MM-DD); must be ≤ claim submission date | Date service was rendered |
-| billed_amount | BilledAmt | X12 837P Loop 2400 SV102; FHIR Claim.item.unitPrice | DECIMAL(12,2) | NO | Numeric; 0.00 to 999,999.99; 2 decimal places | Total billed charge for line item |
-| claim_status | (not in vendor file) | X12 837P CLM05-3; FHIR Claim.status | VARCHAR | YES | Enum: active, cancelled, draft, entered-in-error | **MISSING from vendor file—recommend deriving or requesting** |
-| plan_id | (not in vendor file) | X12 837P Loop 2010BB NM109 + Loop 2330B SBR; FHIR Claim.insurer | VARCHAR | YES | Alphanumeric; matches plan master | **MISSING from vendor file—recommend requesting** |
-| prior_auth_ref | (not in vendor file) | X12 837P Loop 2300 REF*9F; FHIR Claim.preAuthRef | VARCHAR | YES | Alphanumeric; matches prior auth system | **MISSING from vendor file—recommend requesting** |
-
-## Standards Alignment
-
-### X12 837P (Professional Health Care Claim — 5010)
-- **Claim ID**: CLM01 segment
-- **Member ID**: Loop 2010BA NM109 (subscriber)
-- **Provider NPI**: Loop 2310B NM109 (rendering provider)
-- **Procedure Code**: Loop 2400 SV101-2 (CPT/HCPCS)
-- **Diagnosis**: Loop 2300 HI segment (ABK = primary, ABF = secondary)
-- **Service Date**: Loop 2400 DTP*472
-- **Billed Amount**: Loop 2400 SV102
-- **Claim Status**: CLM05-3 (frequency code) + adjudication
-- **Plan/Payer**: Loop 2010BB NM109 + Loop 2330B SBR
-- **Prior Auth**: Loop 2300 REF*9F or Loop 2400 REF*9F
-
-### FHIR R4 Claim Resource
-- **Claim.identifier**: Unique claim ID
-- **Claim.patient**: Member/subscriber reference
-- **Claim.provider**: Rendering provider reference (NPI)
-- **Claim.item.productOrService**: CPT/HCPCS code (CodeSystem: http://www.ama-assn.org/go/cpt)
-- **Claim.diagnosis[].diagnosis**: ICD-10-CM code (CodeSystem: http://hl7.org/fhir/sid/icd-10-cm)
-- **Claim.item.servicedDate**: Date service rendered
-- **Claim.item.unitPrice**: Billed charge
-- **Claim.status**: active | cancelled | draft | entered-in-error
-- **Claim.insurer**: Payer/plan reference
-- **Claim.preAuthRef**: Prior authorization reference
-
-## Data Quality Rules
-
-1. **Uniqueness**: `claim_id` must be unique within each load batch.
-2. **Referential Integrity**: `member_id` should exist in the member master; `provider_npi` should be a valid 10-digit NPI.
-3. **Code Validity**: `cpt_code` must be a valid AMA CPT-4 code; `icd10_primary` and `icd10_secondary` must be valid CMS ICD-10-CM codes.
-4. **Date Logic**: `service_date` must be ≤ claim submission date (inferred from file load date).
-5. **Amount Validation**: `billed_amount` must be ≥ 0.00 and ≤ 999,999.99.
-6. **Enum Compliance**: `claim_status` (when populated) must be one of: active, cancelled, draft, entered-in-error.
-
-## Missing Fields (Vendor Exception)
-
-The following standard fields are **not present** in the vendor's current file:
-- `icd10_secondary` (X12 HI02-2, FHIR Claim.diagnosis[1..n])
-- `claim_status` (X12 CLM05-3, FHIR Claim.status)
-- `plan_id` (X12 Loop 2010BB + 2330B, FHIR Claim.insurer)
-- `prior_auth_ref` (X12 REF*9F, FHIR Claim.preAuthRef)
-
-**Recommendation**: Request these fields from Aetna or document as vendor exceptions with a plan to backfill via a separate lookup or enrichment process.
+| Column | Type | Nullable | FHIR Standard | Validation Rule | Example |
+|--------|------|----------|---------------|-----------------|----------|
+| `claim_id` | VARCHAR | NO | Claim.id | Unique per load; non-empty | `C001` |
+| `member_id` | VARCHAR | NO | Claim.patient.identifier.value | Non-empty; alphanumeric | `M001` |
+| `provider_npi` | VARCHAR | YES | Claim.provider.identifier.value | Regex: `^[0-9]{10}$` (NPI format) | `1234567890` |
+| `cpt_code` | VARCHAR | YES | Claim.item[0].productOrService.coding[0].code | Regex: `^[0-9]{5}([A-Z]{2})?$` (CPT-4 format) | `99213` |
+| `icd10_primary` | VARCHAR | YES | Claim.diagnosis[0].diagnosis.coding[0].code | Regex: `^[A-Z][0-9]{2}(\.[A-Z0-9]{1,4})?$` (ICD-10-CM format) | `E11.9` |
 
 ## Audit Columns (Injected by Runtime)
+- `_load_dt`: TIMESTAMP — UTC timestamp of load execution
+- `_source_file`: VARCHAR — Source file name (e.g., `aetna_claims_test.csv`)
+- `_batch_id`: VARCHAR — Unique batch identifier for this load
+- `_record_source`: VARCHAR — Source system identifier (e.g., `aetna`)
+- `_load_type`: VARCHAR — Load mode (e.g., `FILE_DRIVEN`)
+- `_file_row_number`: INTEGER — Row number in source file (1-indexed, excluding header)
+- `_record_hash`: VARCHAR — SHA-256 hash of record for idempotency detection
 
-The following 7 columns are automatically appended by the DataLink ingestion framework:
-- `_load_dt` (TIMESTAMP): UTC timestamp of load execution
-- `_source_file` (VARCHAR): Name of the source file (e.g., `aetna_claims_smoke.csv`)
-- `_batch_id` (VARCHAR): Unique batch identifier for this load
-- `_record_source` (VARCHAR): Source system identifier (e.g., `aetna`)
-- `_load_type` (VARCHAR): Load type (e.g., `FILE_DRIVEN`, `API_PULL`)
-- `_file_row_number` (INTEGER): Row number in the source file
-- `_record_hash` (VARCHAR): SHA-256 hash of the record for deduplication
+## Data Quality Rules
+1. **Primary Key**: `(claim_id, member_id, _load_dt)` — No duplicates within a load batch.
+2. **Referential Integrity**: `member_id` must exist in the member master (validated downstream in Silver layer).
+3. **Format Validation**: NPI, CPT, and ICD-10 codes must conform to regex patterns (see table above).
+4. **Completeness**: `claim_id` and `member_id` are mandatory; other columns may be null if not applicable to the claim type.
 
-## Example Record
+## Deviations from FHIR R4 Standard
+- **Scope**: This Bronze table captures only the primary diagnosis and first procedure code. FHIR Claim.diagnosis and Claim.item are arrays; full array support is deferred to Silver/Gold layers.
+- **Missing Fields**: The following FHIR Claim fields are not present in this vendor feed and should be sourced from supplementary files or systems:
+  - `Claim.billablePeriod.start` (service date)
+  - `Claim.insurance[0].coverage.identifier.value` (plan ID)
+  - `Claim.item[0].net.value` (billed amount)
+  - `Claim.status` (claim status)
+  - `Claim.related[0].reference.value` (prior authorization reference)
+  - **Action**: Operator to confirm whether these fields are available in a separate feed or should be sourced from a claims adjudication system.
 
-```
-claim_id,member_id,provider_npi,cpt_code,icd10_primary,service_date,billed_amount
-CLM00001,MBR1001,1234567890,99213,E11.9,2026-01-15,125.00
-```
+## Load Idempotency
+The `_record_hash` column enables idempotent reloads. If a record with the same hash is detected in a subsequent load, it is skipped (no duplicate insertion).
 
-## Contact & Governance
-
-- **Data Owner**: Aetna Claims Operations
-- **Technical Contact**: DataLink Engineering
-- **Last Updated**: 2026-01-15
-- **Version**: 1.0 (DRAFT)
+## Contact
+- **Data Steward**: [Aetna Claims Integration Team]
+- **Last Updated**: [YYYY-MM-DD]
+- **Version**: 1.0
