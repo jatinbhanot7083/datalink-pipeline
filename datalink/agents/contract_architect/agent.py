@@ -262,13 +262,13 @@ class ContractArchitectAgent(AgentBase):
             "grounding_chunk_count": len(grounding_chunks),
         }
 
-        # 8192 tokens — large enough for full proposed_ddl + per-column
+        # 16384 tokens — covers a 30-column 834 contract with full
         # rationale + vendor_spec_md + gx_scaffold without truncation.
-        # Claude haiku 4.5 supports up to 8192 output tokens.
+        # Claude haiku 4.5 supports up to 64K output tokens.
         raw = self._ask_llm(
             instruction=instruction,
             safe_payload=safe_payload,
-            max_tokens=8192,
+            max_tokens=16384,
             temperature=temperature,
         )
 
