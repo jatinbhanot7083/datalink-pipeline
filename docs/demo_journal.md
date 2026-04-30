@@ -47,7 +47,88 @@ durable even if the laptop dies.
 
 ---
 
-## 🔁 ALWAYS-ON STARTUP — Windows reboot survives (validated 2026-04-30)
+## 🔁 ALWAYS-ON STARTUP — deterministic, NAT mode + portproxy (validated 2026-04-30 evening)
+
+**Final architecture** — replaces the earlier `mirrored` + flaky-localhost-mirror
+attempt. NAT mode + explicit `netsh portproxy` rules = mechanically deterministic.
+
+### What's running
+
+| Layer | Component | Persists across Windows reboot? |
+|---|---|---|
+| WSL networking mode | `%USERPROFILE%\.wslconfig` → `[wsl2] networkingMode=NAT` | ✅ |
+| Container port binding | `docker-compose.yml` → `${DL_BIND_HOST:-127.0.0.1}:PORT:PORT` (default 127.0.0.1, dev `.env` overrides to 0.0.0.0) | ✅ |
+| systemd in WSL | `/etc/wsl.conf` → `[boot] systemd=true` | ✅ |
+| Docker daemon auto-start | `systemctl enable docker` | ✅ |
+| Container restart | `restart: unless-stopped` in compose | ✅ |
+| WSL boots + stack up at login | Scheduled Task `DataLink-WSL-AutoStart` (regular user) | ✅ |
+| Windows ↔ WSL bridge created at login | Scheduled Task `DataLink-Network-AutoRecover` (admin RunLevel, 30s logon delay) → runs `scripts/recover-windows-network-at-login.ps1` | ✅ |
+
+### Sequence at every Windows login
+
+```
+T+0     Log in
+T+1     DataLink-WSL-AutoStart fires       → wsl --exec docker compose up -d
+        (boots WSL → systemd → docker → containers)
+T+30    DataLink-Network-AutoRecover fires (30s delayed)
+        → discovers WSL_IP via `wsl hostname -I`
+        → resets stale portproxy
+        → adds 7 rules: 0.0.0.0:PORT → WSL_IP:PORT
+        → adds Windows Firewall inbound TCP allow rules
+        → logs everything to %USERPROFILE%/datalink-network-recover.log
+T+90    control_tower healthy, URL ready
+```
+
+### Why NAT instead of mirrored
+
+`mirrored` networking mode was attempted earlier in the day and failed because:
+- WSL VM and Windows share the same network adapter / IP in mirrored mode
+- A `netsh portproxy` rule pointing at the WSL IP creates a self-loop
+  (Windows forwards localhost:8000 → 192.168.1.246:8000 = back to itself)
+- The container's listener is invisible to the portproxy listener
+
+NAT mode gives WSL its own `172.17.x.x` IP separate from Windows. Portproxy
+then forwards to a real different host (the WSL VM), which exposes the
+container's `0.0.0.0` binding directly.
+
+### Production safety
+
+| Artifact | Lives at | Production impact |
+|---|---|---|
+| `${DL_BIND_HOST:-127.0.0.1}` | `docker-compose.yml` | None — production never sets the env var, defaults to `127.0.0.1` (today's exact behaviour) |
+| `DL_BIND_HOST=0.0.0.0` | `.env` (gitignored) | Dev-only; production has its own `.env` |
+| `scripts/recover-windows-network-at-login.ps1` | `scripts/` | None — `.ps1` doesn't execute on Linux |
+| `.wslconfig` | `C:\Users\Jatin\.wslconfig` (Windows-only) | None — no equivalent file on Linux |
+| Scheduled Tasks | Windows-only | None |
+
+**Net production effect: zero.** Every Windows-side hack is inert on Linux.
+
+### Verifying the architecture is intact
+
+```powershell
+# In Windows PowerShell:
+Get-ScheduledTask -TaskName 'DataLink-WSL-AutoStart','DataLink-Network-AutoRecover' | Format-Table TaskName, State -AutoSize
+netsh interface portproxy show v4tov4
+```
+
+Expected:
+```
+DataLink-WSL-AutoStart        Ready
+DataLink-Network-AutoRecover  Ready
+
+7 portproxy rules pointing at WSL_IP (172.17.x.x):
+  0.0.0.0:8000 -> 172.17.x.x:8000
+  ... (and 6 more)
+```
+
+### Recovery script logs
+
+`%USERPROFILE%\datalink-network-recover.log` — append-only timestamped log.
+Tail it after a Windows login to verify the bridge was set up correctly.
+
+---
+
+## 🔁 ALWAYS-ON STARTUP — earlier mirrored-mode attempt (2026-04-30 afternoon, superseded)
 
 After a Windows restart, the URL `http://localhost:8000` should be reachable
 without manual intervention. The architecture has **5 layers**, all in place:
