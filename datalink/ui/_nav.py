@@ -102,6 +102,11 @@ INTERNAL_PAGE_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         "Author DQ",
         "cat-author",  # indigo wash — "build / author"
         [
+            # Phase 14 — sits FIRST in the Author group: contracts come
+            # before DQ rules in the lifecycle. Operator designs the
+            # contract here, runs Bronze, then authors checks against
+            # the populated table downstream.
+            ("Data Contract Architect", "/Data_Contract_Architect", "🏗"),
             ("DQ AI Architect", "/DQ_AI_Architect", "🧪"),  # NL-driven entry point
             ("DQ Author", "/DQ_Author", "📝"),  # grid editor for power users
             ("DQ Review", "/DQ_Review", "👁️"),  # reviewer queue
