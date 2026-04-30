@@ -194,7 +194,14 @@ services:
   # XPS8940: PID 7540). :5434 is free on the machines we care about.
   postgres:
     restart: unless-stopped
-    image: postgres:16
+    # pgvector/pgvector:pg16 is a drop-in for postgres:16 with the
+    # `vector` extension binary already installed. Required by
+    # agent_memory.suite_embeddings (DQ AI Architect RAG) and
+    # agent_memory.standard_references (Phase 14 Data Contract Architect).
+    # Vanilla postgres:16 leaves the extension metadata in the volume but
+    # without the .so file — every CREATE TABLE with a vector column then
+    # fails with `could not access file "$libdir/vector"`.
+    image: pgvector/pgvector:pg16
     container_name: datalink-postgres
     networks: [datalink]
     environment:
@@ -216,7 +223,10 @@ services:
   # removed; router targets become [sqlserver, postgres].
   postgres_replica:
     restart: unless-stopped
-    image: postgres:16
+    # Match the primary's image so streaming replication works. pgvector
+    # binary not strictly needed here (replica isn't a target for
+    # agent_memory writes) but image symmetry avoids drift surprises.
+    image: pgvector/pgvector:pg16
     container_name: datalink-postgres-replica
     networks: [datalink]
     environment:

@@ -91,6 +91,23 @@ class ReasoningHit:
     distance: float
 
 
+# Phase 14 — chunk-level retrieval result for the Data Contract Architect.
+# A "standard" is a corpus (FHIR R4, X12, NCPDP, CMS, DV2, HEDIS, or a
+# custom org-uploaded spec). Each corpus is chunked + embedded into
+# `agent_memory.standard_references` and retrieved by the
+# ContractArchitectAgent at proposal time.
+@dataclass(frozen=True)
+class StandardChunkHit:
+    ref_id: str
+    standard_id: str
+    standard_code: str  # e.g. "fhir-r4" | "x12" | "custom-datalink-claims-v3"
+    chunk_text: str
+    chunk_index: int
+    section_path: str | None  # e.g. "Claim/item/productOrService" or "837P/loop2300/CLM01"
+    resource_type: str | None  # e.g. "Claim" | "837P_loop_2300"
+    distance: float  # 0.0 = identical, ~1.0 = orthogonal
+
+
 class AgentMemoryStore:
     """Connect lazily; one short-lived psycopg connection per call.
 
@@ -166,6 +183,35 @@ class AgentMemoryStore:
                 )
                 """
             )
+            # Phase 14 — Data Contract Architect reference corpus.
+            # Each standard (FHIR R4, X12, NCPDP, CMS, DV2, HEDIS, or
+            # operator-uploaded custom) is chunked + embedded here so the
+            # ContractArchitectAgent can retrieve top-k similar reference
+            # passages at proposal time. `standard_id` matches the row in
+            # CONTROL.standard_registry; we denormalise `standard_code`
+            # (e.g. "fhir-r4") so the WHERE clause on hot retrieval paths
+            # stays index-friendly.
+            cur.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {_SCHEMA}.standard_references (
+                    ref_id          TEXT PRIMARY KEY,
+                    standard_id     TEXT NOT NULL,
+                    standard_code   TEXT NOT NULL,
+                    chunk_text      TEXT NOT NULL,
+                    chunk_index     INTEGER NOT NULL,
+                    section_path    TEXT,
+                    resource_type   TEXT,
+                    keywords        TEXT[],
+                    embedding_model TEXT NOT NULL,
+                    embedded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    embedding       vector({dim}) NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                f"CREATE INDEX IF NOT EXISTS standard_refs_code_idx "
+                f"ON {_SCHEMA}.standard_references (standard_code)"
+            )
             # Cosine-distance ANN indexes — built lazily, not failure-fatal
             # if the table is too small (<some threshold) for IVFFlat
             # quality. Wrap in try/except so a fresh empty install
@@ -186,6 +232,14 @@ class AgentMemoryStore:
                 )
             except Exception as e:
                 _log.warning("memory.reasoning_index_skipped", error=str(e))
+            try:
+                cur.execute(
+                    f"CREATE INDEX IF NOT EXISTS standard_references_cos_idx "
+                    f"ON {_SCHEMA}.standard_references USING ivfflat (embedding vector_cosine_ops) "
+                    f"WITH (lists = 50)"
+                )
+            except Exception as e:
+                _log.warning("memory.standard_index_skipped", error=str(e))
             cur.execute(
                 f"COMMENT ON SCHEMA {_SCHEMA} IS 'datalink agent memory v{_SCHEMA_VERSION}'"
             )
@@ -408,6 +462,140 @@ class AgentMemoryStore:
             )
             for r in rows
         ]
+
+    # ------------------------------------------------------------------
+    # Standard reference embeddings (Tier C, Phase 14)
+    # The Data Contract Architect's RAG corpus. Each chunk is one
+    # ~500-token slice of an industry standard (FHIR R4, X12, NCPDP,
+    # CMS, DV2, HEDIS) or an operator-uploaded "custom" spec.
+    # ------------------------------------------------------------------
+
+    def upsert_standard_chunk(
+        self,
+        *,
+        ref_id: str,
+        standard_id: str,
+        standard_code: str,
+        chunk_text: str,
+        chunk_index: int,
+        section_path: str | None = None,
+        resource_type: str | None = None,
+        keywords: list[str] | None = None,
+    ) -> None:
+        """Embed and persist one chunk of a standard's reference corpus.
+        Idempotent — re-running with the same ``ref_id`` overwrites."""
+        embedding = self._embedder.embed_one(chunk_text)
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"""
+                INSERT INTO {_SCHEMA}.standard_references
+                  (ref_id, standard_id, standard_code, chunk_text, chunk_index,
+                   section_path, resource_type, keywords,
+                   embedding_model, embedded_at, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (ref_id) DO UPDATE SET
+                  standard_id     = EXCLUDED.standard_id,
+                  standard_code   = EXCLUDED.standard_code,
+                  chunk_text      = EXCLUDED.chunk_text,
+                  chunk_index     = EXCLUDED.chunk_index,
+                  section_path    = EXCLUDED.section_path,
+                  resource_type   = EXCLUDED.resource_type,
+                  keywords        = EXCLUDED.keywords,
+                  embedding_model = EXCLUDED.embedding_model,
+                  embedded_at     = EXCLUDED.embedded_at,
+                  embedding       = EXCLUDED.embedding
+                """,
+                (
+                    ref_id,
+                    standard_id,
+                    standard_code,
+                    chunk_text,
+                    chunk_index,
+                    section_path,
+                    resource_type,
+                    keywords or [],
+                    self._embedder.model,
+                    datetime.now(UTC),
+                    _to_pgvector(embedding),
+                ),
+            )
+            conn.commit()
+
+    def query_similar_standard_chunks(
+        self,
+        *,
+        query_text: str,
+        anchored_codes: tuple[str, ...] | list[str],
+        k: int = 3,
+        resource_type: str | None = None,
+    ) -> list[StandardChunkHit]:
+        """Top-k chunks across the anchored standards.
+
+        Operator picks 1+ standards on the Data Contract Architect page
+        (e.g. ['fhir-r4', 'x12']). We retrieve the top-k chunks similar
+        to ``query_text`` whose ``standard_code`` is in that allowlist —
+        prevents an FHIR proposal from drifting into HEDIS by accident.
+        """
+        if not query_text.strip() or not anchored_codes:
+            return []
+        embedding = self._embedder.embed_one(query_text)
+        codes = list(anchored_codes)
+        code_placeholders = ",".join(["%s"] * len(codes))
+        params: list[Any] = [_to_pgvector(embedding), *codes]
+        resource_clause = ""
+        if resource_type:
+            resource_clause = "AND resource_type = %s"
+            params.append(resource_type)
+        params.extend([_to_pgvector(embedding), k])
+        sql = f"""
+            SELECT ref_id, standard_id, standard_code, chunk_text, chunk_index,
+                   section_path, resource_type,
+                   embedding <=> %s AS distance
+            FROM {_SCHEMA}.standard_references
+            WHERE standard_code IN ({code_placeholders}) {resource_clause}
+            ORDER BY embedding <=> %s
+            LIMIT %s
+        """
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+        return [
+            StandardChunkHit(
+                ref_id=r[0],
+                standard_id=r[1],
+                standard_code=r[2],
+                chunk_text=r[3],
+                chunk_index=r[4],
+                section_path=r[5],
+                resource_type=r[6],
+                distance=float(r[7]),
+            )
+            for r in rows
+        ]
+
+    def delete_standard_chunks(self, *, standard_id: str) -> int:
+        """Drop all chunks for a standard (used on re-ingestion).
+        Returns the number of rows deleted."""
+        with self._connect() as conn, conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM {_SCHEMA}.standard_references WHERE standard_id = %s",
+                (standard_id,),
+            )
+            count = cur.rowcount
+            conn.commit()
+        return int(count)
+
+    def count_standard_chunks(self, *, standard_id: str | None = None) -> int:
+        """Count of chunks; per-standard (if standard_id passed) or total."""
+        with self._connect() as conn, conn.cursor() as cur:
+            if standard_id:
+                cur.execute(
+                    f"SELECT COUNT(*) FROM {_SCHEMA}.standard_references WHERE standard_id = %s",
+                    (standard_id,),
+                )
+            else:
+                cur.execute(f"SELECT COUNT(*) FROM {_SCHEMA}.standard_references")
+            return int(cur.fetchone()[0])
 
     # ------------------------------------------------------------------
     # Stats — feed the AI Agents dashboard "AI memory used" tile
