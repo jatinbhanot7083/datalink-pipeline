@@ -47,6 +47,61 @@ durable even if the laptop dies.
 
 ---
 
+## 🔁 ALWAYS-ON STARTUP — Windows reboot survives (validated 2026-04-30)
+
+After a Windows restart, the URL `http://localhost:8000` should be reachable
+without manual intervention. The architecture has **5 layers**, all in place:
+
+| # | Layer | Status / location | Owner |
+|---|---|---|---|
+| 1 | systemd enabled in WSL | `/etc/wsl.conf` → `[boot] systemd=true` | Linux |
+| 2 | Docker daemon auto-starts inside WSL | `systemctl enable docker` | systemd |
+| 3 | Containers auto-restart | `restart: unless-stopped` in `docker-compose.yml` | Docker |
+| 4 | WSL boots + Docker stack comes up at Windows login | Scheduled Task `DataLink-WSL-AutoStart` | Windows Task Scheduler |
+| 5 | Hyper-V firewall + portproxy state reset for fresh WSL↔Windows bridge | Scheduled Task `DataLink-Network-AutoRecover` (RunLevel Highest = silent admin) | Windows Task Scheduler |
+
+**Sequence at every Windows login:**
+
+```
+T+0     User logs in
+T+1     Both Scheduled Tasks fire in parallel:
+         DataLink-Network-AutoRecover  →  resets portproxy + restarts iphlpsvc
+         DataLink-WSL-AutoStart        →  boots WSL → docker compose up -d
+T+30    All other containers up; control_tower bootstrapping
+T+90    control_tower healthy, URL ready
+```
+
+User can log in → walk to coffee machine → come back → URL is hot.
+
+### Verifying the tasks are still registered
+
+```powershell
+Get-ScheduledTask -TaskName 'DataLink-WSL-AutoStart','DataLink-Network-AutoRecover' | Format-Table TaskName, State -AutoSize
+```
+
+Expected:
+```
+TaskName                       State
+--------                       -----
+DataLink-WSL-AutoStart         Ready
+DataLink-Network-AutoRecover   Ready
+```
+
+### If a task gets disabled / deleted
+
+Re-register from `docs/demo_journal.md` → look for "scheduled-tasks" sections in
+the change log table below for the exact `Register-ScheduledTask` blocks. The
+admin-RunLevel one (`DataLink-Network-AutoRecover`) must be registered from
+an Admin PowerShell — `Access denied` from regular PS.
+
+### Recovery script logs
+
+Each `DataLink-Network-AutoRecover` run appends a timestamp to
+`C:\Users\Jatin\datalink-network-recover.log`. Tail that file if you suspect
+the task didn't fire at login.
+
+---
+
 ## 📌 COMMIT DISCIPLINE — operator agreement (2026-04-30)
 
 Per Jatin's directive after the 2026-04-30 networking storm cost half a day:
