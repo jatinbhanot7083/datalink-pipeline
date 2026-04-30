@@ -27,6 +27,57 @@ Total time: ~3 minutes. Browser ready when `make recover` prints "URL READY".
 
 ---
 
+## 🛟 EMERGENCY ROLLBACK — when the project is in total-failure state
+
+If the codebase itself is broken (not just networking) — botched edits, failed
+migration, accidental deletions — restore to the last verified-working state:
+
+```bash
+cd /home/jatin/dev/DataPipelinesWithGX
+make list-checkpoints         # see what known-good states exist
+make rollback-to-last-good    # hard-reset to the most recent
+make recover                  # bring stack up against the restored code
+```
+
+Auto-stashes any in-flight work first (recoverable via `git stash list`).
+Tags follow the pattern `known-good-YYYY-MM-DD-NN` and live on GitHub —
+durable even if the laptop dies.
+
+**Most recent checkpoint as of last update:** `known-good-2026-04-30-01`.
+
+---
+
+## 📌 COMMIT DISCIPLINE — operator agreement (2026-04-30)
+
+Per Jatin's directive after the 2026-04-30 networking storm cost half a day:
+
+1. **After every successful module completion**, run `make checkpoint MSG="..."`.
+   Commits + tags + pushes in one command. Even **5 times a day** is fine.
+2. **Tags follow `known-good-YYYY-MM-DD-NN`** so rollback to any prior moment
+   is one command away.
+3. **Branch + tags pushed to GitHub immediately** — work survives any local
+   disaster.
+4. **It's Claude's duty** to remind/run this after each verified module — not
+   the operator's job to remember.
+
+### What counts as a "successful module"?
+
+| Trigger | Action |
+|---|---|
+| Phase verifier passes (e.g., `runbook_verify_phase12.py` 27/27 PASS) | `make checkpoint MSG="phase 12.x verifier 27/27 PASS"` |
+| UI page visually confirmed by operator | `make checkpoint MSG="<page> reviewed by Jatin, working"` |
+| Recovery from incident validated | `make checkpoint MSG="recovered from <X>; URL=200, all pages load"` |
+| Config change tested end-to-end (e.g., new Snowflake account) | `make checkpoint MSG="<change>; verified end-to-end"` |
+| Demo dry-run passes | `make checkpoint MSG="demo dry-run pass — pre-meeting state"` |
+
+### What does NOT need a checkpoint?
+
+- WIP / half-finished edits — finish first, then checkpoint.
+- Pre-commit hook auto-fixes that haven't been verified yet.
+- "It compiles" without operator-visible verification.
+
+---
+
 ## 🛠 RECOVERY RUNBOOK — Manual Step-by-Step (validated 2026-04-30)
 
 Use this when the make target / script aren't enough, or you want to understand

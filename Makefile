@@ -566,3 +566,96 @@ nuke-rules-engine: ## If ecc-rules-engine left state behind, kill all of it
 	@pkill -f 'ecc_rules_engine' 2>/dev/null || true
 	@pkill -f 'uvicorn.*8080' 2>/dev/null || true
 	@echo "  done"
+
+# =============================================================================
+# CHECKPOINT / ROLLBACK — durable safety net for the demo.
+# Discipline (operator agreement, 2026-04-30):
+#   * After every successful module completion, run `make checkpoint`.
+#   * Even multiple times a day. Cheap. Saves hours of recovery.
+#   * Each checkpoint creates an annotated tag `known-good-YYYY-MM-DD-NN`
+#     and pushes it to GitHub so the work is durable even if the laptop dies.
+#   * If the project is in total-failure state, `make rollback-to-last-good`
+#     hard-resets working tree to the latest checkpoint tag.
+# =============================================================================
+
+.PHONY: checkpoint
+checkpoint: ## Commit + tag known-good + push (after a verified-working state)
+	@if [ -z "$(MSG)" ]; then \
+	  echo "$(BOLD)Usage: make checkpoint MSG='short description of what works'$(RST)"; \
+	  echo "  e.g. make checkpoint MSG='archived Aetna policy v1; pipeline cascade verified'"; \
+	  exit 1; \
+	fi
+	@TODAY=$$(date -u +%Y-%m-%d); \
+	NEXT_NUM=$$(git tag -l "known-good-$$TODAY-*" | sed "s|known-good-$$TODAY-||" | sort -n | tail -1); \
+	if [ -z "$$NEXT_NUM" ]; then NEXT_NUM=01; else NEXT_NUM=$$(printf '%02d' $$((10#$$NEXT_NUM + 1))); fi; \
+	TAG="known-good-$$TODAY-$$NEXT_NUM"; \
+	echo "$(BOLD)>>> Step 1/4 — Stage all changes$(RST)"; \
+	git add -A; \
+	echo; \
+	echo "$(BOLD)>>> Step 2/4 — Commit$(RST)"; \
+	if git diff --cached --quiet; then \
+	  echo "  (no changes to commit; tagging current HEAD as $$TAG)"; \
+	else \
+	  git commit -m "checkpoint: $(MSG)" -m "Tagged as $$TAG. Verified working state — safe rollback point." -m "" -m "Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>" || exit 1; \
+	fi; \
+	echo; \
+	echo "$(BOLD)>>> Step 3/4 — Tag as $$TAG$(RST)"; \
+	git tag -a "$$TAG" -m "$(MSG)"; \
+	echo "  tagged HEAD as $$TAG"; \
+	echo; \
+	echo "$(BOLD)>>> Step 4/4 — Push branch + tag to GitHub$(RST)"; \
+	git push origin HEAD; \
+	git push origin "$$TAG"; \
+	echo; \
+	echo "$(BOLD)============================================================$(RST)"; \
+	echo "$(BOLD)  ✓ CHECKPOINT SAVED: $$TAG$(RST)"; \
+	echo "$(BOLD)============================================================$(RST)"; \
+	echo "  To rollback to this point later:  make rollback-to-last-good"; \
+	echo
+
+.PHONY: rollback-to-last-good
+rollback-to-last-good: ## EMERGENCY: hard-reset working tree to latest known-good tag
+	@LAST_TAG=$$(git tag -l "known-good-*" | sort -V | tail -1); \
+	if [ -z "$$LAST_TAG" ]; then \
+	  echo "$(BOLD)ERROR: no known-good-* tags exist yet. Run `make checkpoint MSG=...` first.$(RST)"; \
+	  exit 1; \
+	fi; \
+	CURRENT=$$(git rev-parse --short HEAD); \
+	TARGET=$$(git rev-parse --short "$$LAST_TAG"); \
+	echo "$(BOLD)============================================================$(RST)"; \
+	echo "$(BOLD)  EMERGENCY ROLLBACK$(RST)"; \
+	echo "$(BOLD)============================================================$(RST)"; \
+	echo "  Current HEAD : $$CURRENT"; \
+	echo "  Will reset to: $$TARGET ($$LAST_TAG)"; \
+	echo "  Tag message:"; \
+	git tag -l --format='    %(contents:subject)' "$$LAST_TAG"; \
+	echo; \
+	echo "$(BOLD)This will DISCARD any uncommitted changes.$(RST)"; \
+	echo "  Press Ctrl-C in the next 5 seconds to abort..."; \
+	sleep 5; \
+	echo; \
+	echo "$(BOLD)>>> Stashing any in-flight work (recoverable via 'git stash list')$(RST)"; \
+	git stash push -u -m "auto-stash-before-rollback-$$(date -u +%Y%m%dT%H%M%SZ)" 2>&1 | tail -3 || true; \
+	echo; \
+	echo "$(BOLD)>>> Hard reset to $$LAST_TAG$(RST)"; \
+	git reset --hard "$$LAST_TAG"; \
+	echo; \
+	echo "$(BOLD)============================================================$(RST)"; \
+	echo "$(BOLD)  ✓ ROLLED BACK TO: $$LAST_TAG$(RST)"; \
+	echo "$(BOLD)============================================================$(RST)"; \
+	echo "  Working tree now matches the last known-good checkpoint."; \
+	echo "  Stashed changes (if any): git stash list"; \
+	echo "  Next step: bring stack up:  make recover"; \
+	echo
+
+.PHONY: list-checkpoints
+list-checkpoints: ## Show all known-good checkpoint tags newest first
+	@echo
+	@echo "$(BOLD)============================================================$(RST)"
+	@echo "$(BOLD)  Known-good checkpoints (newest first)$(RST)"
+	@echo "$(BOLD)============================================================$(RST)"
+	@git tag -l "known-good-*" --sort=-creatordate --format='%(refname:short)  %(creatordate:short)  %(contents:subject)' | head -20
+	@echo
+	@echo "$(DIM)Rollback to most recent: make rollback-to-last-good$(RST)"
+	@echo "$(DIM)Rollback to specific:    git reset --hard <tag-name>$(RST)"
+	@echo
