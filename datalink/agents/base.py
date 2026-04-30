@@ -60,6 +60,11 @@ class AgentBase(ABC):
         # Phase 6: extended-thinking mode ("off" | "adaptive" | "enabled") —
         # propagated to every _ask_llm call. Ignored by stub.
         self._thinking_mode = thinking_mode
+        # Phase 13.5: initialise token counter eagerly. ``run()`` resets it
+        # at the top of each call, but Phase-13 mapper paths invoke
+        # ``execute_gold`` / ``execute_push`` directly (bypassing ``run()``),
+        # which previously hit AttributeError on the first ``_ask_llm`` call.
+        self._tokens_this_run = 0
 
     # --- subclass contract -------------------------------------------------
 

@@ -290,8 +290,7 @@ def _show_audit(suite_id: str) -> None:
 
 
 st.markdown(
-    f"<h1>👁️ <span style='color:{_NAVY}'>DataLink</span> "
-    f"<span style='color:{_GOLD}'>DQ Review</span></h1>",
+    f"<h1>👁️ <span style='color:{_GOLD}'>DQ Review</span></h1>",
     unsafe_allow_html=True,
 )
 

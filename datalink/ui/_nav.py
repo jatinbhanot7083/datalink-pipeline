@@ -50,23 +50,24 @@ _LOGO_COLOR_DATA = _b64_image("datalink-logo-color.png")
 # effectively invisible. Light slate is the industry-standard enterprise
 # sidebar look (Notion, Linear, GitHub) and lets DataLink blue + gold do
 # the heavy lifting for branding.
-# Industry-grade Command Center palette — references Datadog, Vercel,
-# Linear, Grafana sidebar treatments. Medium-tone slate base so white
-# link-cards stand out as crisp, button-like elements; prominent section
-# headers in brand-navy give the menu its operational feel.
-_SIDEBAR_BG = "#cbd5e1"  # slate-300 — darker, lets cards pop
-_LINK_BG = "#ffffff"  # white card per link
+# Phase 13.5 — light-navy sidebar palette per Jatin's brand direction.
+# References Microsoft Fabric, Datadog, Linear sidebars: dark navy base,
+# white link cards, gold accents. Off-white text + slate-300 muted text
+# read cleanly on dark navy.
+_SIDEBAR_BG = "#1e3a5f"  # light navy — softer than brand navy, still authoritative
+_LINK_BG = "#ffffff"  # white card per link — pops crisply on dark navy
 _LINK_BG_ALT = "#f8fafc"  # subtle zebra tint
 _LINK_BG_HOVER = "#dbeafe"  # soft brand-blue on hover
 _SIDEBAR_BG_HOVER = "#dbeafe"  # legacy alias
-_SIDEBAR_BORDER = "#94a3b8"  # slate-400 — borders read clearly on slate-300
+_SIDEBAR_BORDER = "#3b5478"  # mid-tone navy — subtle borders that don't fight the bg
 _BRAND_GOLD = "#d4af37"
 _BRAND_GOLD_DIM = "#b9952f"
 _BRAND_NAVY = "#0a1a3e"
-_TEXT_PRIMARY = "#0a1a3e"  # navy — high contrast on slate bg
-_TEXT_MUTED = "#475569"  # slate-600 — for body text
-_SECTION_HEADER = "#0a1a3e"  # navy — section labels are loud, not muted
-_NAV_INPUT_INK = "#0a1a3e"
+_TEXT_PRIMARY = "#0a1a3e"  # navy — used INSIDE white link cards
+_TEXT_MUTED = "#cbd5e1"  # slate-300 — for body text directly on the navy bg
+_TEXT_ON_BG = "#f1f5f9"  # near-white — primary text directly on the navy bg
+_SECTION_HEADER = "#f1f5f9"  # near-white section labels on dark navy
+_NAV_INPUT_INK = "#0a1a3e"  # navy — selectbox internal text on its own white bg
 
 
 # -----------------------------------------------------------------------------
@@ -184,20 +185,30 @@ _SIDEBAR_CSS = f"""
     border-right: 1px solid #1f2937;
   }}
   [data-testid="stSidebar"] > div:first-child {{
-    padding-top: 1.2rem;
+    padding-top: 0;
     padding-left: .9rem;
     padding-right: .9rem;
   }}
+  /* Streamlit injects a top spacer (.stAppDeployButton-host or similar)
+     above the sidebar content. Compress it so the brand block sits
+     near the top edge rather than floating mid-sidebar. */
+  [data-testid="stSidebar"] [data-testid="stSidebarHeader"],
+  [data-testid="stSidebar"] [data-testid="stSidebarUserContent"] {{
+    padding-top: .25rem !important;
+  }}
+  /* Tighten the brand block's own top margin so the whole nav floats
+     to the top instead of hanging in the middle of the sidebar. */
+  .dl-nav-brand {{ margin-top: 0 !important; }}
 
-  /* Default text inside the sidebar — navy on slate-50 for high contrast.
-     Light bg means the selectbox renders natively with no overrides
-     needed (it's already dark-on-light). */
+  /* Default text inside the sidebar — near-white on dark navy. Link
+     cards are white internally, so they get their own per-card text
+     color (_TEXT_PRIMARY = navy) further down. */
   [data-testid="stSidebar"],
   [data-testid="stSidebar"] p,
   [data-testid="stSidebar"] span,
   [data-testid="stSidebar"] div,
   [data-testid="stSidebar"] label {{
-    color: {_TEXT_PRIMARY};
+    color: {_TEXT_ON_BG};
   }}
   /* The "Client" widget label sits above the selectbox — slate-600 mute
      so it reads as supporting text, not a primary heading. */
@@ -258,12 +269,14 @@ _SIDEBAR_CSS = f"""
     text-align: center;
   }}
   .dl-nav-logo-plaque {{
-    /* Plaque kept as a no-op wrapper for backwards compat with markup
-       that still includes it — it's invisible on the light sidebar. */
-    background: transparent;
-    border: none;
-    box-shadow: none;
-    padding: .25rem 0;
+    /* White plaque behind the blue/color logo so it reads on the
+       dark-navy sidebar. Same card treatment as the link buttons —
+       feels intentional, not patched. */
+    background: #ffffff;
+    border: 1px solid {_SIDEBAR_BORDER};
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, .15);
+    padding: .5rem .75rem;
     align-self: center;
     width: 100%;
     max-width: 200px;
@@ -275,18 +288,20 @@ _SIDEBAR_CSS = f"""
     height: auto;
     display: inline-block;
   }}
-  /* Wordmark — navy + tracked-out caps. Gold underline on the parent
-     block carries the brand accent without needing the title to repeat it. */
+  /* Tagline under the logo — "Command Center" in gold caps. The
+     DataLink wordmark is already in the logo image above, so this
+     line carries the suite name only (no redundant brand text). */
   .dl-nav-title {{
-    color: {_BRAND_NAVY};
+    color: {_BRAND_GOLD};
     font-weight: 700;
-    font-size: .95rem;
-    letter-spacing: .14em;
+    font-size: .85rem;
+    letter-spacing: .18em;
     text-transform: uppercase;
     text-align: center;
     margin: 0;
     padding-bottom: 0;
     border-bottom: none;
+    line-height: 1.25;
   }}
 
   /* Section header — Operate / Author DQ / Observe / Inspect / External /
@@ -352,89 +367,113 @@ _SIDEBAR_CSS = f"""
     margin: .14rem 0;
     border-radius: 5px;
     text-decoration: none !important;
-    color: {_TEXT_PRIMARY} !important;
+    /* Resting state: transparent card so the dark-navy sidebar shows
+       through. Off-white text reads cleanly on dark navy. Per-category
+       gradients (defined below) overlay as soft tints, not solid cards. */
+    color: {_TEXT_ON_BG} !important;
     font-size: .82rem;
     font-weight: 500;
-    background: {_LINK_BG};
-    border: 1px solid {_SIDEBAR_BORDER};
+    background: transparent;
+    border: 1px solid transparent;
     border-left: 3px solid {_SIDEBAR_BORDER};
-    box-shadow: 0 1px 2px rgba(15, 23, 42, .08);
     transition: background .14s ease, border-color .14s ease,
                 transform .14s ease, box-shadow .14s ease,
                 color .14s ease;
   }}
-  /* Per-category GRADIENTS — same left→right fade texture as the Control
-     Tower active link, but each section gets its own hue. The eye groups
-     same-category links by color while still seeing the unified gradient
-     treatment across the whole sidebar. Active link's gold gradient
-     OVERRIDES the category gradient (defined further down with .active). */
+  /* Inner spans inherit white text from the link — explicit so the
+     global sidebar span rule can't override it. */
+  .dl-nav-link span {{
+    color: {_TEXT_ON_BG} !important;
+  }}
+  /* Hover state — pure white card, navy/black text, slide + shadow.
+     `!important` on background is required to override the per-category
+     gradient rules (.dl-nav-link.cat-*) which come later in source
+     order with equal specificity. Without it, hover would still show
+     the category-tinted gradient instead of the clean white card. */
+  .dl-nav-link:hover {{
+    background: #ffffff !important;
+    border-color: #93c5fd;
+    border-left-color: {_BRAND_NAVY};
+    box-shadow: 0 4px 10px rgba(0, 0, 0, .25);
+    transform: translateX(2px);
+  }}
+  .dl-nav-link:hover,
+  .dl-nav-link:hover span {{
+    color: {_TEXT_PRIMARY} !important;  /* navy — readable on white card */
+  }}
+  /* Active link's inner spans stay gold-dim (over the gold gradient
+     bg). Higher specificity than the rules above so it wins, including
+     when an active link is hovered. */
+  .dl-nav-link.active,
+  .dl-nav-link.active span,
+  .dl-nav-link.active:hover,
+  .dl-nav-link.active:hover span {{
+    color: {_BRAND_GOLD_DIM} !important;
+  }}
+  /* Per-category gradients — original treatment from rounds 1+2 with
+     ONE change: cat-operate switched from amber to emerald. Amber was
+     too close to gold visually, making the active link camouflage with
+     resting links in the Operate section. Emerald is distinct, reads
+     as "running / live ops", and pops against the dark navy bg. */
   .dl-nav-link.cat-operate {{
     background: linear-gradient(
         90deg,
-        rgba(245,158,11,.32) 0%,
-        rgba(245,158,11,.10) 70%,
-        {_LINK_BG} 100%);
-    border-color: #fcd34d;            /* amber-300 */
-    border-left-color: #f59e0b;       /* amber-500 — bold left rail */
+        rgba(6,182,212,.32) 0%,         /* cyan-500 — teal-blue */
+        rgba(6,182,212,.10) 70%,
+        transparent 100%);
+    border-color: #67e8f9;              /* cyan-300 */
+    border-left-color: #06b6d4;         /* cyan-500 — bold left rail */
   }}
   .dl-nav-link.cat-author {{
     background: linear-gradient(
         90deg,
         rgba(99,102,241,.28) 0%,
         rgba(99,102,241,.08) 70%,
-        {_LINK_BG} 100%);
-    border-color: #a5b4fc;            /* indigo-300 */
-    border-left-color: #6366f1;       /* indigo-500 */
+        transparent 100%);
+    border-color: #a5b4fc;              /* indigo-300 */
+    border-left-color: #6366f1;         /* indigo-500 */
   }}
   .dl-nav-link.cat-observe {{
     background: linear-gradient(
         90deg,
-        rgba(14,165,233,.28) 0%,       /* sky — neutral, fresh */
+        rgba(14,165,233,.28) 0%,        /* sky — neutral, fresh */
         rgba(14,165,233,.08) 70%,
-        {_LINK_BG} 100%);
-    border-color: #7dd3fc;            /* sky-300 */
-    border-left-color: #0ea5e9;       /* sky-500 */
+        transparent 100%);
+    border-color: #7dd3fc;              /* sky-300 */
+    border-left-color: #0ea5e9;         /* sky-500 */
   }}
   .dl-nav-link.cat-inspect {{
     background: linear-gradient(
         90deg,
-        rgba(180,83,9,.28) 0%,         /* bronze/copper — warm, neutral */
+        rgba(180,83,9,.28) 0%,          /* bronze/copper — warm, neutral */
         rgba(180,83,9,.08) 70%,
-        {_LINK_BG} 100%);
-    border-color: #fdba74;            /* orange-300 */
-    border-left-color: #b45309;       /* amber-700 (bronze) */
+        transparent 100%);
+    border-color: #fdba74;              /* orange-300 */
+    border-left-color: #b45309;         /* amber-700 (bronze) */
   }}
   /* External Tools & Databases — distinct hues so they're visually
      separated from the lifecycle stages above. Teal = external portals
-     (Airflow, Grafana, …); purple = data stores. */
+     (Airflow, Grafana, …); slate = data stores. */
   .dl-nav-link.cat-tools {{
     background: linear-gradient(
         90deg,
         rgba(20,184,166,.28) 0%,
         rgba(20,184,166,.08) 70%,
-        {_LINK_BG} 100%);
-    border-color: #5eead4;            /* teal-300 */
-    border-left-color: #14b8a6;       /* teal-500 */
+        transparent 100%);
+    border-color: #5eead4;              /* teal-300 */
+    border-left-color: #14b8a6;         /* teal-500 */
   }}
   .dl-nav-link.cat-data {{
     background: linear-gradient(
         90deg,
-        rgba(100,116,139,.32) 0%,      /* slate — neutral, professional */
+        rgba(100,116,139,.32) 0%,       /* slate — neutral, professional */
         rgba(100,116,139,.10) 70%,
-        {_LINK_BG} 100%);
-    border-color: #cbd5e1;            /* slate-300 */
-    border-left-color: #475569;       /* slate-600 (deeper rail for contrast) */
+        transparent 100%);
+    border-color: #cbd5e1;              /* slate-300 */
+    border-left-color: #475569;         /* slate-600 */
   }}
-  /* Hover — soft brand-blue tint, navy left-border accent, slight slide.
-     Cards lift via a bigger drop shadow so the row pops above its
-     neighbours. */
-  .dl-nav-link:hover {{
-    background: {_LINK_BG_HOVER};
-    border-color: #93c5fd;          /* blue-300 */
-    border-left-color: {_BRAND_NAVY};
-    transform: translateX(2px);
-    box-shadow: 0 4px 10px rgba(10, 26, 62, .12);
-  }}
+  /* (Hover state lives further up — soft brand-blue tint, navy
+     left-border accent, slight slide, drop shadow lift.) */
   /* Active — strong gold gradient, gold left-border, gold-dim bold text,
      and a subtle inset glow so the active row reads from across the
      screen as "you are here". */
@@ -443,7 +482,7 @@ _SIDEBAR_CSS = f"""
         90deg,
         rgba(212,175,55,.40) 0%,
         rgba(212,175,55,.12) 70%,
-        {_LINK_BG} 100%);
+        transparent 100%);
     border-color: {_BRAND_GOLD};
     border-left-color: {_BRAND_GOLD};
     color: {_BRAND_GOLD_DIM} !important;
@@ -655,11 +694,17 @@ def render_sidebar(active: str | None = None) -> None:
         # so the brand renders in its native colors against the dark navy
         # sidebar. Falls back to the emoji marker if the static asset is
         # missing (fresh checkout).
-        if _LOGO_COLOR_DATA:
+        # The DataLink logo already carries the brand wordmark — no need
+        # to repeat "DataLink" in text below it. Just the suite name
+        # ("Command Center") in gold serves as the tagline.
+        # Logo: use the ORIGINAL blue/color variant per Jatin's brand
+        # direction. Falls back to white only if color asset is missing.
+        _logo_data = _LOGO_COLOR_DATA or _LOGO_WHITE_DATA
+        if _logo_data:
             st.markdown(
                 f'<div class="dl-nav-brand">'
                 f'  <div class="dl-nav-logo-plaque">'
-                f'    <img src="{_LOGO_COLOR_DATA}" alt="DataLink" class="dl-nav-logo" />'
+                f'    <img src="{_logo_data}" alt="DataLink" class="dl-nav-logo" />'
                 f"  </div>"
                 f'  <div class="dl-nav-title">Command Center</div>'
                 f"</div>",
@@ -667,7 +712,7 @@ def render_sidebar(active: str | None = None) -> None:
             )
         else:
             st.markdown(
-                '<div class="dl-nav-title">🏛️ DataLink Command Center</div>',
+                '<div class="dl-nav-title">🏛️ Command Center</div>',
                 unsafe_allow_html=True,
             )
 
@@ -739,6 +784,34 @@ def render_sidebar(active: str | None = None) -> None:
                 ),
                 unsafe_allow_html=True,
             )
+
+        # ---- Refresh now — clear poisoned cache without container restart ----
+        # Operator escape hatch: a transient Snowflake error (e.g. warehouse
+        # cold-start) gets memoised in the negative cache for 120s by
+        # design (don't spam Snowflake on flapping connections). Symptom
+        # = empty dropdowns / zero metrics that "should" have data.
+        # Clicking this button blows the positive + negative caches and
+        # reruns the page.
+        st.markdown(
+            '<div class="dl-nav-section">Maintenance</div>',
+            unsafe_allow_html=True,
+        )
+        if st.button(
+            "🔄 Refresh data",
+            key="sidebar_refresh_cache",
+            use_container_width=True,
+            help=(
+                "Clear in-process query cache and rerun the page. Use when "
+                "a dropdown looks empty or a metric reads zero unexpectedly "
+                "— a transient Snowflake error may have poisoned the cache "
+                "for 120s. This is faster than a container restart."
+            ),
+        ):
+            from datalink.ui._query import clear_query_cache
+
+            clear_query_cache()
+            st.toast("🔄 Query cache cleared. Rerunning…", icon="✅")
+            st.rerun()
 
         # ---- Footer ----
         st.markdown(

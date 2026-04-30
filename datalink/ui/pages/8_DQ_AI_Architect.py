@@ -132,8 +132,7 @@ def _pill(text: str, css: str) -> str:
 # ============================================================================
 
 st.markdown(
-    f"<h1>🧪 <span style='color:{_NAVY}'>DataLink</span> "
-    f"<span style='color:{_GOLD}'>DQ AI Architect</span></h1>",
+    f"<h1>🧪 <span style='color:{_GOLD}'>DQ AI Architect</span></h1>",
     unsafe_allow_html=True,
 )
 st.markdown(

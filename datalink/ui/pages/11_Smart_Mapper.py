@@ -33,7 +33,11 @@ import streamlit as st
 
 from datalink.agents.llm_router import get_llm
 from datalink.agents.mapper.optimization import TargetBackend, validate_push_sql
-from datalink.agents.mapper.orchestrator import propose_silver_mapping
+from datalink.agents.mapper.orchestrator import (
+    propose_gold_view,
+    propose_push_script,
+    propose_silver_mapping,
+)
 from datalink.agents.mapper.session import (
     MappingSessionRegistry,
     SessionStatus,
@@ -142,22 +146,35 @@ if is_new:
     new_col1, new_col2, new_col3 = st.columns([2, 1, 1])
     with new_col1:
         # Source table picker — list Bronze tables for this client.
+        # Parameterize the LIKE pattern so the literal `%` doesn't collide
+        # with Snowflake adapter's pyformat substitution (would fail with
+        # "TypeError: not enough arguments for format string").
+        bronze_schema = f"BRONZE_{client_id.upper()}" if client_id != "default" else "BRONZE"
+        bronze_tables: list[str] = []
+        list_error: str | None = None
         with _warehouse(readonly=True) as wh:
             try:
-                bronze_schema = (
-                    f"BRONZE_{client_id.upper()}" if client_id != "default" else "BRONZE"
-                )
                 rows = wh.query(
                     "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = $s AND table_name LIKE 'RAW_%' "
+                    "WHERE table_schema = $s AND table_name LIKE $p "
                     "ORDER BY table_name",
-                    {"s": bronze_schema},
+                    {"s": bronze_schema, "p": "RAW_%"},
                 )
-                bronze_tables = [f"{bronze_schema}.{r['table_name']}" for r in rows]
-            except Exception:
-                bronze_tables = []
+                # Snowflake returns UPPER keys; DuckDB returns lower.
+                # Normalise so both backends work.
+                bronze_tables = [
+                    f"{bronze_schema}.{r.get('table_name') or r.get('TABLE_NAME')}" for r in rows
+                ]
+            except Exception as e:
+                list_error = f"{type(e).__name__}: {e}"
 
-        if not bronze_tables:
+        if list_error:
+            st.error(
+                f"Failed to list tables in `{bronze_schema}`: {list_error}. "
+                f"Check Snowflake connection / role permissions."
+            )
+            source_table = ""
+        elif not bronze_tables:
             st.warning(
                 f"No `RAW_*` tables found in `{bronze_schema}`. "
                 f"Run ▶ Run Bronze on Control Tower first to create source tables."
@@ -314,25 +331,34 @@ if session.conversation:
 # ============================================================================
 
 if session.status is SessionStatus.DRAFT:
-    st.markdown("### Propose / revise")
+    # ----------------------------------------------------------------
+    # 4a. STEP 1 — propose Silver (always required first)
+    # ----------------------------------------------------------------
+    st.markdown("### Step 1 — Propose Silver dbt model")
+    silver_done = bool(session.silver_sql)
+    silver_help = (
+        "✅ Silver proposal exists — you can revise it below or move to Step 2 (Gold)."
+        if silver_done
+        else "Required first. The agent profiles the source, hits Claude, generates a Silver SCD2 dbt model + sample preview."
+    )
+    st.caption(silver_help)
     placeholder = (
-        "Describe the Gold target in plain English. e.g.:\n"
+        "Describe the Silver target in plain English. e.g.:\n"
         "  • A SCD2 Silver sat for member demographics keyed on member_id+plan_id\n"
-        "  • Build a claims fact keyed on claim_id, with member_id FK, paid_amount, status\n"
-        "  • A Patient_Auth fact for UM with auth_id PK, denial_reason from the latest non-null"
+        "  • Build a claims fact keyed on claim_id, with member_id FK, paid_amount, status"
         if session.turn_count == 0
-        else "Revise. e.g. 'no, denial_reason should come from the latest non-null', 'drop subscriber_id', 'add a soft-delete check on FULL batches'"
+        else "Revise. e.g. 'no, denial_reason should come from the latest non-null', 'drop subscriber_id', 'add soft-delete on FULL batches'"
     )
     user_prompt = st.text_area(
         "Your instruction",
         placeholder=placeholder,
-        height=120,
-        key=f"prompt_{session.session_id}",
+        height=110,
+        key=f"prompt_silver_{session.session_id}",
     )
-    p_col1, p_col2, p_col3, _ = st.columns([1, 1, 1, 2])
-    with p_col1:
+    s_col1, s_col2, s_col3, _ = st.columns([1.2, 1, 1, 1.8])
+    with s_col1:
         if st.button(
-            "🤖 Propose / revise",
+            "🤖 Propose / revise Silver",
             type="primary",
             use_container_width=True,
             disabled=not user_prompt.strip(),
@@ -351,7 +377,7 @@ if session.status is SessionStatus.DRAFT:
                         actor=st.session_state.get("user", "anonymous@local"),
                     )
                 st.success(
-                    f"Proposed `{proposal.silver_target_table}` "
+                    f"Proposed Silver `{proposal.silver_target_table}` "
                     f"(NK={proposal.natural_keys}, {len(proposal.scd2_change_cols)} change cols, "
                     f"{len(proposal.sample_rows)} sample rows). "
                     + (
@@ -362,9 +388,11 @@ if session.status is SessionStatus.DRAFT:
                 )
                 st.rerun()
             except Exception as e:
-                st.error(f"Mapper failed: {type(e).__name__}: {e}")
-    with p_col2:
-        if st.button("🗑 Archive session", use_container_width=True):
+                st.error(f"Silver mapper failed: {type(e).__name__}: {e}")
+    with s_col2:
+        if st.button(
+            "🗑 Archive session", use_container_width=True, key=f"arc_{session.session_id}"
+        ):
             try:
                 with _warehouse(readonly=False) as wh:
                     MappingSessionRegistry(wh).archive(
@@ -376,6 +404,191 @@ if session.status is SessionStatus.DRAFT:
                 st.rerun()
             except Exception as e:
                 st.error(f"Archive failed: {e}")
+
+    # ----------------------------------------------------------------
+    # 4b. STEP 2 — propose Gold (only when Silver exists + mode allows)
+    # ----------------------------------------------------------------
+    if session.target_mode is not TargetMode.SILVER_ONLY:
+        st.markdown("### Step 2 — Propose Gold view")
+        gold_done = bool(session.gold_sql)
+        if not silver_done:
+            st.caption(
+                "🔒 Silver must be proposed first — Gold projects from the Silver SCD2 model."
+            )
+        elif gold_done:
+            st.caption("✅ Gold proposal exists — revise below or move to Step 3 (On-Prem push).")
+        else:
+            st.caption(
+                "Generates a Gold dbt view that filters Silver to active rows + projects "
+                "operational columns. Revise via NL just like Silver."
+            )
+        gold_prompt = st.text_area(
+            "Gold instruction",
+            placeholder=(
+                "e.g. 'Expose only active members with member_id, dob, gender, plan_id'. "
+                "Or revise the existing Gold proposal."
+            ),
+            height=80,
+            key=f"prompt_gold_{session.session_id}",
+            disabled=not silver_done,
+        )
+        if st.button(
+            "🧊 Propose / revise Gold",
+            use_container_width=False,
+            disabled=not (silver_done and gold_prompt.strip()),
+            key=f"btn_gold_{session.session_id}",
+        ):
+            try:
+                settings = load_settings()
+                llm = get_llm(settings)
+                with _warehouse(readonly=False) as wh:
+                    reg = MappingSessionRegistry(wh)
+                    g_proposal = propose_gold_view(
+                        llm=llm,
+                        warehouse=wh,
+                        session_registry=reg,
+                        session_id=session.session_id,
+                        user_prompt=gold_prompt.strip(),
+                        actor=st.session_state.get("user", "anonymous@local"),
+                    )
+                st.success(
+                    f"Proposed Gold view `{g_proposal.gold_target_table}` "
+                    + (
+                        f"⚠️ Sample run failed: {g_proposal.sample_error}"
+                        if g_proposal.sample_error
+                        else "Sample preview ran successfully."
+                    )
+                )
+                st.rerun()
+            except Exception as e:
+                st.error(f"Gold mapper failed: {type(e).__name__}: {e}")
+
+    # ----------------------------------------------------------------
+    # 4c. STEP 3 — propose On-Prem push (only when Gold exists + FULL_STACK)
+    # ----------------------------------------------------------------
+    if session.target_mode is TargetMode.FULL_STACK:
+        st.markdown("### Step 3 — Propose On-Prem push script")
+        push_done = bool(session.onprem_postgres_sql or session.onprem_mssql_sql)
+        if not session.gold_sql:
+            st.caption("🔒 Gold must be proposed first — push scripts read from the Gold view.")
+        elif push_done:
+            st.caption(
+                "✅ At least one push script exists — re-run for the other backend, or move to Submit."
+            )
+        else:
+            st.caption(
+                "Generates an idempotent UPSERT script (Postgres `ON CONFLICT` / SQL Server "
+                "`MERGE INTO`) keyed on the target's PK. Watermark-driven, batched, and "
+                "scored against the Phase 13.4 optimisation rules."
+            )
+
+        # Per-backend form. Two side-by-side blocks.
+        push_can_run = bool(session.gold_sql)
+        push_l, push_r = st.columns(2)
+
+        def _render_push_form(
+            container: Any,
+            backend_label: str,
+            backend_value: str,
+            existing_sql: str | None,
+            *,
+            default_target: str,
+            key_prefix: str,
+        ) -> None:
+            # Re-narrow `session` inside this nested function. mypy does not
+            # propagate the outer-scope `if session is None: st.stop()` guard
+            # through closures, so we re-assert here for type safety.
+            assert session is not None
+            with container:
+                st.markdown(f"**{backend_label}**")
+                if existing_sql:
+                    st.success(
+                        f"Already proposed ({len(existing_sql)} chars). "
+                        f"Submit a new prompt to overwrite."
+                    )
+                target_table = st.text_input(
+                    "On-Prem target table (schema.table)",
+                    value=default_target,
+                    key=f"push_tgt_{key_prefix}_{session.session_id}",
+                    help="The fully-qualified On-Prem table. e.g. `um.Member` for SQL Server.",
+                )
+                pks_csv = st.text_input(
+                    "Primary key column(s) — comma-separated",
+                    value="member_id",
+                    key=f"push_pks_{key_prefix}_{session.session_id}",
+                    help="Used as the UPSERT join key. Multi-column PKs allowed.",
+                )
+                cols_csv = st.text_input(
+                    "Business columns to push — comma-separated",
+                    value="member_id, dob, gender, plan_id",
+                    key=f"push_cols_{key_prefix}_{session.session_id}",
+                    help="Columns from the Gold view to ship. Include the PK columns.",
+                )
+                if st.button(
+                    f"📤 Generate {backend_label} push",
+                    use_container_width=True,
+                    disabled=not (
+                        push_can_run
+                        and target_table.strip()
+                        and pks_csv.strip()
+                        and cols_csv.strip()
+                    ),
+                    key=f"btn_push_{key_prefix}_{session.session_id}",
+                ):
+                    try:
+                        pks = [s.strip() for s in pks_csv.split(",") if s.strip()]
+                        cols = [s.strip() for s in cols_csv.split(",") if s.strip()]
+                        settings = load_settings()
+                        llm = get_llm(settings)
+                        with _warehouse(readonly=False) as wh:
+                            reg = MappingSessionRegistry(wh)
+                            p = propose_push_script(
+                                llm=llm,
+                                warehouse=wh,
+                                session_registry=reg,
+                                session_id=session.session_id,
+                                backend=backend_value,
+                                target_table=target_table.strip(),
+                                primary_keys=pks,
+                                column_list=cols,
+                                actor=st.session_state.get("user", "anonymous@local"),
+                            )
+                        score_emoji = (
+                            "🟢"
+                            if p.optimization_score >= 0.9
+                            else "🟡"
+                            if p.optimization_score >= 0.7
+                            else "🔴"
+                        )
+                        st.success(
+                            f"{backend_label} push proposed — opt score {score_emoji} "
+                            f"{p.optimization_score:.2f} "
+                            + (
+                                f"(failed: {', '.join(p.failed_rules)})"
+                                if p.failed_rules
+                                else "(all rules pass)"
+                            )
+                        )
+                        st.rerun()
+                    except Exception as e:
+                        st.error(f"{backend_label} push failed: {type(e).__name__}: {e}")
+
+        _render_push_form(
+            push_l,
+            "Postgres",
+            "POSTGRES",
+            session.onprem_postgres_sql,
+            default_target="um.member",
+            key_prefix="pg",
+        )
+        _render_push_form(
+            push_r,
+            "SQL Server",
+            "SQLSERVER",
+            session.onprem_mssql_sql,
+            default_target="um.Member",
+            key_prefix="ms",
+        )
 elif session.status is SessionStatus.PENDING_REVIEW:
     st.info(
         "🔒 Session is **PENDING_REVIEW** — conversation is frozen until "

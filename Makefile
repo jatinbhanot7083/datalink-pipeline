@@ -458,3 +458,111 @@ smoke-phase-6-full: ## Phase 6 E2E smoke with bronze_ingest for aetna (5-10 min)
 .PHONY: smoke-phase-6-reset
 smoke-phase-6-reset: ## Full nuke + rebuild + smoke — THE before-demo command
 	@.venv/bin/python scripts/smoke_phase_6.py --reset --client aetna
+
+# =============================================================================
+# RECOVERY TOOLKIT — when http://localhost:8000 is unreachable from Windows.
+# Background: WSL2 + Hyper-V firewall + iphlpsvc cache stale port bindings
+# after experiments / reboots. The validated recipe (2026-04-30) is:
+#
+#   1. ADMIN PowerShell:  scripts\recover-windows-network.ps1
+#      └─ resets netsh portproxy + restarts iphlpsvc + wsl --shutdown
+#   2. WSL bash:          make recover
+#      └─ starts stack, waits for healthy, pre-warms caches
+#
+# Total time ~3 minutes. See docs/demo_journal.md for the manual fallback.
+# =============================================================================
+
+.PHONY: recover
+recover: ## End-to-end WSL-side recovery (run AFTER recover-windows-network.ps1)
+	@echo
+	@echo "$(BOLD)============================================================$(RST)"
+	@echo "$(BOLD)  DataLink Command Center — WSL-side recovery$(RST)"
+	@echo "$(BOLD)============================================================$(RST)"
+	@echo
+	@echo "$(BOLD)>>> Step 1/5 — Sanity check: WSL is up$(RST)"
+	@uname -n
+	@echo
+	@echo "$(BOLD)>>> Step 2/5 — Stop any leftover Docker stack$(RST)"
+	@docker compose down --remove-orphans 2>&1 | tail -3 || echo "  (nothing to stop)"
+	@echo
+	@echo "$(BOLD)>>> Step 3/5 — Bring the stack up clean$(RST)"
+	@docker compose up -d 2>&1 | tail -10
+	@echo
+	@echo "$(BOLD)>>> Step 4/5 — Wait for control_tower healthy (up to 150s)$(RST)"
+	@for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do \
+	  status=$$(docker inspect datalink-control-tower --format '{{.State.Health.Status}}' 2>/dev/null || echo missing); \
+	  if [ "$$status" = "healthy" ]; then echo "  attempt $$i: healthy"; break; fi; \
+	  echo "  attempt $$i: $$status — waiting 10s..."; \
+	  sleep 10; \
+	done
+	@echo
+	@echo "$(BOLD)>>> Step 5/5 — Pre-warm Snowflake + Streamlit caches$(RST)"
+	@docker exec datalink-control-tower python3 -c "from datalink.ui._query import warehouse_ctx; \
+	  ctx = warehouse_ctx(readonly=True); wh = ctx.__enter__(); \
+	  wh.query('SELECT 1'); wh.query('SELECT COUNT(*) FROM CONTROL.dq_suites'); \
+	  print('  Snowflake warmed')" 2>&1 | tail -2
+	@for path in '' Pipeline_Control DQ_AI_Architect Smart_Mapper Schema_Drift DQ_Author DQ_Review; do \
+	  curl -s -o /dev/null --max-time 8 "http://localhost:8000/$$path?client=aetna"; \
+	done
+	@echo "  Streamlit pre-warmed (7 pages)"
+	@echo
+	@code=$$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 http://localhost:8000); \
+	if [ "$$code" = "200" ]; then \
+	  echo "$(BOLD)============================================================$(RST)"; \
+	  echo "$(BOLD)  ✓ URL READY — open http://localhost:8000 in browser$(RST)"; \
+	  echo "$(BOLD)============================================================$(RST)"; \
+	else \
+	  echo "$(BOLD)WARNING: WSL-side curl returned http=$$code$(RST)"; \
+	  echo "  If browser also fails, run the admin PowerShell script first:"; \
+	  echo "  scripts\\recover-windows-network.ps1"; \
+	fi
+	@echo
+
+.PHONY: recover-help
+recover-help: ## Print the full 2-command recovery procedure
+	@echo
+	@echo "$(BOLD)Recovery procedure — when http://localhost:8000 is unreachable:$(RST)"
+	@echo
+	@echo "  $(BOLD)1.$(RST) In ADMIN PowerShell (right-click PowerShell → Run as Administrator):"
+	@echo "       cd 'C:\\Users\\Jatin\\OneDrive - MASTER WORKSPACE\\1_AA_WORKSPACE\\DataPipelinesWithGX'"
+	@echo "       .\\scripts\\recover-windows-network.ps1"
+	@echo
+	@echo "  $(BOLD)2.$(RST) In WSL bash (this terminal):"
+	@echo "       make recover"
+	@echo
+	@echo "  Total time: ~3 minutes."
+	@echo
+	@echo "  See docs/demo_journal.md → 'RECOVERY RUNBOOK' for the 13-step"
+	@echo "  manual procedure if scripts can't be used."
+	@echo
+
+.PHONY: show-url
+show-url: ## Print the URLs that should work in your browser
+	@WSL_IP=$$(hostname -I | awk '{print $$1}'); \
+	echo; \
+	echo "$(BOLD)============================================================$(RST)"; \
+	echo "$(BOLD)  DataLink — URLs to use in your Windows browser$(RST)"; \
+	echo "$(BOLD)============================================================$(RST)"; \
+	echo; \
+	echo "  Control Tower : $(BOLD)http://localhost:8000$(RST)"; \
+	echo "  Airflow       : http://localhost:8088"; \
+	echo "  Grafana       : http://localhost:3000"; \
+	echo "  pgAdmin       : http://localhost:5050"; \
+	echo "  Filebrowser   : http://localhost:8082"; \
+	echo "  Adminer       : http://localhost:8081"; \
+	echo "  GX Docs       : http://localhost:8090"; \
+	echo; \
+	echo "$(DIM)Direct WSL IP fallback (if localhost fails):$(RST)"; \
+	echo "$(DIM)  http://$$WSL_IP:8000$(RST)"; \
+	echo
+
+.PHONY: nuke-rules-engine
+nuke-rules-engine: ## If ecc-rules-engine left state behind, kill all of it
+	@echo "$(BOLD)>>> Stopping any rules-engine containers$(RST)"
+	@if [ -f /mnt/c/PROJECTS/ecc-rules-engine/deploy/docker-compose.yml ]; then \
+	  cd /mnt/c/PROJECTS/ecc-rules-engine/deploy && docker compose down 2>&1 | tail -5; \
+	fi
+	@echo "$(BOLD)>>> Killing rules-engine python processes$(RST)"
+	@pkill -f 'ecc_rules_engine' 2>/dev/null || true
+	@pkill -f 'uvicorn.*8080' 2>/dev/null || true
+	@echo "  done"

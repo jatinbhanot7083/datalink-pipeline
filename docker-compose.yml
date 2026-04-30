@@ -194,11 +194,7 @@ services:
   # XPS8940: PID 7540). :5434 is free on the machines we care about.
   postgres:
     restart: unless-stopped
-    # pgvector/pgvector:pg16 is a drop-in for postgres:16 with the
-    # `vector` extension preinstalled — used by datalink.memory for
-    # agent RAG (similar-suite + similar-breach retrieval). Same data
-    # dir layout as upstream Postgres so the named volume migrates as-is.
-    image: pgvector/pgvector:pg16
+    image: postgres:16
     container_name: datalink-postgres
     networks: [datalink]
     environment:
@@ -220,10 +216,7 @@ services:
   # removed; router targets become [sqlserver, postgres].
   postgres_replica:
     restart: unless-stopped
-    # Match the primary's image so streaming replication works. pgvector
-    # binaries are present here too — not strictly needed (replica is
-    # read-only), but symmetric with the primary so manual reads land.
-    image: pgvector/pgvector:pg16
+    image: postgres:16
     container_name: datalink-postgres-replica
     networks: [datalink]
     environment:

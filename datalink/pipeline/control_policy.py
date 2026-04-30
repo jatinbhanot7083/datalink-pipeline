@@ -1,33 +1,44 @@
-"""Phase 12 — pipeline-control threshold policies (config-time HITL).
+"""Phase 12 / 12.5 — pipeline-control threshold policies.
 
-Two-layer HITL design (per Jatin's requirement #3):
+Two-layer HITL (config-time review, runtime automatic) — Phase 12.
+Per-source-type granularity + global defaults + cross-client clone — Phase 12.5.
 
-  * **Layer 1 — config-time HITL.** Threshold edits go through the same
-    DRAFT → PENDING_REVIEW → APPROVED → LIVE state machine as Phase 10's
-    expectation suites. An operator can't unilaterally raise the abort
-    threshold from 25% to 75% on a Friday afternoon — the change has to
-    pass review. ApprovalMode is reused from ``datalink.quality.registry``
-    so the HITL semantics are byte-identical (HITL default; AUTO_APPROVE
-    forbidden when editing a LIVE policy).
+Policy tuple: ``(client_id, pipeline_id, source_type)``
 
-  * **Layer 2 — runtime is automatic.** Once a policy is LIVE, runtime
-    threshold checks (in :mod:`datalink.pipeline.hooks`) fire against it
-    automatically — no human in the live path. The human already
-    pre-approved the rule at config time. This avoids the operational
-    hazard of "every breach pages an operator before any action".
+  * ``client_id``    — tenant. ``'*'`` is the wildcard "global default".
+  * ``pipeline_id``  — ``bronze_ingest`` / ``silver_build`` / ``gold_egress``.
+  * ``source_type``  — ``CLAIMS`` / ``MEMBERSHIP`` / ``PROVIDER`` / ``NULL``.
+                       ``NULL`` = "all source types under this pipeline".
 
-Policy granularity: per-(client_id, pipeline_id). Pipeline IDs match the
-ones already used in :mod:`datalink.pipeline.hooks`:
-``bronze_ingest`` / ``silver_build`` / ``gold_egress``. Stage-level
-sub-granularity is intentionally NOT exposed in v1 — the operator's
-mental model is "PIPELINE level", and stage-level config would 5x the
-surface area for marginal value.
+Lookup precedence (most specific wins, falls through on miss):
 
-Back-compat: when no LIVE policy exists for ``(client, pipeline)``,
-:func:`get_or_default` returns ``DEFAULT_POLICY``, whose threshold
-values match the hardcoded numbers in the pre-Phase-12 ``hooks.py``.
-This means tenants that haven't authored a policy yet continue to
-behave exactly as today — zero regression risk.
+  1. ``(client, pipeline, source_type)`` — exact tenant + per-source
+  2. ``(client, pipeline, NULL)``        — exact tenant + pipeline-wide
+  3. ``('*',   pipeline, source_type)``  — global per-source-type
+  4. ``('*',   pipeline, NULL)``         — global per-pipeline
+  5. :data:`DEFAULT_POLICY`              — hardcoded synthetic fallback
+
+So a customer-specific membership policy beats a customer-wide bronze
+policy beats a global membership policy beats a global bronze policy
+beats the hardcoded constant. Every layer optional — set only the ones
+you want to override.
+
+Two-layer HITL (Phase 12, unchanged):
+  * **Config-time HITL** — threshold edits go through DRAFT → PENDING_REVIEW
+    → APPROVED → LIVE. ApprovalMode reused from
+    :mod:`datalink.quality.registry`.
+  * **Runtime automatic** — once a policy is LIVE, hooks.py reads the
+    cascade above and fires the right policy without human-in-the-loop.
+
+Cross-client clone (Phase 12.5):
+  * :func:`PipelineControlPolicyRegistry.clone_to_client` duplicates a
+    LIVE policy as a DRAFT under a target client_id, so operators can
+    standardise once on aetna and propagate to other tenants without
+    re-authoring.
+
+Back-compat: ``DEFAULT_POLICY`` values match the pre-Phase-12 hardcoded
+numbers in ``hooks.py``, so tenants without registered policies behave
+exactly as today.
 """
 
 from __future__ import annotations
@@ -117,6 +128,7 @@ class ThresholdPolicy:
     policy_id: str
     client_id: str
     pipeline_id: str
+    source_type: str | None  # Phase 12.5 — NULL = pipeline-wide; specific = per-source override
     version: int
     status: PolicyStatus
     fail_rate_pause_pct: float
@@ -136,6 +148,20 @@ class ThresholdPolicy:
     @property
     def is_default(self) -> bool:
         return self.version == 0
+
+    @property
+    def is_global(self) -> bool:
+        """True for the wildcard `client_id='*'` tier — applies to every tenant
+        unless that tenant has its own override. Phase 12.5."""
+        return self.client_id == "*"
+
+    @property
+    def scope_label(self) -> str:
+        """Human-readable scope: 'global / bronze_ingest / CLAIMS' or
+        'aetna / silver_build / (any)' etc. For UI tables."""
+        client = "global (*)" if self.client_id == "*" else self.client_id
+        source = self.source_type or "(any)"
+        return f"{client} / {self.pipeline_id} / {source}"
 
     def thresholds_dict(self) -> dict[str, Any]:
         """Just the threshold fields — for diff display in the UI."""
@@ -159,6 +185,7 @@ DEFAULT_POLICY = ThresholdPolicy(
     policy_id="__default__",
     client_id="*",
     pipeline_id="*",
+    source_type=None,
     version=0,
     status=PolicyStatus.LIVE,
     fail_rate_pause_pct=0.0,
@@ -169,6 +196,15 @@ DEFAULT_POLICY = ThresholdPolicy(
     created_at=datetime(2024, 1, 1, tzinfo=UTC),
     notes="synthetic default — pre-Phase-12 hardcoded values",
 )
+
+# Phase 12.5 — wildcard client for the global tier. Authored from the UI's
+# "Global default" scope toggle. A LIVE row with client_id='*' applies to
+# every tenant unless that tenant has its own override.
+GLOBAL_CLIENT = "*"
+
+# Source-type vocabulary — must match what bronze ingest tags
+# ``BronzeIngestResult.source_type`` (Phase 9.1).
+KNOWN_SOURCE_TYPES = ("CLAIMS", "MEMBERSHIP", "PROVIDER")
 
 
 @dataclass
@@ -182,6 +218,7 @@ class PolicyDraft:
     schema_drift_action: str
     row_count_drop_pct: float
     created_by: str
+    source_type: str | None = None  # Phase 12.5 — None = pipeline-wide
     notes: str | None = None
 
     def validate(self) -> None:
@@ -209,6 +246,11 @@ class PolicyDraft:
             raise ValueError(
                 f"row_count_drop_pct must be in [0, 100], got {self.row_count_drop_pct}"
             )
+        if self.source_type is not None and self.source_type not in KNOWN_SOURCE_TYPES:
+            raise ValueError(
+                f"source_type must be one of {list(KNOWN_SOURCE_TYPES)} or None "
+                f"(pipeline-wide), got {self.source_type!r}"
+            )
 
 
 # ============================================================================
@@ -232,44 +274,119 @@ class PipelineControlPolicyRegistry:
     # READS
     # ------------------------------------------------------------------
 
-    def get_active_policy(self, client_id: str, pipeline_id: str) -> ThresholdPolicy | None:
-        """Return the LIVE policy for ``(client, pipeline)`` or None."""
+    def get_active_policy(
+        self,
+        client_id: str,
+        pipeline_id: str,
+        source_type: str | None = None,
+    ) -> ThresholdPolicy | None:
+        """Return the LIVE policy for the EXACT
+        ``(client, pipeline, source_type)`` tuple, or None.
+
+        Phase 12.5 — exact match only; pass ``source_type=None`` to find
+        the pipeline-wide row, or a specific value to find a per-source
+        override. Use :meth:`get_or_default` for the full precedence
+        cascade.
+        """
+        if source_type is None:
+            where_st = "AND source_type IS NULL"
+            params: dict[str, Any] = {
+                "c": client_id,
+                "p": pipeline_id,
+                "st": PolicyStatus.LIVE.value,
+            }
+        else:
+            where_st = "AND source_type = $src"
+            params = {
+                "c": client_id,
+                "p": pipeline_id,
+                "src": source_type,
+                "st": PolicyStatus.LIVE.value,
+            }
         rows = self._wh.query(
             f"SELECT * FROM {CONTROL_SCHEMA}.pipeline_control_policies "
-            "WHERE client_id = $c AND pipeline_id = $p AND status = $st",
-            {"c": client_id, "p": pipeline_id, "st": PolicyStatus.LIVE.value},
+            f"WHERE client_id = $c AND pipeline_id = $p AND status = $st {where_st}",
+            params,
         )
         if not rows:
             return None
         if len(rows) > 1:
             raise RuntimeError(
                 f"Invariant violation: {len(rows)} LIVE policies for "
-                f"({client_id!r}, {pipeline_id!r}) — should be exactly 1"
+                f"({client_id!r}, {pipeline_id!r}, {source_type!r}) — should be exactly 1"
             )
         return _row_to_policy(rows[0])
 
-    def get_or_default(self, client_id: str, pipeline_id: str) -> ThresholdPolicy:
-        """Active policy or the synthetic default — never returns None.
+    def get_or_default(
+        self,
+        client_id: str,
+        pipeline_id: str,
+        source_type: str | None = None,
+    ) -> ThresholdPolicy:
+        """Phase 12.5 — full precedence cascade, never returns None.
 
-        Hot-path callers (hooks.py) use this so the runtime threshold
-        check never has to reason about "what if no policy exists".
+        Looks up the most-specific LIVE policy first, falls through
+        less-specific tiers, finally returns :data:`DEFAULT_POLICY` if
+        nothing matches:
+
+          1. ``(client, pipeline, source_type)`` — exact + per-source
+          2. ``(client, pipeline, NULL)``        — exact tenant pipeline-wide
+          3. ``('*',  pipeline, source_type)``   — global per-source-type
+          4. ``('*',  pipeline, NULL)``          — global per-pipeline
+          5. :data:`DEFAULT_POLICY`              — hardcoded constant
+
+        ``source_type=None`` skips tiers 1 and 3 — useful when the
+        caller doesn't yet know which source is being processed
+        (e.g. silver_build that fans across all sources).
         """
-        return self.get_active_policy(client_id, pipeline_id) or DEFAULT_POLICY
+        # 1. Exact tenant + per-source
+        if source_type is not None:
+            p = self.get_active_policy(client_id, pipeline_id, source_type=source_type)
+            if p is not None:
+                return p
+        # 2. Exact tenant + pipeline-wide (source_type = NULL)
+        p = self.get_active_policy(client_id, pipeline_id, source_type=None)
+        if p is not None:
+            return p
+        # 3. Global + per-source-type
+        if source_type is not None:
+            p = self.get_active_policy(GLOBAL_CLIENT, pipeline_id, source_type=source_type)
+            if p is not None:
+                return p
+        # 4. Global + pipeline-wide
+        p = self.get_active_policy(GLOBAL_CLIENT, pipeline_id, source_type=None)
+        if p is not None:
+            return p
+        # 5. Hardcoded fallback
+        return DEFAULT_POLICY
 
     def get_by_id(self, policy_id: str) -> ThresholdPolicy | None:
         rows = self._wh.query(
-            f"SELECT * FROM {CONTROL_SCHEMA}.pipeline_control_policies " "WHERE policy_id = $i",
+            f"SELECT * FROM {CONTROL_SCHEMA}.pipeline_control_policies WHERE policy_id = $i",
             {"i": policy_id},
         )
         return _row_to_policy(rows[0]) if rows else None
 
-    def list_versions(self, client_id: str, pipeline_id: str) -> list[ThresholdPolicy]:
-        """All versions for the tuple, newest first."""
+    def list_versions(
+        self,
+        client_id: str,
+        pipeline_id: str,
+        source_type: str | None = None,
+    ) -> list[ThresholdPolicy]:
+        """All versions for the
+        ``(client, pipeline, source_type)`` tuple, newest first.
+        ``source_type=None`` matches the pipeline-wide rows."""
+        if source_type is None:
+            where_st = "AND source_type IS NULL"
+            params: dict[str, Any] = {"c": client_id, "p": pipeline_id}
+        else:
+            where_st = "AND source_type = $src"
+            params = {"c": client_id, "p": pipeline_id, "src": source_type}
         rows = self._wh.query(
             f"SELECT * FROM {CONTROL_SCHEMA}.pipeline_control_policies "
-            "WHERE client_id = $c AND pipeline_id = $p "
-            "ORDER BY version DESC",
-            {"c": client_id, "p": pipeline_id},
+            f"WHERE client_id = $c AND pipeline_id = $p {where_st} "
+            f"ORDER BY version DESC",
+            params,
         )
         return [_row_to_policy(r) for r in rows]
 
@@ -286,7 +403,7 @@ class PipelineControlPolicyRegistry:
         rows = self._wh.query(
             f"SELECT * FROM {CONTROL_SCHEMA}.pipeline_control_policies "
             "WHERE status = $st "
-            "ORDER BY client_id, pipeline_id",
+            "ORDER BY client_id, pipeline_id, source_type NULLS FIRST",
             {"st": PolicyStatus.LIVE.value},
         )
         return [_row_to_policy(r) for r in rows]
@@ -296,21 +413,25 @@ class PipelineControlPolicyRegistry:
     # ------------------------------------------------------------------
 
     def create_draft(self, draft: PolicyDraft) -> str:
-        """Start a new DRAFT. Version = max(version) + 1 for the tuple."""
+        """Start a new DRAFT. Version = max(version) + 1 for the
+        ``(client, pipeline, source_type)`` tuple."""
         draft.validate()
-        existing = self.list_versions(draft.client_id, draft.pipeline_id)
+        existing = self.list_versions(
+            draft.client_id, draft.pipeline_id, source_type=draft.source_type
+        )
         next_version = (existing[0].version + 1) if existing else 1
         policy_id = str(uuid.uuid4())
         self._wh.execute(
             f"INSERT INTO {CONTROL_SCHEMA}.pipeline_control_policies "
-            "(policy_id, client_id, pipeline_id, version, status, "
+            "(policy_id, client_id, pipeline_id, source_type, version, status, "
             " fail_rate_pause_pct, fail_rate_abort_pct, schema_drift_action, "
             " row_count_drop_pct, created_by, created_at, notes) "
-            "VALUES ($id, $c, $p, $v, $st, $pp, $ap, $sd, $rd, $cb, $ts, $n)",
+            "VALUES ($id, $c, $p, $src, $v, $st, $pp, $ap, $sd, $rd, $cb, $ts, $n)",
             {
                 "id": policy_id,
                 "c": draft.client_id,
                 "p": draft.pipeline_id,
+                "src": draft.source_type,
                 "v": next_version,
                 "st": PolicyStatus.DRAFT.value,
                 "pp": draft.fail_rate_pause_pct,
@@ -354,6 +475,7 @@ class PipelineControlPolicyRegistry:
         PolicyDraft(
             client_id=current.client_id,
             pipeline_id=current.pipeline_id,
+            source_type=current.source_type,
             fail_rate_pause_pct=fail_rate_pause_pct,
             fail_rate_abort_pct=fail_rate_abort_pct,
             schema_drift_action=schema_drift_action,
@@ -402,11 +524,13 @@ class PipelineControlPolicyRegistry:
 
     def activate(self, policy_id: str, actor: str) -> None:
         """Promote APPROVED → LIVE. Archives any other LIVE for the same
-        ``(client_id, pipeline_id)``. Critical: ordering is "archive prior
-        BEFORE flipping new" to preserve the unique-LIVE invariant
-        mid-transaction (DuckDB has no partial-unique-index)."""
+        ``(client_id, pipeline_id, source_type)`` tuple. Critical: ordering
+        is "archive prior BEFORE flipping new" to preserve the unique-LIVE
+        invariant mid-transaction (DuckDB has no partial-unique-index)."""
         current = self._require(policy_id)
-        prev_live = self.get_active_policy(current.client_id, current.pipeline_id)
+        prev_live = self.get_active_policy(
+            current.client_id, current.pipeline_id, source_type=current.source_type
+        )
         if prev_live is not None:
             self._wh.execute(
                 f"UPDATE {CONTROL_SCHEMA}.pipeline_control_policies "
@@ -505,29 +629,29 @@ class PipelineControlPolicyRegistry:
         raise ValueError(f"Unknown ApprovalMode: {mode!r}")
 
     def fork_for_edit(self, source_policy_id: str, *, actor: str) -> str:
-        """Clone any non-DRAFT version into a new DRAFT for editing.
+        """Clone any non-DRAFT version into a new DRAFT for editing of the
+        SAME ``(client, pipeline, source_type)`` tuple.
 
-        Same semantics as ``SuiteRegistry.fork_for_edit``: source row
-        unmutated, new draft gets ``version = max(version) + 1``.
-        Operator typically calls this to bump thresholds on a LIVE
-        policy — the original keeps gating runtime until the new draft
-        is approved + activated, at which point ``activate()`` archives
-        it atomically.
+        Source row unmutated, new draft gets ``version = max(version) + 1``.
+        Operator typically calls this to bump thresholds on a LIVE policy —
+        the original keeps gating runtime until the new draft is approved +
+        activated, at which point ``activate()`` archives it atomically.
         """
         src = self._require(source_policy_id)
-        existing = self.list_versions(src.client_id, src.pipeline_id)
+        existing = self.list_versions(src.client_id, src.pipeline_id, source_type=src.source_type)
         next_version = (existing[0].version + 1) if existing else 1
         new_id = str(uuid.uuid4())
         self._wh.execute(
             f"INSERT INTO {CONTROL_SCHEMA}.pipeline_control_policies "
-            "(policy_id, client_id, pipeline_id, version, status, "
+            "(policy_id, client_id, pipeline_id, source_type, version, status, "
             " fail_rate_pause_pct, fail_rate_abort_pct, schema_drift_action, "
             " row_count_drop_pct, created_by, created_at, notes) "
-            "VALUES ($id, $c, $p, $v, $st, $pp, $ap, $sd, $rd, $cb, $ts, $n)",
+            "VALUES ($id, $c, $p, $src, $v, $st, $pp, $ap, $sd, $rd, $cb, $ts, $n)",
             {
                 "id": new_id,
                 "c": src.client_id,
                 "p": src.pipeline_id,
+                "src": src.source_type,
                 "v": next_version,
                 "st": PolicyStatus.DRAFT.value,
                 "pp": src.fail_rate_pause_pct,
@@ -552,6 +676,93 @@ class PipelineControlPolicyRegistry:
             source_policy_id=source_policy_id,
             client_id=src.client_id,
             pipeline_id=src.pipeline_id,
+            source_type=src.source_type,
+            new_version=next_version,
+        )
+        return new_id
+
+    def clone_to_client(
+        self,
+        source_policy_id: str,
+        target_client_id: str,
+        *,
+        actor: str,
+        notes: str | None = None,
+    ) -> str:
+        """Phase 12.5 — copy a policy's threshold values to another client.
+
+        Creates a new DRAFT under the target client_id with the same
+        pipeline_id, source_type, and threshold values as the source.
+        The target version starts at ``max(version-for-target-tuple) + 1``
+        so a fresh client gets v1, an existing client gets v(N+1).
+
+        Use case: standardise on aetna's policies, then propagate to the
+        other 5 tenants without re-authoring. The clones land as DRAFT,
+        so each one still goes through HITL approval before going LIVE
+        (no auto-activate).
+
+        Refuses to clone to the same client_id (use fork_for_edit for
+        that case) and refuses if a DRAFT already exists for the target
+        tuple (operator should resolve manually).
+        """
+        src = self._require(source_policy_id)
+        if target_client_id == src.client_id:
+            raise ValueError(
+                f"clone_to_client target ({target_client_id!r}) is same as source — "
+                f"use fork_for_edit() to bump version on the same client"
+            )
+        # Refuse if a DRAFT already exists for the target tuple.
+        existing = self.list_versions(
+            target_client_id, src.pipeline_id, source_type=src.source_type
+        )
+        if any(v.status is PolicyStatus.DRAFT for v in existing):
+            raise ValueError(
+                f"target ({target_client_id!r}, {src.pipeline_id!r}, "
+                f"{src.source_type!r}) already has a DRAFT — resolve it first"
+            )
+        next_version = (existing[0].version + 1) if existing else 1
+        new_id = str(uuid.uuid4())
+        clone_notes = (
+            notes
+            or f"cloned from {src.client_id}/{src.pipeline_id}/{src.source_type or 'any'} v{src.version}"
+        )
+        self._wh.execute(
+            f"INSERT INTO {CONTROL_SCHEMA}.pipeline_control_policies "
+            "(policy_id, client_id, pipeline_id, source_type, version, status, "
+            " fail_rate_pause_pct, fail_rate_abort_pct, schema_drift_action, "
+            " row_count_drop_pct, created_by, created_at, notes) "
+            "VALUES ($id, $c, $p, $src, $v, $st, $pp, $ap, $sd, $rd, $cb, $ts, $n)",
+            {
+                "id": new_id,
+                "c": target_client_id,
+                "p": src.pipeline_id,
+                "src": src.source_type,
+                "v": next_version,
+                "st": PolicyStatus.DRAFT.value,
+                "pp": src.fail_rate_pause_pct,
+                "ap": src.fail_rate_abort_pct,
+                "sd": src.schema_drift_action,
+                "rd": src.row_count_drop_pct,
+                "cb": actor,
+                "ts": datetime.now(UTC),
+                "n": clone_notes,
+            },
+        )
+        self._audit(
+            new_id,
+            None,
+            PolicyStatus.DRAFT,
+            actor,
+            f"cloned from policy_id={source_policy_id} ({src.client_id} → {target_client_id})",
+        )
+        _log.info(
+            "policy.cloned_to_client",
+            new_policy_id=new_id,
+            source_policy_id=source_policy_id,
+            source_client=src.client_id,
+            target_client=target_client_id,
+            pipeline_id=src.pipeline_id,
+            source_type=src.source_type,
             new_version=next_version,
         )
         return new_id
@@ -631,6 +842,9 @@ def _row_to_policy(row: dict[str, Any]) -> ThresholdPolicy:
         policy_id=row["policy_id"],
         client_id=row["client_id"],
         pipeline_id=row["pipeline_id"],
+        # Phase 12.5 — source_type is nullable. Snowflake returns python None
+        # for SQL NULL; older rows that pre-date the migration also see None.
+        source_type=row.get("source_type"),
         version=int(row["version"]),
         status=PolicyStatus(row["status"]),
         fail_rate_pause_pct=float(row["fail_rate_pause_pct"]),

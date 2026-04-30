@@ -215,6 +215,13 @@ def infer_semantic_hint(col_name: str, samples: list[Any]) -> str:
 
 _AUDIT_PREFIX = "_"
 
+# Identifiers safe to interpolate unquoted into SQL on both Snowflake +
+# DuckDB. Most healthcare columns are simple snake_case (member_id,
+# dob, plan_code) so this covers > 99% of real schemas. Anything that
+# fails this check raises early with a clear error rather than producing
+# a confusing SQL parse error downstream.
+_SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
 
 def profile_source(
     warehouse: Warehouse,
@@ -254,12 +261,26 @@ def profile_source(
 
     # ---- Stage 1: batched aggregation ------------------------------------
     # Build SELECT of: COUNT(*), per-col (non-null count, distinct count, min, max).
+    # Identifiers are kept UNQUOTED — Snowflake case-folds unquoted names
+    # to upper to match its stored identifiers, and DuckDB matches
+    # unquoted names case-insensitively. Quoting them with double-quotes
+    # forces literal-case matching, which breaks against Snowflake's
+    # stored UPPER schema (the case Jatin hit on aetna RAW_CLAIMS).
+    # We accept the trade-off that column names with reserved words or
+    # special characters won't profile — guard against that explicitly.
+    for n, _ in business_cols:
+        if not _SAFE_IDENT.match(n):
+            raise RuntimeError(
+                f"profile_source: column name {n!r} contains characters that "
+                f"require quoting; profiler currently only supports "
+                f"alphanumeric + underscore identifiers."
+            )
     agg_parts: list[str] = ["COUNT(*) AS __total"]
     for n, _ in business_cols:
-        agg_parts.append(f'COUNT("{n}") AS "{n}__nn"')
-        agg_parts.append(f'COUNT(DISTINCT "{n}") AS "{n}__dc"')
-        agg_parts.append(f'MIN("{n}") AS "{n}__min"')
-        agg_parts.append(f'MAX("{n}") AS "{n}__max"')
+        agg_parts.append(f"COUNT({n}) AS {n}__nn")
+        agg_parts.append(f"COUNT(DISTINCT {n}) AS {n}__dc")
+        agg_parts.append(f"MIN({n}) AS {n}__min")
+        agg_parts.append(f"MAX({n}) AS {n}__max")
     agg_sql = "SELECT " + ", ".join(agg_parts) + f" FROM {qualified_table}"
     agg_rows = warehouse.query(agg_sql)
     if not agg_rows:
@@ -291,9 +312,9 @@ def profile_source(
         if non_null > 0:
             try:
                 sample_rows = warehouse.query(
-                    f'SELECT DISTINCT "{col_name}" AS v '
+                    f"SELECT DISTINCT {col_name} AS v "
                     f"FROM {qualified_table} "
-                    f'WHERE "{col_name}" IS NOT NULL '
+                    f"WHERE {col_name} IS NOT NULL "
                     f"LIMIT {int(sample_limit)}"
                 )
                 sample_values = tuple(_coerce(r["v"]) for r in sample_rows if "v" in r)

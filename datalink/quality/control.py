@@ -417,6 +417,7 @@ _DDL = [
         policy_id            VARCHAR PRIMARY KEY,
         client_id            VARCHAR NOT NULL,
         pipeline_id          VARCHAR NOT NULL,
+        source_type          VARCHAR,
         version              INTEGER NOT NULL,
         status               VARCHAR NOT NULL,
         fail_rate_pause_pct  DOUBLE NOT NULL,
@@ -502,6 +503,8 @@ def create_control_tables(warehouse: Warehouse) -> None:
         f"ALTER TABLE {CONTROL_SCHEMA}.gx_validation_results ADD COLUMN client_id VARCHAR",
         f"ALTER TABLE {CONTROL_SCHEMA}.gx_validation_results ADD COLUMN source_type VARCHAR",
         f"ALTER TABLE {CONTROL_SCHEMA}.gx_validation_results ADD COLUMN dq_dimension VARCHAR",
+        # Phase 12.5 — per-source-type policy granularity. NULL = pipeline-wide.
+        f"ALTER TABLE {CONTROL_SCHEMA}.pipeline_control_policies ADD COLUMN source_type VARCHAR",
     ]
     for stmt in _migrations:
         try:

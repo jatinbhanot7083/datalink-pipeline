@@ -150,13 +150,25 @@ if contract is None:
                         f"BRONZE_{client_id.upper()}" if client_id != "default" else "BRONZE"
                     )
                     bronze_table = f"RAW_{source_type}"
+                    # Parameterize the LIKE pattern so the literal `%`
+                    # doesn't collide with Snowflake adapter's pyformat
+                    # substitution. Filter audit columns (start with `_`)
+                    # in Python instead of SQL — simpler and portable.
                     rows = wh.query(
                         "SELECT column_name, data_type FROM information_schema.columns "
                         "WHERE table_schema = $s AND table_name = $t "
-                        "AND column_name NOT LIKE '\\_%' ESCAPE '\\\\' "
                         "ORDER BY ordinal_position",
                         {"s": bronze_schema, "t": bronze_table},
                     )
+                    rows = [
+                        r
+                        for r in rows
+                        if not (
+                            (r.get("column_name") or r.get("COLUMN_NAME") or "")
+                            .lstrip()
+                            .startswith("_")
+                        )
+                    ]
                     if not rows:
                         st.error(
                             f"No business columns found in "
@@ -166,8 +178,12 @@ if contract is None:
                     else:
                         cols = [
                             ColumnContract(
-                                name=r["column_name"].lower(),
-                                logical_type=str(r["data_type"]).upper(),
+                                name=str(
+                                    r.get("column_name") or r.get("COLUMN_NAME") or ""
+                                ).lower(),
+                                logical_type=str(
+                                    r.get("data_type") or r.get("DATA_TYPE") or ""
+                                ).upper(),
                             )
                             for r in rows
                         ]

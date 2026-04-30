@@ -134,8 +134,7 @@ def _df_to_expectations(df: pd.DataFrame) -> list[dict[str, Any]]:
 
 
 st.markdown(
-    f"<h1>🛡️ <span style='color:{_NAVY}'>DataLink</span> "
-    f"<span style='color:{_GOLD}'>DQ Author</span></h1>",
+    f"<h1>🛡️ <span style='color:{_GOLD}'>DQ Author</span></h1>",
     unsafe_allow_html=True,
 )
 

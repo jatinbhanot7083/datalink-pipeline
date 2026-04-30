@@ -373,12 +373,125 @@ def main() -> int:
         ok(f"list_pending_reviews → 1 ({pending[0].client_id}/{pending[0].pipeline_id})")
 
     print()
+    print("=== 9. Phase 12.5 — per-source-type granularity + cascade ===")
+
+    from datalink.pipeline.control_policy import GLOBAL_CLIENT
+
+    # Author a CLAIMS-specific policy for acme/bronze_ingest with stricter
+    # numbers than its pipeline-wide v2 (pause>5, abort>20). Per-source
+    # should win over pipeline-wide for a CLAIMS query.
+    claims_draft = PolicyDraft(
+        client_id="acme",
+        pipeline_id="bronze_ingest",
+        source_type="CLAIMS",
+        fail_rate_pause_pct=1.0,
+        fail_rate_abort_pct=10.0,
+        schema_drift_action="ABORT",
+        row_count_drop_pct=20.0,
+        created_by="user:alice",
+        notes="acme claims runs hot — strict",
+    )
+    claims_pid = reg.create_draft(claims_draft)
+    reg.submit_with_policy(claims_pid, mode=ApprovalMode.AUTO_APPROVE, actor="user:alice")
+    p = reg.get_or_default("acme", "bronze_ingest", source_type="CLAIMS")
+    if p.fail_rate_abort_pct != 10.0 or p.source_type != "CLAIMS":
+        fail(f"CLAIMS-specific lookup wrong: source={p.source_type}, abort={p.fail_rate_abort_pct}")
+    else:
+        ok("cascade tier 1 — per-client + per-source CLAIMS wins (abort>10%)")
+
+    p = reg.get_or_default("acme", "bronze_ingest", source_type="MEMBERSHIP")
+    if p.fail_rate_abort_pct != 20.0 or p.source_type is not None:
+        fail(
+            f"MEMBERSHIP should fall back to pipeline-wide acme v2: got source={p.source_type}, abort={p.fail_rate_abort_pct}"
+        )
+    else:
+        ok("cascade tier 2 — MEMBERSHIP falls back to acme pipeline-wide (abort>20%)")
+
+    # Tier 3+4: a global policy for caresource/silver_build is already LIVE
+    # from earlier in the test. No global default exists at the * tier.
+    # Author a global * / silver_build / pipeline-wide policy.
+    global_draft = PolicyDraft(
+        client_id=GLOBAL_CLIENT,
+        pipeline_id="silver_build",
+        source_type=None,
+        fail_rate_pause_pct=3.0,
+        fail_rate_abort_pct=18.0,
+        schema_drift_action="PAUSE",
+        row_count_drop_pct=40.0,
+        created_by="system:org_admin",
+        notes="org-wide silver default",
+    )
+    global_pid = reg.create_draft(global_draft)
+    reg.submit_with_policy(global_pid, mode=ApprovalMode.AUTO_APPROVE, actor="system:org_admin")
+
+    # Lookup for a tenant that has NO silver_build override → should hit
+    # global * tier.
+    p = reg.get_or_default("dhmp", "silver_build", source_type="CLAIMS")
+    if not p.is_global or p.fail_rate_abort_pct != 18.0:
+        fail(
+            f"global tier 4 should win for dhmp/silver_build: got client={p.client_id}, abort={p.fail_rate_abort_pct}"
+        )
+    else:
+        ok("cascade tier 4 — dhmp/silver_build/CLAIMS falls back to global * (abort>18%)")
+
+    # caresource HAS a silver_build LIVE (per-client, pipeline-wide). It
+    # should win over the global *.
+    p = reg.get_or_default("caresource", "silver_build", source_type="CLAIMS")
+    if p.client_id != "caresource" or p.fail_rate_abort_pct != 30.0:
+        fail(
+            f"caresource silver_build should win over global: got client={p.client_id}, abort={p.fail_rate_abort_pct}"
+        )
+    else:
+        ok("cascade priority — caresource per-client beats global * (abort>30%)")
+
+    # No coverage at all for some tuple → DEFAULT_POLICY
+    p = reg.get_or_default("affinity", "gold_egress", source_type="CLAIMS")
+    if not p.is_default:
+        fail(f"unregistered tuple should fall to DEFAULT, got version={p.version}")
+    else:
+        ok("cascade tier 5 — uncovered tuple falls to DEFAULT_POLICY")
+
+    print()
+    print("=== 10. Phase 12.5 — clone_to_client ===")
+
+    # Clone the new acme/bronze_ingest/CLAIMS policy to caresource.
+    cloned_id = reg.clone_to_client(claims_pid, "caresource", actor="user:alice")
+    cloned = reg.get_by_id(cloned_id)
+    if cloned is None or cloned.status is not PolicyStatus.DRAFT:
+        fail(f"clone status wrong: {cloned.status if cloned else None}")
+    elif cloned.client_id != "caresource":
+        fail(f"clone client_id wrong: {cloned.client_id}")
+    elif cloned.source_type != "CLAIMS":
+        fail(f"clone source_type wrong: {cloned.source_type}")
+    elif cloned.fail_rate_abort_pct != 10.0:
+        fail(f"clone abort threshold wrong: {cloned.fail_rate_abort_pct}")
+    else:
+        ok(
+            f"clone_to_client: caresource gets a DRAFT v{cloned.version} of CLAIMS policy "
+            f"(thresholds copied verbatim, ready for HITL review)"
+        )
+
+    # Cloning to same client should refuse.
+    try:
+        reg.clone_to_client(claims_pid, "acme", actor="user:alice")
+        fail("expected ValueError cloning to same client")
+    except ValueError:
+        ok("clone_to_client refuses same-client target (use fork_for_edit)")
+
+    # Cloning when target already has a DRAFT should refuse.
+    try:
+        reg.clone_to_client(claims_pid, "caresource", actor="user:alice")
+        fail("expected ValueError cloning to client with existing DRAFT")
+    except ValueError:
+        ok("clone_to_client refuses target with pre-existing DRAFT")
+
+    print()
     if failures:
         print(f"❌ {len(failures)} FAIL")
         for f in failures:
             print(f"   - {f}")
         return 1
-    print("✅ Phase 12 PASS — two-layer HITL pipeline control verified end-to-end")
+    print("✅ Phase 12 + 12.5 PASS — HITL pipeline control + cascade + clone verified")
     return 0
 
 

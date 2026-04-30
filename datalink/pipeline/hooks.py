@@ -177,7 +177,12 @@ def run_checkpoint_with_hooks(
         )
 
         policy_registry = PipelineControlPolicyRegistry(adapters.warehouse)
-        policy = policy_registry.get_or_default(client_id, pipeline_id)
+        # Phase 12.5 — pass source_type so the policy lookup can pick the
+        # most-specific per-source override (e.g., aetna/bronze_ingest/CLAIMS
+        # is stricter than the pipeline-wide aetna/bronze_ingest policy).
+        # source_type may be None for cross-source pipelines; cascade
+        # gracefully falls back through tenant-wide → global → DEFAULT.
+        policy = policy_registry.get_or_default(client_id, pipeline_id, source_type=source_type)
         breach_reason = (
             f"checkpoint {checkpoint_name} breached: "
             f"{checkpoint.failed_expectations}/{checkpoint.total_expectations} "

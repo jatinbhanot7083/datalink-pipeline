@@ -86,7 +86,7 @@ USER_FACING = {
 
 _FAVICON_PATH = Path(__file__).resolve().parent / "static" / "datalink-logo-color.png"
 st.set_page_config(
-    page_title="DataLink Command Center",
+    page_title="DataLink Control Tower",
     page_icon=str(_FAVICON_PATH) if _FAVICON_PATH.exists() else "🏛️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -376,12 +376,20 @@ def main() -> None:
         else "🏛️"
     )
 
+    # Full-width gold underline — matches every other page where the h1
+    # is block-level. Here the h1 sits inside a flex row, so we suppress
+    # its own border-bottom and put it on the wrapper div instead. That
+    # way the underline spans the full page, not just the wordmark.
+    # No DataLink logo / DataLink wordmark here per Jatin: the sidebar
+    # logo already carries the brand; pages just show their own title.
     st.markdown(
         f"""
-        <div style="display:flex;align-items:center;gap:1rem;">
-          {_logo_img}
-          <h1 style="margin:0"><span style='color:{_NAVY}'>Command</span>
-            <span style='color:{_GOLD}'>Center</span></h1>
+        <div style="display:flex;align-items:center;gap:1rem;
+                    border-bottom:3px solid {_GOLD};padding-bottom:.4rem;
+                    margin-bottom:.8rem;">
+          <h1 style="margin:0;border-bottom:none;padding-bottom:0">
+            🏛️ <span style='color:{_GOLD}'>Control Tower</span>
+          </h1>
           <div style="background:{_badge_color};color:#000;padding:.35rem .8rem;
                       border-radius:6px;font-weight:800;font-size:.95rem;
                       letter-spacing:.05em;border:2px solid #000;
