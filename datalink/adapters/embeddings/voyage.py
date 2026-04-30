@@ -22,11 +22,22 @@ _log = get_logger(__name__)
 # Dimension table — keep in sync with whatever Voyage publishes.
 # https://docs.voyageai.com/docs/embeddings
 _MODEL_DIMS: dict[str, int] = {
-    "voyage-3-lite": 1024,
+    # voyage-3-lite returns 512 dim from the API as of 2026 — keep here
+    # for back-compat but the dim is not 1024 despite older docs.
+    "voyage-3-lite": 512,
     "voyage-3": 1024,
     "voyage-3-large": 1024,
+    # voyage-3.5 family — current gen, default 1024 dim, recommended.
+    "voyage-3.5": 1024,
+    "voyage-3.5-lite": 1024,
+    # voyage-4 family — latest, default 1024 dim.
+    "voyage-4": 1024,
+    "voyage-4-large": 1024,
+    "voyage-4-lite": 1024,
+    # Domain-specific
     "voyage-code-3": 1024,
     "voyage-finance-2": 1024,
+    "voyage-law-2": 1024,
 }
 
 

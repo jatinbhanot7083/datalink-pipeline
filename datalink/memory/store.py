@@ -470,6 +470,121 @@ class AgentMemoryStore:
     # CMS, DV2, HEDIS) or an operator-uploaded "custom" spec.
     # ------------------------------------------------------------------
 
+    def upsert_standard_chunks_bulk(
+        self,
+        *,
+        chunks: list[dict[str, Any]],
+        max_tokens_per_batch: int = 8000,
+        retry_sleep_s: int = 25,
+        max_retries: int = 4,
+    ) -> int:
+        """Embed and persist many chunks in batched API calls + ONE DB transaction.
+
+        Sub-batches by approximate token count (~4 chars/token) so each
+        API call stays under Voyage's free-tier 10K TPM. Sleeps between
+        batches to respect 3 RPM. Retries with exponential backoff on
+        rate-limit errors.
+
+        Each dict in ``chunks`` must have keys: ref_id, standard_id,
+        standard_code, chunk_text, chunk_index, section_path (opt),
+        resource_type (opt), keywords (opt).
+
+        Returns the number of rows upserted.
+        """
+        if not chunks:
+            return 0
+        # Split into sub-batches under max_tokens_per_batch
+        sub_batches: list[list[dict[str, Any]]] = []
+        cur_batch: list[dict[str, Any]] = []
+        cur_tokens = 0
+        for c in chunks:
+            est_tokens = max(1, len(c["chunk_text"]) // 4)  # ~4 chars/token
+            if cur_tokens + est_tokens > max_tokens_per_batch and cur_batch:
+                sub_batches.append(cur_batch)
+                cur_batch = []
+                cur_tokens = 0
+            cur_batch.append(c)
+            cur_tokens += est_tokens
+        if cur_batch:
+            sub_batches.append(cur_batch)
+
+        # Embed each sub-batch with retry; pause between batches.
+        all_embeddings: list[list[float]] = []
+        import time
+
+        for i, batch in enumerate(sub_batches):
+            attempt = 0
+            while True:
+                try:
+                    texts = [c["chunk_text"] for c in batch]
+                    embs = self._embedder.embed_many(texts)
+                    all_embeddings.extend(embs)
+                    break
+                except Exception as e:
+                    msg = str(e).lower()
+                    is_rate = (
+                        "rate" in msg or "429" in msg or "ratelimiterror" in str(type(e)).lower()
+                    )
+                    if not is_rate or attempt >= max_retries:
+                        raise
+                    sleep_s = retry_sleep_s * (2**attempt)
+                    _log.warning(
+                        "memory.embed_rate_limit_retry",
+                        attempt=attempt,
+                        sleep_s=sleep_s,
+                        sub_batch=i,
+                    )
+                    time.sleep(sleep_s)
+                    attempt += 1
+            # Pause between sub-batches to stay under 3 RPM
+            if i < len(sub_batches) - 1:
+                _log.info("memory.embed_batch_pause", batch=i, total=len(sub_batches))
+                time.sleep(retry_sleep_s)
+
+        embeddings = all_embeddings
+        if len(embeddings) != len(chunks):
+            raise RuntimeError(
+                f"embed_many returned {len(embeddings)} vectors for {len(chunks)} chunks"
+            )
+        ts = datetime.now(UTC)
+        with self._connect() as conn, conn.cursor() as cur:
+            for c, vec in zip(chunks, embeddings, strict=True):
+                cur.execute(
+                    f"""
+                    INSERT INTO {_SCHEMA}.standard_references
+                      (ref_id, standard_id, standard_code, chunk_text, chunk_index,
+                       section_path, resource_type, keywords,
+                       embedding_model, embedded_at, embedding)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (ref_id) DO UPDATE SET
+                      standard_id     = EXCLUDED.standard_id,
+                      standard_code   = EXCLUDED.standard_code,
+                      chunk_text      = EXCLUDED.chunk_text,
+                      chunk_index     = EXCLUDED.chunk_index,
+                      section_path    = EXCLUDED.section_path,
+                      resource_type   = EXCLUDED.resource_type,
+                      keywords        = EXCLUDED.keywords,
+                      embedding_model = EXCLUDED.embedding_model,
+                      embedded_at     = EXCLUDED.embedded_at,
+                      embedding       = EXCLUDED.embedding
+                    """,
+                    (
+                        c["ref_id"],
+                        c["standard_id"],
+                        c["standard_code"],
+                        c["chunk_text"],
+                        c["chunk_index"],
+                        c.get("section_path"),
+                        c.get("resource_type"),
+                        c.get("keywords") or [],
+                        self._embedder.model,
+                        ts,
+                        _to_pgvector(vec),
+                    ),
+                )
+            conn.commit()
+        return len(chunks)
+
     def upsert_standard_chunk(
         self,
         *,
