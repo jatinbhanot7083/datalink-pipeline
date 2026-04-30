@@ -158,8 +158,17 @@ selected_client = require_client()
 # Top controls — Table picker + suite name + author
 # ============================================================================
 
-# Available bronze schemas / tables on the active warehouse — feeds the picker
-# without hardcoding paths.
+# Available bronze/silver/gold schemas / tables on the active warehouse —
+# feeds the picker without hardcoding paths.
+#
+# IMPORTANT: ONLY business-data schemas (BRONZE_<CLIENT>, SILVER_silver_<CLIENT>,
+# SILVER_gold_um_<CLIENT>) are eligible. Platform-metadata schemas (CONTROL,
+# AGENT_MEMORY, etc.) are NEVER candidates for DQ rules — those are written
+# by the platform itself and validating them is meta-validation. The earlier
+# fallback that showed "all non-system tables" when no client schemas existed
+# was a UX bug that surfaced CONTROL.* tables as fake DQ targets — removed
+# 2026-04-30 per Jatin's directive ("CONTROL is sacred source of truth").
+_BUSINESS_SCHEMA_PREFIXES = ("BRONZE_", "SILVER_", "GOLD_")
 with warehouse_ctx(readonly=True) as wh_for_catalog:
     try:
         catalog_rows = wh_for_catalog.query(
@@ -171,21 +180,38 @@ with warehouse_ctx(readonly=True) as wh_for_catalog:
         st.error(f"Could not enumerate tables: {e}")
         st.stop()
 
-# Filter to schemas that match the selected client (BRONZE_AETNA, SILVER_silver_AETNA, ...)
+# Filter to BUSINESS-data schemas for the selected client.
+# Schema must start with BRONZE_/SILVER_/GOLD_ AND contain the client_id.
 client_upper = selected_client.upper()
 client_tables = [
     f"{r['table_schema']}.{r['table_name']}"
     for r in catalog_rows
-    if client_upper in str(r["table_schema"]).upper()
+    if (
+        str(r["table_schema"]).upper().startswith(_BUSINESS_SCHEMA_PREFIXES)
+        and client_upper in str(r["table_schema"]).upper()
+    )
 ]
-if not client_tables:
-    # Fall back to ALL non-system tables so a fresh tenant can still author.
-    client_tables = [f"{r['table_schema']}.{r['table_name']}" for r in catalog_rows]
 
 if not client_tables:
     st.warning(
-        "No tables found on this warehouse yet. Run Bronze + Silver + Gold "
-        "first, then come back."
+        f"⚠️ **No business-data tables available for `{selected_client}` yet.**\n\n"
+        f"DQ AI Architect authors quality rules against the **Bronze / Silver / "
+        f"Gold** medallion tables (e.g. `BRONZE_{client_upper}.RAW_CLAIMS`). "
+        f"Those tables get created by the Airflow pipelines — they don't exist "
+        f"until the pipelines have run for this tenant.\n\n"
+        f"**Next steps to populate them:**\n"
+        f"1. Open the **Control Tower** page.\n"
+        f"2. Trigger the `bronze_ingest` DAG for client = `{selected_client}` "
+        f"(loads CSVs from SFTP into `BRONZE_{client_upper}.RAW_CLAIMS / "
+        f"RAW_MEMBERSHIP / RAW_PROVIDER`).\n"
+        f"3. Trigger `silver_transform` (builds the Data Vault: hubs / sats / "
+        f"links into `SILVER_silver_{client_upper}`).\n"
+        f"4. Trigger `gold_um_push` (builds the operational Gold tables in "
+        f"`SILVER_gold_um_{client_upper}` and pushes to Postgres + SQL Server).\n\n"
+        f"Once at least Bronze has run, return here and the dropdown will list "
+        f"the business tables you can author DQ rules against.\n\n"
+        f"_Note: `CONTROL.*` platform-metadata tables are never DQ targets — "
+        f"they are managed by the platform itself._"
     )
     st.stop()
 

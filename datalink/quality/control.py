@@ -479,6 +479,110 @@ _DDL = [
         notes              VARCHAR
     )
     """,
+    # ========================================================================
+    # PHASE 14 — Data Contract Architect — schema authoring registry.
+    # ========================================================================
+    # The ContractArchitectAgent grounds proposals against a corpus of
+    # industry standards (HL7 FHIR R4, X12 EDI, NCPDP D.0, CMS dictionaries,
+    # Data Vault 2.0, HEDIS) plus operator-uploaded "custom" standards
+    # (org-specific spec docs).
+    #
+    # Embedded reference content lives in Postgres `agent_memory.standard_references`
+    # (pgvector). This table is just the registry of WHICH standards are loaded.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.standard_registry (
+        standard_id      VARCHAR PRIMARY KEY,
+        code             VARCHAR NOT NULL,            -- fhir-r4 | x12 | ncpdp-d0 | cms | dv2 | hedis | custom-<slug>
+        display_name     VARCHAR NOT NULL,
+        version          VARCHAR,                     -- e.g. "R4", "5010"
+        is_industry      BOOLEAN NOT NULL DEFAULT TRUE,
+        is_active        BOOLEAN NOT NULL DEFAULT TRUE,
+        source_doc_uri   VARCHAR,                     -- URL or file path the corpus was ingested from
+        chunk_count      INTEGER NOT NULL DEFAULT 0,
+        registered_at    TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        registered_by    VARCHAR,
+        notes            VARCHAR
+    )
+    """,
+    # Operator-uploaded "custom" standards (org's home-grown specs).
+    # Pointer table — the actual chunks + embeddings live in
+    # agent_memory.standard_references with standard_id matching here.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.custom_standards_registry (
+        custom_id        VARCHAR PRIMARY KEY,
+        standard_id      VARCHAR NOT NULL,            -- FK to standard_registry.standard_id
+        org_id           VARCHAR NOT NULL DEFAULT 'datalink',
+        name             VARCHAR NOT NULL,            -- e.g. "DataLink Internal Claims Spec v3"
+        source_doc_uri   VARCHAR NOT NULL,            -- where the original doc lives
+        source_doc_hash  VARCHAR,                     -- SHA-256 of the doc — detects re-upload
+        ingested_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        ingested_by      VARCHAR NOT NULL,
+        status           VARCHAR NOT NULL DEFAULT 'ACTIVE',  -- ACTIVE | ARCHIVED | INGESTING | FAILED
+        ingestion_log    VARCHAR
+    )
+    """,
+    # Working drafts + approved contracts authored on the Data Contract
+    # Architect page. Status flow: DRAFT -> PENDING_REVIEW -> APPROVED -> ARCHIVED.
+    # Approval generates the 5 artifacts (Bronze DDL, contract row, GX suite,
+    # dbt scaffold, vendor spec) and writes pointers/IDs back here.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.contract_designs (
+        design_id              VARCHAR PRIMARY KEY,
+        client_id              VARCHAR NOT NULL,
+        source_type            VARCHAR NOT NULL,             -- CLAIMS | MEMBERSHIP | PROVIDER | <custom>
+        status                 VARCHAR NOT NULL,             -- DRAFT | PENDING_REVIEW | APPROVED | ARCHIVED
+        version                INTEGER NOT NULL DEFAULT 1,
+        mode                   VARCHAR NOT NULL,             -- FILE_DRIVEN | CONTRACT_FIRST
+        anchored_standards     VARCHAR,                      -- JSON array of standard_ids
+        temperature            DECIMAL(3,2) NOT NULL DEFAULT 0.0,
+        grounding_k            INTEGER NOT NULL DEFAULT 3,
+        strictness             DECIMAL(3,2) NOT NULL DEFAULT 0.5,
+        sample_file_uri        VARCHAR,                      -- only set for FILE_DRIVEN mode
+        nl_description         VARCHAR,                      -- only set for CONTRACT_FIRST mode
+        proposed_columns       VARCHAR,                      -- JSON array — what AI proposed
+        edited_columns         VARCHAR,                      -- JSON array — operator edits on top
+        final_columns          VARCHAR,                      -- JSON array — what was approved
+        proposed_ddl           VARCHAR,                      -- raw CREATE TABLE the AI emitted
+        final_ddl              VARCHAR,                      -- final DDL after edits
+        deviation_log          VARCHAR,                      -- JSON — vendor-vs-standard mismatches
+        per_column_reasoning   VARCHAR,                      -- JSON — why AI picked each column/type
+        standard_match_scores  VARCHAR,                      -- JSON — per-standard fit score (0-1)
+        gx_suite_id            VARCHAR,                      -- FK to dq_suites once approved
+        contract_id            VARCHAR,                      -- FK to source_schema_contracts once approved
+        dbt_scaffold_uri       VARCHAR,                      -- path to generated dbt model files
+        vendor_spec_md         VARCHAR,                      -- markdown for the vendor spec PDF
+        vendor_spec_pdf_uri    VARCHAR,                      -- generated PDF location
+        approval_mode          VARCHAR,                      -- DRAFT | HITL | AUTO_APPROVE
+        created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by             VARCHAR NOT NULL,
+        submitted_at           TIMESTAMP,
+        approved_at            TIMESTAMP,
+        approved_by            VARCHAR,
+        archived_at            TIMESTAMP,
+        archived_by            VARCHAR,
+        notes                  VARCHAR
+    )
+    """,
+    # Immutable audit log — every state transition + every operator edit.
+    # Mirrors policy_audit_log + dq_suite_audit_log shapes for consistency.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.contract_design_audit_log (
+        audit_id           VARCHAR PRIMARY KEY,
+        design_id          VARCHAR NOT NULL,
+        client_id          VARCHAR NOT NULL,
+        source_type        VARCHAR NOT NULL,
+        action             VARCHAR NOT NULL,    -- PROPOSED | EDITED | SUBMITTED | APPROVED | REJECTED | ARCHIVED
+        actor              VARCHAR NOT NULL,
+        from_status        VARCHAR,
+        to_status          VARCHAR,
+        diff_summary       VARCHAR,             -- JSON object summarising changes
+        ai_reasoning       VARCHAR,             -- agent's explanation for the change (if AI-driven)
+        token_count        INTEGER,
+        latency_ms         INTEGER,
+        ts                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        notes              VARCHAR
+    )
+    """,
 ]
 
 
