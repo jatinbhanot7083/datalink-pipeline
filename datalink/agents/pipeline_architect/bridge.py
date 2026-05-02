@@ -51,7 +51,7 @@ def list_dataset_codes(warehouse: Warehouse) -> list[dict[str, Any]]:
         SELECT dataset_id, dataset_code, display_name, category,
                default_frequency, used_by, total_fields, required_fields,
                optional_fields, catalog_version, is_active
-          FROM {CONTROL_SCHEMA}.global_gold_catalog_datasets
+          FROM {CONTROL_SCHEMA}.global_bronze_catalog_datasets
          WHERE is_active = TRUE
          ORDER BY display_name
         """
@@ -109,7 +109,7 @@ def _fetch_catalog_for_dataset(
                default_frequency, used_by, total_fields, required_fields,
                optional_fields, catalog_version, is_active, notes,
                source_doc_uri
-          FROM {CONTROL_SCHEMA}.global_gold_catalog_datasets
+          FROM {CONTROL_SCHEMA}.global_bronze_catalog_datasets
          WHERE dataset_code = $ds AND is_active = TRUE
         """,
         {"ds": dataset_code},
@@ -117,16 +117,18 @@ def _fetch_catalog_for_dataset(
     if not ds_rows:
         raise ValueError(
             f"No active dataset with dataset_code={dataset_code!r} in "
-            f"CONTROL.global_gold_catalog_datasets. Did the loader run?"
+            f"CONTROL.global_bronze_catalog_datasets. Did the loader run?"
         )
     dataset = dict(ds_rows[0])
     field_rows = warehouse.query(
         f"""
         SELECT field_id, dataset_id, dataset_code, field_order,
-               field_display_name, gold_column_name, requirement,
+               field_display_name,
+               bronze_column_name AS gold_column_name,  -- alias preserved for Phase-15 in-memory contract
+               requirement,
                logical_type, description, additional_notes, example,
                is_pii, is_phi, is_business_key, catalog_version
-          FROM {CONTROL_SCHEMA}.global_gold_catalog_fields
+          FROM {CONTROL_SCHEMA}.global_bronze_catalog_fields
          WHERE dataset_code = $ds
          ORDER BY field_order
         """,

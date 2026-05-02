@@ -3,8 +3,8 @@
 Seeds the Global Gold Catalog from the source-of-truth xlsx
 (``data/sample/product_catalog.xlsx``) into three CONTROL tables:
 
-  * ``CONTROL.global_gold_catalog_datasets``  — 33 datasets (master)
-  * ``CONTROL.global_gold_catalog_fields``    — 943 fields (per-dataset)
+  * ``CONTROL.global_bronze_catalog_datasets``  — 33 datasets (master)
+  * ``CONTROL.global_bronze_catalog_fields``    — 943 fields (per-dataset)
   * ``CONTROL.onprem_routing_rules``          — per (dataset, downstream-product)
                                                  from the "Used by" matrix
 
@@ -356,8 +356,8 @@ def _int_or_zero(v: Any) -> int:
 def _wipe_phase15_seed(wh: Warehouse) -> None:
     """DELETE all rows from the three seed tables. Safe — these are
     deterministically rebuilt from the xlsx on every run."""
-    wh.execute(f"DELETE FROM {CONTROL_SCHEMA}.global_gold_catalog_fields")
-    wh.execute(f"DELETE FROM {CONTROL_SCHEMA}.global_gold_catalog_datasets")
+    wh.execute(f"DELETE FROM {CONTROL_SCHEMA}.global_bronze_catalog_fields")
+    wh.execute(f"DELETE FROM {CONTROL_SCHEMA}.global_bronze_catalog_datasets")
     wh.execute(f"DELETE FROM {CONTROL_SCHEMA}.onprem_routing_rules WHERE is_default = TRUE")
 
 
@@ -372,7 +372,7 @@ def _insert_dataset(
 ) -> None:
     wh.execute(
         f"""
-        INSERT INTO {CONTROL_SCHEMA}.global_gold_catalog_datasets
+        INSERT INTO {CONTROL_SCHEMA}.global_bronze_catalog_datasets
             (dataset_id, dataset_code, display_name, category, default_frequency,
              used_by, total_fields, required_fields, optional_fields, notes,
              is_active, catalog_version, source_doc_uri, registered_at, registered_by)
@@ -410,7 +410,7 @@ def _insert_field(
 ) -> None:
     wh.execute(
         f"""
-        INSERT INTO {CONTROL_SCHEMA}.global_gold_catalog_fields
+        INSERT INTO {CONTROL_SCHEMA}.global_bronze_catalog_fields
             (field_id, dataset_id, dataset_code, field_order,
              field_display_name, gold_column_name, requirement, logical_type,
              description, additional_notes, example,

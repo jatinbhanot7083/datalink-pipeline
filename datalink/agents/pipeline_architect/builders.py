@@ -9,7 +9,7 @@ produce identical artifacts on every run for the same catalog version.
 Each builder takes:
   - ``client_id``: 'aetna', 'caresource', etc.
   - ``dataset_code``: 'membership', 'member_claims'
-  - ``catalog_fields``: list of dicts from CONTROL.global_gold_catalog_fields
+  - ``catalog_fields``: list of dicts from CONTROL.global_bronze_catalog_fields
   - ``overrides``: optional list of client_field_overrides rows
   - ``bronze_anchor``: FHIR | X12 | NCPDP | FLAT_FILE | API
 
@@ -232,7 +232,7 @@ def build_gold_ddl(
     lines: list[str] = []
     lines.append(f"-- Phase 15 Pipeline Architect — Gold table for {client_id} / {dataset_code}")
     lines.append(
-        f"-- Generated from CONTROL.global_gold_catalog_fields (catalog_version={catalog_version})"
+        f"-- Generated from CONTROL.global_bronze_catalog_fields (catalog_version={catalog_version})"
     )
     lines.append(f"-- Generated at: {datetime.now(UTC).isoformat()}")
     lines.append(f"CREATE TABLE IF NOT EXISTS {fq} (")

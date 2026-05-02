@@ -584,25 +584,40 @@ _DDL = [
     )
     """,
     # ========================================================================
-    # PHASE 15 — PIPELINE ARCHITECT — Global Gold Catalog + Client Instances.
+    # PHASE 15 — PIPELINE ARCHITECT — Bronze Catalog + Gold Schema + Instances.
     # ========================================================================
-    # Architectural premise (game-changer pivot):
-    #   - Gold schema is a GLOBAL TEMPLATE per dataset. Sourced from the
-    #     Product Catalog xlsx (33 datasets, 943 fields). One canonical
-    #     definition of "what a Gold Membership table looks like".
-    #   - Each CLIENT gets its own physical COPY of Gold from that template.
-    #     GOLD_AETNA.membership and GOLD_CARESOURCE.membership are
-    #     structurally identical (same columns, types, business rules).
-    #   - Client-level OVERRIDES are allowed (extra column, relaxed
-    #     nullability) and tracked sparsely in client_field_overrides.
-    #   - OnPrem push from Gold uses the catalog "Used by" matrix as the
-    #     routing default; per-client overrides allowed.
+    # Architectural premise (revised after Phase 15.5 correction):
+    #
+    #   - Bronze schema = the AGREED MAPPING SPEC the client signed off on.
+    #     Sourced from the Product Catalog xlsx (33 datasets, 943 fields).
+    #     This is what the vendor sends; nothing is invented at Bronze.
+    #     Anchor: CATALOG_ANCHOR by default; FHIR/X12/NCPDP/CMS/HEDIS as
+    #     specialized overrides when the dataset uses one of those standards.
+    #
+    #   - Silver schema = ALWAYS Hub/Sat/Link (Data Vault 2.0) by default.
+    #     Layer-level structural choice — independent of anchor. The agent
+    #     proactively flags datasets where DV2 is overkill (tiny lookup
+    #     tables, etc.) and proposes NORMALIZED as the alternative; HITL
+    #     takes the call.
+    #
+    #   - Gold schema = GLOBAL canonical model, ONE per dataset. Three
+    #     ways it can land in CONTROL.global_gold_schema_*:
+    #       (a) AI_CONSTRUCTED — agent designs from Bronze + anchor
+    #       (b) MANUAL         — operator hand-authors via column grid
+    #       (c) IMPORTED       — uploaded DDL/YAML/FHIR profile/JSON Schema
+    #     Once LIVE it's globally available; every client clones it on
+    #     deploy with optional client_field_overrides.
+    #
+    #   - OnPrem push from Gold uses the Bronze catalog "Used by" matrix as
+    #     the routing default; per-client overrides allowed.
     # ------------------------------------------------------------------------
-    # Master dataset registry — the 33 product-catalog datasets. One row
+    # Master Bronze dataset registry — 33 product-catalog datasets, one row
     # per dataset. Seeded by scripts/load_product_catalog.py from
-    # data/sample/product_catalog.xlsx.
+    # data/sample/product_catalog.xlsx. THIS IS THE BRONZE LAYER (verbatim
+    # from the vendor mapping spec). Renamed in Phase 15.5 from the
+    # original (incorrect) `global_gold_catalog_datasets` label.
     f"""
-    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.global_gold_catalog_datasets (
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.global_bronze_catalog_datasets (
         dataset_id         VARCHAR PRIMARY KEY,
         dataset_code       VARCHAR NOT NULL,                -- snake_case: 'membership', 'member_claims'
         display_name       VARCHAR NOT NULL,                -- 'Membership', 'Member Claims'
@@ -612,6 +627,7 @@ _DDL = [
         total_fields       INTEGER NOT NULL DEFAULT 0,
         required_fields    INTEGER NOT NULL DEFAULT 0,
         optional_fields    INTEGER NOT NULL DEFAULT 0,
+        default_anchor     VARCHAR NOT NULL DEFAULT 'CATALOG_ANCHOR',  -- CATALOG_ANCHOR | FHIR_R4_ANCHOR | X12_EDI_ANCHOR | NCPDP_D0_ANCHOR | CMS_ANCHOR | HEDIS_ANCHOR
         notes              VARCHAR,
         is_active          BOOLEAN NOT NULL DEFAULT TRUE,
         catalog_version    INTEGER NOT NULL DEFAULT 1,
@@ -620,28 +636,142 @@ _DDL = [
         registered_by      VARCHAR
     )
     """,
-    # Field catalogue — 943 fields across 33 datasets. PK is composite to
-    # keep deterministic on re-seed. logical_type is *inferred* by the
-    # loader from description/example heuristics; operator can refine
-    # later via the Pipeline Architect UI.
+    # Bronze field catalogue — 943 fields across 33 datasets. logical_type
+    # inferred from description/example heuristics; operator can refine
+    # via the UI. Every column here represents a verbatim vendor field.
     f"""
-    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.global_gold_catalog_fields (
-        field_id           VARCHAR PRIMARY KEY,
-        dataset_id         VARCHAR NOT NULL,                -- FK to global_gold_catalog_datasets.dataset_id
-        dataset_code       VARCHAR NOT NULL,                -- denormalized for ergonomics
-        field_order        INTEGER NOT NULL,                -- preserves catalog row order
-        field_display_name VARCHAR NOT NULL,                -- 'Member Card ID' (verbatim from xlsx)
-        gold_column_name   VARCHAR NOT NULL,                -- 'member_card_id' (snake_case for DDL)
-        requirement        VARCHAR NOT NULL,                -- Required | Optional
-        logical_type       VARCHAR NOT NULL DEFAULT 'TEXT', -- TEXT | INTEGER | DECIMAL | DATE | TIMESTAMP | BOOLEAN
-        description        VARCHAR,
-        additional_notes   VARCHAR,
-        example            VARCHAR,
-        is_pii             BOOLEAN NOT NULL DEFAULT FALSE,
-        is_phi             BOOLEAN NOT NULL DEFAULT FALSE,
-        is_business_key    BOOLEAN NOT NULL DEFAULT FALSE,
-        catalog_version    INTEGER NOT NULL DEFAULT 1,
-        registered_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.global_bronze_catalog_fields (
+        field_id            VARCHAR PRIMARY KEY,
+        dataset_id          VARCHAR NOT NULL,                -- FK to global_bronze_catalog_datasets.dataset_id
+        dataset_code        VARCHAR NOT NULL,                -- denormalized for ergonomics
+        field_order         INTEGER NOT NULL,                -- preserves catalog row order
+        field_display_name  VARCHAR NOT NULL,                -- 'Member Card ID' (verbatim from xlsx)
+        bronze_column_name  VARCHAR NOT NULL,                -- 'member_card_id' (snake_case for DDL)
+        requirement         VARCHAR NOT NULL,                -- Required | Optional
+        logical_type        VARCHAR NOT NULL DEFAULT 'TEXT', -- TEXT | INTEGER | DECIMAL | DATE | TIMESTAMP | BOOLEAN
+        description         VARCHAR,
+        additional_notes    VARCHAR,
+        example             VARCHAR,
+        is_pii              BOOLEAN NOT NULL DEFAULT FALSE,
+        is_phi              BOOLEAN NOT NULL DEFAULT FALSE,
+        is_business_key     BOOLEAN NOT NULL DEFAULT FALSE,
+        catalog_version     INTEGER NOT NULL DEFAULT 1,
+        registered_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # ------------------------------------------------------------------------
+    # GOLD SCHEMA REGISTRY — Phase 15.5. The CANONICAL model per dataset,
+    # globally. Every client clones from here. Status walks
+    # NONE → DRAFT → PENDING_REVIEW → LIVE → ARCHIVED.
+    # ------------------------------------------------------------------------
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.global_gold_schema_datasets (
+        gold_dataset_id      VARCHAR PRIMARY KEY,
+        dataset_code         VARCHAR NOT NULL,              -- FK to global_bronze_catalog_datasets.dataset_code
+        gold_table_name      VARCHAR NOT NULL,              -- 'member', 'claim', 'pharmacy_claim'
+        version              INTEGER NOT NULL DEFAULT 1,
+        status               VARCHAR NOT NULL,              -- DRAFT | PENDING_REVIEW | LIVE | ARCHIVED
+        gold_anchor          VARCHAR NOT NULL,              -- CATALOG_ANCHOR | FHIR_R4_ANCHOR | etc.
+        source               VARCHAR NOT NULL,              -- AI_CONSTRUCTED | MANUAL | IMPORTED
+        import_format        VARCHAR,                       -- DDL_SQL | DBT_YAML | FHIR_PROFILE_JSON | JSON_SCHEMA | SNOWFLAKE_DESCRIBE | NULL
+        ai_proposal_json     VARCHAR,                       -- the agent's full proposal payload (when AI_CONSTRUCTED)
+        ai_rationale         VARCHAR,                       -- why these columns / why this anchor
+        ai_token_count       INTEGER,
+        ai_latency_ms        INTEGER,
+        notes                VARCHAR,
+        created_by           VARCHAR NOT NULL,
+        created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        submitted_at         TIMESTAMP,
+        approved_by          VARCHAR,
+        approved_at          TIMESTAMP,
+        archived_at          TIMESTAMP
+    )
+    """,
+    # Gold columns — one row per (gold_dataset_id, column_order). Holds the
+    # canonical, business-friendly column shape. Client overrides apply on
+    # top via client_field_overrides (already exists from Phase 15).
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.global_gold_schema_fields (
+        gold_field_id       VARCHAR PRIMARY KEY,
+        gold_dataset_id     VARCHAR NOT NULL,              -- FK to global_gold_schema_datasets
+        dataset_code        VARCHAR NOT NULL,              -- denormalized
+        column_order        INTEGER NOT NULL,
+        gold_column_name    VARCHAR NOT NULL,              -- 'member_id', 'full_name', 'effective_from'
+        logical_type        VARCHAR NOT NULL DEFAULT 'TEXT',
+        nullable            BOOLEAN NOT NULL DEFAULT TRUE,
+        is_business_key     BOOLEAN NOT NULL DEFAULT FALSE,
+        is_pii              BOOLEAN NOT NULL DEFAULT FALSE,
+        is_phi              BOOLEAN NOT NULL DEFAULT FALSE,
+        description         VARCHAR,
+        anchor_reference    VARCHAR,                       -- e.g. 'FHIR Patient.id' or 'X12 834 INS-02'
+        version             INTEGER NOT NULL DEFAULT 1,
+        registered_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # Bronze→Gold mapping rules — sparse; one row per (gold_field_id,
+    # source). Holds the SQL expression that derives a Gold column from
+    # one or more Bronze columns. Examples:
+    #   full_name = CONCAT_WS(' ', first_name, middle_name, last_name)
+    #   gender    = CASE gender_code WHEN 'M' THEN 'male' WHEN 'F' THEN 'female' ELSE 'unknown' END
+    #   member_id = COALESCE(member_card_id, member_medicare_id, member_medicaid_id)
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.bronze_to_gold_mappings (
+        mapping_id              VARCHAR PRIMARY KEY,
+        gold_field_id           VARCHAR NOT NULL,           -- FK to global_gold_schema_fields
+        gold_dataset_id         VARCHAR NOT NULL,           -- denormalized
+        gold_column_name        VARCHAR NOT NULL,           -- denormalized
+        bronze_source_columns   VARCHAR NOT NULL,           -- JSON array: ['first_name','middle_name','last_name']
+        transform_kind          VARCHAR NOT NULL,           -- DIRECT | CONCAT | COALESCE | LOOKUP | CAST | CASE | DERIVED
+        transform_sql           VARCHAR NOT NULL,           -- the SQL expression (uses Bronze column names)
+        rationale               VARCHAR,
+        confidence              DECIMAL(3,2),               -- 0.0 - 1.0 — agent's confidence in the mapping
+        created_by              VARCHAR NOT NULL,
+        created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # Gold schema audit log — every state transition + every edit.
+    # Mirrors contract_design_audit_log + pipeline_instance_audit_log.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.gold_schema_audit_log (
+        audit_id            VARCHAR PRIMARY KEY,
+        gold_dataset_id     VARCHAR NOT NULL,
+        dataset_code        VARCHAR NOT NULL,
+        action              VARCHAR NOT NULL,               -- PROPOSED | EDITED | IMPORTED | SUBMITTED | APPROVED | REJECTED | ARCHIVED
+        actor               VARCHAR NOT NULL,
+        from_status         VARCHAR,
+        to_status           VARCHAR,
+        diff_summary        VARCHAR,                        -- JSON
+        ai_reasoning        VARCHAR,
+        token_count         INTEGER,
+        latency_ms          INTEGER,
+        ts                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        notes               VARCHAR
+    )
+    """,
+    # Silver pattern recommendations — one row per (dataset_code, version).
+    # The agent flags whether DV2 (Hub/Sat/Link) is right for the dataset
+    # OR whether NORMALIZED would be better (e.g., tiny lookup tables).
+    # HITL gate: operator approves the recommendation; pipeline_templates
+    # picks up the LIVE recommendation when generating Silver.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.silver_pattern_recommendations (
+        recommendation_id     VARCHAR PRIMARY KEY,
+        dataset_code          VARCHAR NOT NULL,
+        recommended_pattern   VARCHAR NOT NULL,             -- HUB_SAT_LINK | NORMALIZED
+        reasoning             VARCHAR NOT NULL,             -- agent's short explanation
+        proposed_silver_shape VARCHAR,                      -- JSON: list of {{table_name, kind, columns}}
+        bronze_field_count    INTEGER,
+        business_key_count    INTEGER,
+        domain_count          INTEGER,                      -- # of distinct domains in the Bronze fields
+        is_overkill_flag      BOOLEAN NOT NULL DEFAULT FALSE,
+        status                VARCHAR NOT NULL,             -- DRAFT | LIVE | ARCHIVED
+        ai_token_count        INTEGER,
+        ai_latency_ms         INTEGER,
+        created_by            VARCHAR NOT NULL,
+        created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        approved_by           VARCHAR,
+        approved_at           TIMESTAMP,
+        archived_at           TIMESTAMP
     )
     """,
     # Pipeline templates — reusable Bronze→Silver→Gold blueprints anchored

@@ -1,11 +1,11 @@
-"""Phase 15 verifier — Pipeline Architect end-to-end regression.
+"""Phase 15 + 15.5 verifier — Pipeline Architect end-to-end regression.
 
 Assertion-based PASS/FAIL. Mirrors runbook_verify_phase{10,11,12,13,14}.py.
 Exits 1 on any failure.
 
-Eight sections:
+Sections:
 
-  1. CONTROL DDL          — 8 Phase 15 tables exist with right columns.
+  1. CONTROL DDL          — 13 Phase 15 + 15.5 tables exist (8 base + 5 new).
   2. Catalog seed         — 33 datasets + 943 fields + 61+ routing rules.
   3. Builder determinism  — same input → same output for DDL / dbt / DAG.
   4. Override semantics   — apply_overrides + diff_against_global correct.
@@ -15,6 +15,8 @@ Eight sections:
                             artifacts (4 files + 1 GX suite row).
   7. UI surface           — /Pipeline_Architect serves HTTP 200.
   8. DAG callables        — generated DAGs import the 5 task stubs.
+  9. Phase 15.5 tables    — Gold registry, Bronze→Gold mappings,
+                            Silver pattern recommendations exist + writable.
 
 Usage::
 
@@ -32,6 +34,7 @@ import py_compile
 import re as _re
 import sys
 import urllib.request
+import uuid as _uuid
 from datetime import UTC
 from datetime import datetime as _dt
 from pathlib import Path
@@ -95,14 +98,21 @@ section("1. CONTROL schema — Phase 15 DDL")
 create_control_tables(WH)
 
 EXPECTED_TABLES: dict[str, int] = {
-    "GLOBAL_GOLD_CATALOG_DATASETS": 15,
-    "GLOBAL_GOLD_CATALOG_FIELDS": 16,
+    # Phase 15 base — renamed in 15.5: gold_catalog → bronze_catalog
+    "GLOBAL_BRONZE_CATALOG_DATASETS": 16,  # +1 default_anchor in 15.5
+    "GLOBAL_BRONZE_CATALOG_FIELDS": 16,
     "PIPELINE_TEMPLATES": 17,
     "CLIENT_PIPELINE_INSTANCES": 34,
     "CLIENT_FIELD_OVERRIDES": 11,
     "ONPREM_ROUTING_RULES": 10,
     "CLIENT_ROUTING_OVERRIDES": 10,
     "PIPELINE_INSTANCE_AUDIT_LOG": 14,
+    # Phase 15.5 additions — Gold schema registry + Silver pattern recs
+    "GLOBAL_GOLD_SCHEMA_DATASETS": 19,
+    "GLOBAL_GOLD_SCHEMA_FIELDS": 14,
+    "BRONZE_TO_GOLD_MAPPINGS": 11,
+    "GOLD_SCHEMA_AUDIT_LOG": 13,
+    "SILVER_PATTERN_RECOMMENDATIONS": 17,
 }
 
 for table, min_cols in EXPECTED_TABLES.items():
@@ -126,7 +136,7 @@ section("2. Global Gold Catalog — seed counts")
 
 ds_count = int(
     WH.query(
-        f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.global_gold_catalog_datasets WHERE is_active = TRUE"
+        f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.global_bronze_catalog_datasets WHERE is_active = TRUE"
     )[0]["c"]
 )
 if ds_count >= 30:
@@ -135,7 +145,7 @@ else:
     fails("datasets seeded", f"got {ds_count}, expected >= 30")
 
 field_count = int(
-    WH.query(f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.global_gold_catalog_fields")[0]["c"]
+    WH.query(f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.global_bronze_catalog_fields")[0]["c"]
 )
 if field_count >= 900:
     passes(f"fields seeded: {field_count} (expected >= 900)")
@@ -155,7 +165,7 @@ else:
 # Membership has 41 fields per the catalog
 membership_field_count = int(
     WH.query(
-        f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.global_gold_catalog_fields WHERE dataset_code = 'membership'"
+        f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.global_bronze_catalog_fields WHERE dataset_code = 'membership'"
     )[0]["c"]
 )
 if membership_field_count == 41:
@@ -183,7 +193,9 @@ else:
 section("3. Builders — deterministic outputs")
 
 ds_rows = WH.query(
-    f"SELECT * FROM {CONTROL_SCHEMA}.global_gold_catalog_fields WHERE dataset_code = 'membership' ORDER BY field_order"
+    f"SELECT *, bronze_column_name AS gold_column_name "
+    f"FROM {CONTROL_SCHEMA}.global_bronze_catalog_fields "
+    f"WHERE dataset_code = 'membership' ORDER BY field_order"
 )
 catalog_fields = list(ds_rows)
 
@@ -536,6 +548,166 @@ if phase15_dags:
         passes(f"All {compiled} Phase 15-generated DAG(s) compile")
 else:
     print("    (no Phase 15-generated DAGs in dags/ yet — skipping compile check)")
+
+
+# ============================================================================
+# 9. Phase 15.5 — Gold registry + Bronze→Gold mappings + Silver pattern recs
+# ============================================================================
+
+section("9. Phase 15.5 — Gold registry round-trip")
+
+# 9a. Bronze datasets carry default_anchor populated post-migration
+default_anchors = WH.query(
+    f"SELECT default_anchor, COUNT(*) AS c "
+    f"FROM {CONTROL_SCHEMA}.global_bronze_catalog_datasets "
+    f"GROUP BY default_anchor"
+)
+anchors_seen = {row["default_anchor"]: int(row["c"]) for row in default_anchors}
+if anchors_seen.get("CATALOG_ANCHOR", 0) >= 30:
+    passes(f"default_anchor column populated: {anchors_seen}")
+else:
+    fails("default_anchor column", f"got {anchors_seen}; expected CATALOG_ANCHOR on most datasets")
+
+# 9b. Gold registry round-trip — insert + read + delete
+verify_gold_id = str(_uuid.uuid4())
+verify_field_id = str(_uuid.uuid4())
+verify_mapping_id = str(_uuid.uuid4())
+verify_audit_id = str(_uuid.uuid4())
+verify_rec_id = str(_uuid.uuid4())
+try:
+    WH.execute(
+        f"INSERT INTO {CONTROL_SCHEMA}.global_gold_schema_datasets "
+        f"(gold_dataset_id, dataset_code, gold_table_name, version, status, "
+        f" gold_anchor, source, created_by) "
+        f"VALUES ($id, 'membership', 'member', 1, 'DRAFT', "
+        f" 'FHIR_R4_ANCHOR', 'AI_CONSTRUCTED', 'phase15_5_verifier')",
+        {"id": verify_gold_id},
+    )
+    rows = list(
+        WH.query(
+            f"SELECT status, gold_anchor, source FROM {CONTROL_SCHEMA}.global_gold_schema_datasets "
+            f"WHERE gold_dataset_id = $id",
+            {"id": verify_gold_id},
+        )
+    )
+    if rows and rows[0]["status"] == "DRAFT" and rows[0]["gold_anchor"] == "FHIR_R4_ANCHOR":
+        passes("global_gold_schema_datasets accepts INSERT + reads back correctly")
+    else:
+        fails("gold_schema_datasets", f"row not as expected: {rows}")
+
+    WH.execute(
+        f"INSERT INTO {CONTROL_SCHEMA}.global_gold_schema_fields "
+        f"(gold_field_id, gold_dataset_id, dataset_code, column_order, "
+        f" gold_column_name, logical_type, nullable, is_business_key) "
+        f"VALUES ($f, $g, 'membership', 1, 'member_id', 'TEXT', FALSE, TRUE)",
+        {"f": verify_field_id, "g": verify_gold_id},
+    )
+    field_rows = list(
+        WH.query(
+            f"SELECT gold_column_name, is_business_key "
+            f"FROM {CONTROL_SCHEMA}.global_gold_schema_fields "
+            f"WHERE gold_field_id = $f",
+            {"f": verify_field_id},
+        )
+    )
+    if field_rows and field_rows[0]["gold_column_name"] == "member_id":
+        passes("global_gold_schema_fields accepts INSERT + reads back correctly")
+    else:
+        fails("gold_schema_fields", f"row not as expected: {field_rows}")
+
+    WH.execute(
+        f"INSERT INTO {CONTROL_SCHEMA}.bronze_to_gold_mappings "
+        f"(mapping_id, gold_field_id, gold_dataset_id, gold_column_name, "
+        f" bronze_source_columns, transform_kind, transform_sql, created_by) "
+        f"VALUES ($m, $f, $g, 'member_id', "
+        f" '[\"member_card_id\",\"member_medicare_id\"]', 'COALESCE', "
+        f" 'COALESCE(member_card_id, member_medicare_id)', 'phase15_5_verifier')",
+        {"m": verify_mapping_id, "f": verify_field_id, "g": verify_gold_id},
+    )
+    mapping_rows = list(
+        WH.query(
+            f"SELECT transform_kind, transform_sql "
+            f"FROM {CONTROL_SCHEMA}.bronze_to_gold_mappings "
+            f"WHERE mapping_id = $m",
+            {"m": verify_mapping_id},
+        )
+    )
+    if mapping_rows and mapping_rows[0]["transform_kind"] == "COALESCE":
+        passes("bronze_to_gold_mappings accepts INSERT + reads back correctly")
+    else:
+        fails("bronze_to_gold_mappings", f"row not as expected: {mapping_rows}")
+
+    WH.execute(
+        f"INSERT INTO {CONTROL_SCHEMA}.gold_schema_audit_log "
+        f"(audit_id, gold_dataset_id, dataset_code, action, actor, to_status) "
+        f"VALUES ($a, $g, 'membership', 'PROPOSED', 'phase15_5_verifier', 'DRAFT')",
+        {"a": verify_audit_id, "g": verify_gold_id},
+    )
+    audit_rows = list(
+        WH.query(
+            f"SELECT action, to_status FROM {CONTROL_SCHEMA}.gold_schema_audit_log "
+            f"WHERE audit_id = $a",
+            {"a": verify_audit_id},
+        )
+    )
+    if audit_rows and audit_rows[0]["action"] == "PROPOSED":
+        passes("gold_schema_audit_log accepts INSERT + reads back correctly")
+    else:
+        fails("gold_schema_audit_log", f"row not as expected: {audit_rows}")
+
+    WH.execute(
+        f"INSERT INTO {CONTROL_SCHEMA}.silver_pattern_recommendations "
+        f"(recommendation_id, dataset_code, recommended_pattern, reasoning, "
+        f" bronze_field_count, business_key_count, domain_count, "
+        f" is_overkill_flag, status, created_by) "
+        f"VALUES ($r, 'membership', 'HUB_SAT_LINK', "
+        f" 'Member dataset has 41 fields across 4 domains (demo, address, eligibility, plan) "
+        f"with one business key (member_card_id). DV2 Hub/Sat/Link is the right structural "
+        f"choice; not overkill.', "
+        f" 41, 1, 4, FALSE, 'DRAFT', 'phase15_5_verifier')",
+        {"r": verify_rec_id},
+    )
+    rec_rows = list(
+        WH.query(
+            f"SELECT recommended_pattern, is_overkill_flag, status "
+            f"FROM {CONTROL_SCHEMA}.silver_pattern_recommendations "
+            f"WHERE recommendation_id = $r",
+            {"r": verify_rec_id},
+        )
+    )
+    if (
+        rec_rows
+        and rec_rows[0]["recommended_pattern"] == "HUB_SAT_LINK"
+        and not rec_rows[0]["is_overkill_flag"]
+    ):
+        passes("silver_pattern_recommendations accepts INSERT + reads back correctly")
+    else:
+        fails("silver_pattern_recommendations", f"row not as expected: {rec_rows}")
+
+    # Cleanup
+    WH.execute(
+        f"DELETE FROM {CONTROL_SCHEMA}.silver_pattern_recommendations WHERE recommendation_id = $r",
+        {"r": verify_rec_id},
+    )
+    WH.execute(
+        f"DELETE FROM {CONTROL_SCHEMA}.gold_schema_audit_log WHERE audit_id = $a",
+        {"a": verify_audit_id},
+    )
+    WH.execute(
+        f"DELETE FROM {CONTROL_SCHEMA}.bronze_to_gold_mappings WHERE mapping_id = $m",
+        {"m": verify_mapping_id},
+    )
+    WH.execute(
+        f"DELETE FROM {CONTROL_SCHEMA}.global_gold_schema_fields WHERE gold_field_id = $f",
+        {"f": verify_field_id},
+    )
+    WH.execute(
+        f"DELETE FROM {CONTROL_SCHEMA}.global_gold_schema_datasets WHERE gold_dataset_id = $g",
+        {"g": verify_gold_id},
+    )
+    passes("Phase 15.5 verifier rows cleaned up")
+except Exception as e:
+    fails("Phase 15.5 round-trip", f"{type(e).__name__}: {e}")
 
 
 # ============================================================================

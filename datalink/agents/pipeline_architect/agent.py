@@ -202,8 +202,8 @@ class PipelineArchitectAgent(AgentBase):
             dataset_code         str
             dataset_display_name str
             bronze_anchor        str        FHIR | X12 | NCPDP | FLAT_FILE | API
-            catalog_fields       list[dict] rows from CONTROL.global_gold_catalog_fields
-            catalog_dataset      dict       row from CONTROL.global_gold_catalog_datasets
+            catalog_fields       list[dict] rows from CONTROL.global_bronze_catalog_fields
+            catalog_dataset      dict       row from CONTROL.global_bronze_catalog_datasets
             existing_instances   list[dict] peer client instances for the same dataset
             client_overrides     list[dict] rows from CONTROL.client_field_overrides
             default_routing      list[dict] rows from CONTROL.onprem_routing_rules
