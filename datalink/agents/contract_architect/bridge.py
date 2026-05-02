@@ -714,7 +714,7 @@ def _render_vendor_spec_html(
     (Cmd/Ctrl+P → "Save as PDF"). Avoids the native PDF library
     dependency tree while producing a clean, branded deliverable.
     """
-    import markdown as md_lib  # type: ignore[import-untyped]
+    import markdown as md_lib  # type: ignore[import-untyped,unused-ignore]
 
     body_html = md_lib.markdown(
         md_text,

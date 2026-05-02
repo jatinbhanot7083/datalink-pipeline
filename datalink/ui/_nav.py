@@ -102,10 +102,14 @@ INTERNAL_PAGE_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         "Author DQ",
         "cat-author",  # indigo wash — "build / author"
         [
-            # Phase 14 — sits FIRST in the Author group: contracts come
-            # before DQ rules in the lifecycle. Operator designs the
-            # contract here, runs Bronze, then authors checks against
-            # the populated table downstream.
+            # Phase 15 — sits FIRST in the Author group: the Pipeline
+            # Architect is the new top-of-funnel — operator picks a dataset
+            # from the Global Gold Catalog, the agent proposes a full
+            # Bronze→Silver→Gold pipeline (clone or build), and one click
+            # deploys all 5 artifacts (DDL, dbt, DAG, GX suite, routing).
+            ("Pipeline Architect", "/Pipeline_Architect", "🏛"),
+            # Phase 14 — Data Contract Architect handles one-off Bronze
+            # contracts for messy vendor files; complementary to Phase 15.
             ("Data Contract Architect", "/Data_Contract_Architect", "🏗"),
             ("DQ AI Architect", "/DQ_AI_Architect", "🧪"),  # NL-driven entry point
             ("DQ Author", "/DQ_Author", "📝"),  # grid editor for power users

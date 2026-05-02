@@ -495,3 +495,148 @@ def _checkpoint_summary(hc: Any, name: str) -> dict[str, Any]:
 def generate_run_id() -> str:
     """Stable run-id helper — used when the orchestrator doesn't supply one."""
     return f"run-{uuid.uuid4().hex[:12]}"
+
+
+# ============================================================================
+# Phase 15 — Pipeline Architect generated-DAG callables.
+# ============================================================================
+# The DAGs emitted by datalink.agents.pipeline_architect.builders.build_airflow_dag
+# call the five functions below. Each accepts plain kwargs (client_id,
+# dataset_code, etc.) so Airflow's PythonOperator op_kwargs flow works
+# without any TaskContext wiring. Each task:
+#   * Logs the inputs.
+#   * Touches a small marker file under data/generated/<client>/<dataset>/
+#     so the operator can see the DAG actually executed during a smoke run.
+#   * Returns a dict the next task can consume via XCom.
+#
+# These are intentionally STUB callables — they validate the wiring without
+# requiring full Bronze/Silver/Gold runtime hookup. Operator extends them
+# with real logic (or swaps them for the existing TaskContext-based callables
+# above) once the demo loop is closed.
+
+
+def _phase15_marker(client_id: str, dataset_code: str, task_name: str) -> Path:
+    """Write a JSON marker so the operator can prove the DAG ran."""
+    import json as _json
+    from datetime import UTC
+    from datetime import datetime as _dt
+
+    base = Path("/opt/datalink/data/generated") / client_id.lower() / dataset_code / "phase15"
+    base.mkdir(parents=True, exist_ok=True)
+    marker = base / f"{task_name}.json"
+    marker.write_text(
+        _json.dumps(
+            {
+                "task": task_name,
+                "client_id": client_id,
+                "dataset_code": dataset_code,
+                "ts_utc": _dt.now(UTC).isoformat(),
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    return marker
+
+
+def bronze_land_task(
+    *, client_id: str, dataset_code: str, bronze_anchor: str = "FLAT_FILE", **_: Any
+) -> dict[str, Any]:
+    """Stub: lands raw vendor data into BRONZE_<CLIENT>.raw_<dataset>.
+
+    Real implementation (per anchor):
+      * FLAT_FILE → COPY INTO from azure-blob landing zone
+      * FHIR      → bundle parser → flat row staging
+      * X12       → EDI parser → segment-level rows
+      * NCPDP     → claim parser
+      * API       → paginated fetch + upsert
+    """
+    _log.info(
+        "phase15.bronze_land_task",
+        client_id=client_id,
+        dataset_code=dataset_code,
+        bronze_anchor=bronze_anchor,
+    )
+    marker = _phase15_marker(client_id, dataset_code, "bronze_land")
+    return {
+        "task": "bronze_land",
+        "client_id": client_id,
+        "dataset_code": dataset_code,
+        "bronze_anchor": bronze_anchor,
+        "marker_uri": str(marker),
+    }
+
+
+def bronze_validate_task(*, client_id: str, dataset_code: str, **_: Any) -> dict[str, Any]:
+    """Stub: runs the auto-anchored GX expectation suite against the
+    Bronze raw landing. In production this delegates to the existing
+    Phase 5 hooked checkpoint flow."""
+    _log.info(
+        "phase15.bronze_validate_task",
+        client_id=client_id,
+        dataset_code=dataset_code,
+    )
+    marker = _phase15_marker(client_id, dataset_code, "bronze_validate")
+    return {
+        "task": "bronze_validate",
+        "client_id": client_id,
+        "dataset_code": dataset_code,
+        "marker_uri": str(marker),
+    }
+
+
+def silver_dbt_task(*, client_id: str, dataset_code: str, **_: Any) -> dict[str, Any]:
+    """Stub: invokes dbt run --select silver_<dataset> for the client.
+    Real version would re-use task_dbt_run() above with proper selectors."""
+    _log.info(
+        "phase15.silver_dbt_task",
+        client_id=client_id,
+        dataset_code=dataset_code,
+    )
+    marker = _phase15_marker(client_id, dataset_code, "silver_dbt")
+    return {
+        "task": "silver_dbt",
+        "client_id": client_id,
+        "dataset_code": dataset_code,
+        "marker_uri": str(marker),
+    }
+
+
+def gold_dbt_task(*, client_id: str, dataset_code: str, **_: Any) -> dict[str, Any]:
+    """Stub: invokes dbt run --select gold_<dataset> for the client."""
+    _log.info(
+        "phase15.gold_dbt_task",
+        client_id=client_id,
+        dataset_code=dataset_code,
+    )
+    marker = _phase15_marker(client_id, dataset_code, "gold_dbt")
+    return {
+        "task": "gold_dbt",
+        "client_id": client_id,
+        "dataset_code": dataset_code,
+        "marker_uri": str(marker),
+    }
+
+
+def onprem_push_task(
+    *, client_id: str, dataset_code: str, targets: list[dict[str, Any]] | None = None, **_: Any
+) -> dict[str, Any]:
+    """Stub: pushes the Gold delta to each downstream OnPrem product
+    listed in the routing plan. Real version delegates to the existing
+    Phase 9.3 egress_batch flow (see datalink.adapters.onprem.*)."""
+    targets = targets or []
+    _log.info(
+        "phase15.onprem_push_task",
+        client_id=client_id,
+        dataset_code=dataset_code,
+        target_count=len(targets),
+        targets=[t.get("downstream_product") for t in targets],
+    )
+    marker = _phase15_marker(client_id, dataset_code, "onprem_push")
+    return {
+        "task": "onprem_push",
+        "client_id": client_id,
+        "dataset_code": dataset_code,
+        "targets_pushed": [t.get("downstream_product") for t in targets],
+        "marker_uri": str(marker),
+    }

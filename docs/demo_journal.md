@@ -370,6 +370,142 @@ from session-end summary).
 
 ---
 
+## Phase 15 — Pipeline Architect (DELIVERED 2026-05-02)
+
+**The new top-of-funnel for data engineering.** Materialises a per-client
+Bronze→Silver→Gold pipeline from the **Global Gold Catalog** (33 datasets,
+943 fields seeded from `data/sample/product_catalog.xlsx`). Operator picks
+a dataset; the agent decides clone-vs-build, generates 5 artifacts in one
+click, flips state to LIVE.
+
+### Architecture (Jatin's design)
+
+- **Global Gold Catalog** is the contract. One canonical Gold schema per
+  dataset (Membership, Member Claims, Pharmacy, Provider, …). Sourced from
+  the product catalog xlsx — 33 datasets × an average of 28 fields each.
+- **Each client gets their own physical COPY of Gold** —
+  `GOLD_AETNA.membership` and `GOLD_CARESOURCE.membership` are
+  structurally identical (same columns, same types) but physically
+  separate (different schema, their own data, their own row counts).
+- **Client-level overrides** allowed and tracked sparsely in
+  `CONTROL.client_field_overrides` (`ADD_FIELD` / `RELAX_NULLABLE` /
+  `TIGHTEN_NULLABLE` / `RENAME` / `TYPE_CHANGE` / `EXCLUDE`). HITL review
+  diffs every deviation against the global catalog.
+- **Bronze anchor varies by client** (FHIR / X12 / NCPDP / FLAT_FILE /
+  API). Silver (NORMALIZED) + Gold (UM_OPERATIONAL) stay structurally
+  uniform regardless.
+- **OnPrem push routing** uses the catalog's "Used by" matrix as the
+  default routing table (61 default rules seeded). Per-client overrides
+  in `CONTROL.client_routing_overrides` (`ENABLE` / `DISABLE` /
+  `OVERRIDE_TARGET`).
+
+### What it ships
+
+**8 new CONTROL tables** (all live in Snowflake):
+
+```
+CONTROL.global_gold_catalog_datasets    -- 33 datasets, master
+CONTROL.global_gold_catalog_fields      -- 943 fields, ordered
+CONTROL.pipeline_templates              -- reusable Gold blueprints
+CONTROL.client_pipeline_instances       -- one per (client, dataset)
+CONTROL.client_field_overrides          -- sparse per-client deviations
+CONTROL.onprem_routing_rules            -- "Used by" matrix → push targets
+CONTROL.client_routing_overrides        -- per-client routing exceptions
+CONTROL.pipeline_instance_audit_log     -- every state transition
+```
+
+**5 artifacts emitted per deploy** (the demo "wow"):
+
+1. `datalink/pipeline/gold/ddl/<client>_<dataset>.sql` — canonical Gold
+   `CREATE TABLE` with PII/PHI/business-key annotations + audit columns.
+2. `dbt/models/silver/<client>/<dataset>_clean.sql` — Silver model with
+   `TRY_CAST` + required-not-null filters.
+3. `dbt/models/gold/<client>/<dataset>.sql` — latest-per-business-key
+   window dedup + clustering on the natural keys.
+4. `dags/<client>_<dataset>_pipeline.py` — Airflow DAG with a 5-task
+   chain: bronze_land → bronze_validate → silver_dbt → gold_dbt →
+   onprem_push.
+5. `CONTROL.dq_suites` row (LIVE) — auto-anchored GX expectation suite
+   (51 expectations for Membership: not-null on requireds, uniqueness on
+   business keys, NPI regex, ZIP regex, DATE format, etc.).
+
+### Real AI, deterministic builders
+
+The agent (`PipelineArchitectAgent`) runs **real Anthropic Claude
+haiku-4.5** for the human-readable narrative (executive summary,
+clone-vs-build recommendation, override review, audit-log rationale). The
+**deterministic builders** generate the 4 file artifacts + GX suite from
+the catalog rows + override deltas — same input, byte-identical output,
+no LLM hallucination risk on structural artifacts.
+
+**~1100 LLM tokens per proposal**, ~5s end-to-end including Snowflake
+catalog reads + Anthropic call. PHI-safe: only metadata reaches the LLM
+(field counts, peer client_ids, used-by matrix).
+
+### Verifier — 38/38 PASS
+
+```
+$ python3 scripts/runbook_verify_phase15.py
+
+  1. CONTROL DDL — 8 tables, 127 columns total       PASS x 8
+  2. Catalog seed — 33 datasets, 943 fields, 61 rules PASS x 5
+  3. Builders deterministic                          PASS x 7
+  4. Override semantics                              PASS x 4
+  5. Agent end-to-end (real Claude + Snowflake)      PASS x 4
+  6. Persist + deploy (5 artifacts, audit log)       PASS x 7
+  7. UI page /Pipeline_Architect serves 200          PASS x 1
+  8. Generated DAGs compile + tasks importable       PASS x 2
+
+  PASS: 38   FAIL: 0
+```
+
+### Demo storyline
+
+1. Operator opens `/Pipeline_Architect`, picks Aetna.
+2. Browses the **Global Gold Catalog** panel (33 datasets, 943 fields,
+   filterable by category / used-by).
+3. Picks `Membership`. Bronze anchor `FLAT_FILE` (Aetna sends pipe-delimited).
+4. Clicks **🚀 Propose pipeline**. Agent decides BUILD (no peers yet),
+   generates 5 routing entries (CC, E360, RBN, EC, ESV), 51 GX
+   expectations, full Gold DDL with PII/PHI flags.
+5. Operator reviews narrative + artifact previews. Clicks
+   **✅ Approve & Deploy**. Within seconds: 4 files committed, GX suite
+   LIVE, audit log written, instance status flipped to LIVE.
+6. Now switch to CareSource — same flow, but now decision = CLONE
+   (peer Aetna instance is LIVE). Same Gold structure, only Bronze anchor
+   may differ.
+
+### Cross-page wiring
+
+- **DQ Author** got a banner pointing to Pipeline Architect for catalog-
+  driven baseline suites; this page is now for bespoke checks layered on top.
+- **Data Contract Architect** got a banner saying "Most users want
+  Pipeline Architect; use this page for one-off Bronze contracts on
+  messy vendor files that don't fit any catalog dataset." Phase 14 stays
+  100% complementary — it handles the long-tail vendor cases the catalog
+  doesn't cover yet.
+
+### Files added / changed
+
+| Path | Lines | Note |
+|---|---|---|
+| `datalink/quality/control.py` | +180 | 8 new DDL blocks |
+| `datalink/agents/pipeline_architect/__init__.py` | new | Public API |
+| `datalink/agents/pipeline_architect/agent.py` | new | LLM narrative + decision |
+| `datalink/agents/pipeline_architect/builders.py` | new | Deterministic generators |
+| `datalink/agents/pipeline_architect/bridge.py` | new | Catalog lookup + persist + deploy |
+| `datalink/orchestration/tasks.py` | +130 | 5 Phase 15 task callables |
+| `datalink/phi/guard.py` | +14 | New SAFE_FIELDS |
+| `datalink/ui/pages/13_Pipeline_Architect.py` | new | Streamlit page |
+| `datalink/ui/_nav.py` | +3 | Sidebar entry |
+| `datalink/ui/pages/1_DQ_Author.py` | +18 | Handoff banner |
+| `datalink/ui/pages/12_Data_Contract_Architect.py` | +20 | Handoff banner |
+| `scripts/load_product_catalog.py` | new | xlsx loader |
+| `scripts/runbook_verify_phase15.py` | new | 38-assertion verifier |
+| `data/sample/product_catalog.xlsx` | new | Source-of-truth catalog |
+
+---
+
 ## Phase 14 — Data Contract Architect (DELIVERED 2026-04-30)
 
 **The marquee Phase 14 deliverable.** Lets operators design Bronze table

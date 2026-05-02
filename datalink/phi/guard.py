@@ -82,6 +82,23 @@ SAFE_FIELDS: frozenset[str] = frozenset(
         "strictness",  # float — how aggressively to flag standard deviations
         "grounding_chunk_count",  # int — # of RAG chunks injected
         "grounding_k",  # int — top-k retrieval parameter
+        # --- Phase 15 Pipeline Architect extensions (Global Gold Catalog driven) ---
+        "dataset_code",  # 'membership', 'member_claims' — catalog-canonical dataset key
+        "dataset_display_name",  # 'Membership' — friendly name from catalog
+        "bronze_anchor",  # FHIR | X12 | NCPDP | FLAT_FILE | API — incoming-data shape
+        "decision_mode",  # CLONE | BUILD — clone-vs-build judgment
+        "existing_instance_count",  # int — # of peer client instances for the same dataset
+        "catalog_field_count",  # int — # of fields in the global gold catalog for this dataset
+        "catalog_required_count",  # int — # of required fields
+        "catalog_optional_count",  # int — # of optional fields
+        "downstream_products",  # list of product codes ['CC','E360','RBN','EC','ESV']
+        "default_frequency",  # 'Monthly' | 'Weekly' | 'Daily'
+        "category",  # 'Member' | 'Claims' | 'Pharmacy' | etc.
+        "peer_clients",  # list of other client_ids that have this dataset (for clone reference)
+        "override_count",  # int — # of proposed client-level overrides
+        "schedule_cron",  # cron string — '0 4 * * *' — DAG cadence
+        "silver_pattern",  # DV2 | STAR | NORMALIZED
+        "gold_pattern",  # UM_OPERATIONAL | RISK_OPERATIONAL | QUALITY | etc.
     }
 )
 

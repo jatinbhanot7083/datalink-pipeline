@@ -123,6 +123,29 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+# Phase 15 cross-page handoff — make the Pipeline Architect the default
+# entry point. Data Contract Architect remains the right tool for one-off
+# Bronze contracts on messy vendor files that don't fit the catalog yet.
+st.markdown(
+    f"""
+    <div style="background:#fffbeb;border:1px solid #fde68a;
+                padding:.85rem 1.1rem;border-radius:8px;
+                border-left:4px solid {_GOLD};margin-bottom:1.2rem;">
+      <strong>🏛 Looking for a full pipeline?</strong> The new
+      <strong>Pipeline Architect</strong> (Phase 15) materialises
+      Bronze→Silver→Gold pipelines straight from the Global Gold Catalog
+      (33 datasets, 943 fields). One click emits 5 artifacts: Gold DDL,
+      Silver+Gold dbt models, Airflow DAG, GX expectation suite, OnPrem
+      routing rules. Use <em>this</em> page only for one-off Bronze
+      contracts on messy vendor files that don't fit any catalog dataset.
+      <div style="font-size:.82rem;color:#78350f;margin-top:.45rem;">
+        <a href="/Pipeline_Architect" style="color:{_NAVY};font-weight:600;">→ Open Pipeline Architect</a>
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 selected_client = require_client()
 
 
@@ -282,26 +305,45 @@ input_ready = False
 
 if mode == "FILE_DRIVEN":
     uploaded = st.file_uploader(
-        "Drop a sample file (CSV)",
-        type=["csv", "tsv", "txt"],
-        help="The file is parsed locally — only column names + first 5 rows are sent to the LLM.",
+        "Drop a sample file (CSV / TSV / pipe-delimited / TXT)",
+        type=["csv", "tsv", "psv", "txt"],
+        help=(
+            "The file is parsed locally — only column names + first 5 rows are sent to the LLM. "
+            "Auto-detects comma, tab, or pipe delimiters."
+        ),
     )
     if uploaded is not None:
         try:
             raw = uploaded.read()
             text = raw.decode("utf-8", errors="replace")
+            # Auto-detect the delimiter by inspecting the first line.
+            first_line = text.split("\n", 1)[0] if text else ""
+            if first_line.count("|") > first_line.count(",") and first_line.count(
+                "|"
+            ) > first_line.count("\t"):
+                detected_delim = "|"
+                detected_format_label = "PSV (pipe-delimited)"
+            elif first_line.count("\t") > first_line.count(","):
+                detected_delim = "\t"
+                detected_format_label = "TSV (tab-delimited)"
+            else:
+                detected_delim = ","
+                detected_format_label = "CSV (comma-delimited)"
+
             buf = io.StringIO(text)
-            df = pd.read_csv(buf, nrows=200, low_memory=False)
-            st.dataframe(df.head(5), use_container_width=True, hide_index=True)
+            df = pd.read_csv(buf, nrows=200, low_memory=False, sep=detected_delim)
+
             st.caption(
-                f"Detected {len(df.columns)} columns × {len(df)} rows previewed "
-                f"(first 5 rows shown above; first 5 sent to the LLM)."
+                f"Detected: **{detected_format_label}** · "
+                f"{len(df.columns)} columns × {len(df)} rows previewed · "
+                f"first 5 rows sent to the LLM"
             )
+            st.dataframe(df.head(5), use_container_width=True, hide_index=True)
             input_payload = {
                 "file_name": uploaded.name,
                 "headers": [str(c) for c in df.columns],
                 "sample_values": df.head(5).fillna("").astype(str).values.tolist(),
-                "detected_format": "CSV",
+                "detected_format": detected_format_label,
             }
             input_ready = True
         except Exception as e:

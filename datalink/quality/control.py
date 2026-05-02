@@ -583,6 +583,205 @@ _DDL = [
         notes              VARCHAR
     )
     """,
+    # ========================================================================
+    # PHASE 15 — PIPELINE ARCHITECT — Global Gold Catalog + Client Instances.
+    # ========================================================================
+    # Architectural premise (game-changer pivot):
+    #   - Gold schema is a GLOBAL TEMPLATE per dataset. Sourced from the
+    #     Product Catalog xlsx (33 datasets, 943 fields). One canonical
+    #     definition of "what a Gold Membership table looks like".
+    #   - Each CLIENT gets its own physical COPY of Gold from that template.
+    #     GOLD_AETNA.membership and GOLD_CARESOURCE.membership are
+    #     structurally identical (same columns, types, business rules).
+    #   - Client-level OVERRIDES are allowed (extra column, relaxed
+    #     nullability) and tracked sparsely in client_field_overrides.
+    #   - OnPrem push from Gold uses the catalog "Used by" matrix as the
+    #     routing default; per-client overrides allowed.
+    # ------------------------------------------------------------------------
+    # Master dataset registry — the 33 product-catalog datasets. One row
+    # per dataset. Seeded by scripts/load_product_catalog.py from
+    # data/sample/product_catalog.xlsx.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.global_gold_catalog_datasets (
+        dataset_id         VARCHAR PRIMARY KEY,
+        dataset_code       VARCHAR NOT NULL,                -- snake_case: 'membership', 'member_claims'
+        display_name       VARCHAR NOT NULL,                -- 'Membership', 'Member Claims'
+        category           VARCHAR,                         -- Member | Claims | Pharmacy | Provider | etc.
+        default_frequency  VARCHAR,                         -- Monthly | Weekly | Daily | —
+        used_by            VARCHAR,                         -- JSON array of product codes: ['CC','E360','RBN','EC','ESV']
+        total_fields       INTEGER NOT NULL DEFAULT 0,
+        required_fields    INTEGER NOT NULL DEFAULT 0,
+        optional_fields    INTEGER NOT NULL DEFAULT 0,
+        notes              VARCHAR,
+        is_active          BOOLEAN NOT NULL DEFAULT TRUE,
+        catalog_version    INTEGER NOT NULL DEFAULT 1,
+        source_doc_uri     VARCHAR,                         -- 'data/sample/product_catalog.xlsx'
+        registered_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        registered_by      VARCHAR
+    )
+    """,
+    # Field catalogue — 943 fields across 33 datasets. PK is composite to
+    # keep deterministic on re-seed. logical_type is *inferred* by the
+    # loader from description/example heuristics; operator can refine
+    # later via the Pipeline Architect UI.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.global_gold_catalog_fields (
+        field_id           VARCHAR PRIMARY KEY,
+        dataset_id         VARCHAR NOT NULL,                -- FK to global_gold_catalog_datasets.dataset_id
+        dataset_code       VARCHAR NOT NULL,                -- denormalized for ergonomics
+        field_order        INTEGER NOT NULL,                -- preserves catalog row order
+        field_display_name VARCHAR NOT NULL,                -- 'Member Card ID' (verbatim from xlsx)
+        gold_column_name   VARCHAR NOT NULL,                -- 'member_card_id' (snake_case for DDL)
+        requirement        VARCHAR NOT NULL,                -- Required | Optional
+        logical_type       VARCHAR NOT NULL DEFAULT 'TEXT', -- TEXT | INTEGER | DECIMAL | DATE | TIMESTAMP | BOOLEAN
+        description        VARCHAR,
+        additional_notes   VARCHAR,
+        example            VARCHAR,
+        is_pii             BOOLEAN NOT NULL DEFAULT FALSE,
+        is_phi             BOOLEAN NOT NULL DEFAULT FALSE,
+        is_business_key    BOOLEAN NOT NULL DEFAULT FALSE,
+        catalog_version    INTEGER NOT NULL DEFAULT 1,
+        registered_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # Pipeline templates — reusable Bronze→Silver→Gold blueprints anchored
+    # to a dataset. One template per (dataset_code, version). LIVE template
+    # is what the PipelineArchitectAgent uses as its anchor for new client
+    # instances. Bronze pattern (FHIR / X12 / FLAT_FILE / API / NCPDP)
+    # varies by client source; Silver+Gold patterns stay uniform.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.pipeline_templates (
+        template_id            VARCHAR PRIMARY KEY,
+        template_code          VARCHAR NOT NULL,            -- 'membership_v1'
+        dataset_code           VARCHAR NOT NULL,            -- FK to datasets.dataset_code
+        version                INTEGER NOT NULL DEFAULT 1,
+        status                 VARCHAR NOT NULL,            -- DRAFT | LIVE | ARCHIVED
+        silver_pattern         VARCHAR NOT NULL,            -- DV2 | STAR | NORMALIZED
+        gold_pattern           VARCHAR NOT NULL,            -- UM_OPERATIONAL | RISK_OPERATIONAL | QUALITY | etc.
+        gold_ddl_template      VARCHAR,                     -- canonical Gold CREATE TABLE (snake_case)
+        silver_dbt_template    VARCHAR,                     -- dbt Silver model SQL template
+        gold_dbt_template      VARCHAR,                     -- dbt Gold model SQL template
+        default_dq_dimensions  VARCHAR,                     -- JSON: ['completeness','uniqueness','validity']
+        default_dq_suite       VARCHAR,                     -- JSON GX expectation suite scaffold
+        notes                  VARCHAR,
+        created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by             VARCHAR NOT NULL,
+        activated_at           TIMESTAMP,
+        archived_at            TIMESTAMP
+    )
+    """,
+    # Client pipeline instances — one row per (client_id, dataset_code).
+    # Materialized COPY of a template for a specific client. Clone is the
+    # default; build-from-scratch is fallback. Status walks
+    # DRAFT → PENDING_REVIEW → LIVE → PAUSED | ARCHIVED.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.client_pipeline_instances (
+        instance_id            VARCHAR PRIMARY KEY,
+        client_id              VARCHAR NOT NULL,
+        dataset_code           VARCHAR NOT NULL,
+        template_id            VARCHAR,                     -- FK to pipeline_templates; NULL on build-from-scratch
+        cloned_from_instance   VARCHAR,                     -- FK to another client_pipeline_instances row (when cloned from peer)
+        status                 VARCHAR NOT NULL,            -- DRAFT | PENDING_REVIEW | LIVE | PAUSED | ARCHIVED
+        bronze_anchor          VARCHAR NOT NULL,            -- FHIR | X12 | NCPDP | FLAT_FILE | API
+        bronze_schema          VARCHAR NOT NULL,            -- 'BRONZE_AETNA'
+        bronze_table           VARCHAR NOT NULL,            -- 'raw_membership'
+        silver_schema          VARCHAR NOT NULL,            -- 'SILVER_AETNA'
+        silver_table           VARCHAR NOT NULL,            -- 'membership_clean'
+        gold_schema            VARCHAR NOT NULL,            -- 'GOLD_AETNA'
+        gold_table             VARCHAR NOT NULL,            -- 'membership'
+        schedule_cron          VARCHAR,                     -- '0 4 * * *'
+        contract_id            VARCHAR,                     -- FK to source_schema_contracts
+        gx_suite_id            VARCHAR,                     -- FK to dq_suites (LIVE)
+        dag_uri                VARCHAR,                     -- 'dags/aetna_membership.py'
+        dbt_models_uri         VARCHAR,                     -- 'dbt/models/silver/aetna_membership/'
+        overrides_json         VARCHAR,                     -- JSON snapshot of all overrides at deploy time
+        deviation_count        INTEGER NOT NULL DEFAULT 0,  -- count of overrides at deploy time
+        ai_proposal_json       VARCHAR,                     -- the agent's full proposal payload
+        ai_reasoning           VARCHAR,                     -- agent's clone-vs-build explanation
+        ai_token_count         INTEGER,
+        ai_latency_ms          INTEGER,
+        created_at             TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by             VARCHAR NOT NULL,
+        submitted_at           TIMESTAMP,
+        approved_at            TIMESTAMP,
+        approved_by            VARCHAR,
+        deployed_at            TIMESTAMP,
+        deployed_by            VARCHAR,
+        paused_at              TIMESTAMP,
+        archived_at            TIMESTAMP,
+        notes                  VARCHAR
+    )
+    """,
+    # Client-level overrides on the global Gold catalog. Sparse — only fields
+    # the client deviates on. Allows "Aetna's Membership has aetna_segment_id
+    # extra column" or "CareSource relaxes nullability on member_phone".
+    # Diff'd at HITL review so reviewers see exactly what's standard vs custom.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.client_field_overrides (
+        override_id        VARCHAR PRIMARY KEY,
+        instance_id        VARCHAR NOT NULL,                -- FK to client_pipeline_instances
+        client_id          VARCHAR NOT NULL,
+        dataset_code       VARCHAR NOT NULL,
+        gold_column_name   VARCHAR NOT NULL,                -- field touched by override (or new field name)
+        override_kind      VARCHAR NOT NULL,                -- ADD_FIELD | RELAX_NULLABLE | TIGHTEN_NULLABLE | RENAME | TYPE_CHANGE | EXCLUDE
+        original_value     VARCHAR,                         -- JSON snapshot from global catalog (NULL for ADD_FIELD)
+        override_value     VARCHAR,                         -- JSON of the override
+        rationale          VARCHAR NOT NULL,
+        created_at         TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by         VARCHAR NOT NULL
+    )
+    """,
+    # OnPrem routing rules — driven by the product catalog "Used by" matrix.
+    # Default rules are seeded automatically; client overrides take precedence.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.onprem_routing_rules (
+        rule_id              VARCHAR PRIMARY KEY,
+        dataset_code         VARCHAR NOT NULL,
+        downstream_product   VARCHAR NOT NULL,              -- CC | E360 | RBN | EC | ESV | RAE
+        target_system        VARCHAR NOT NULL,              -- postgres | sqlserver | snowflake_share | sftp
+        target_uri           VARCHAR,                       -- connection ref
+        is_default           BOOLEAN NOT NULL DEFAULT TRUE, -- TRUE = seeded from catalog
+        is_active            BOOLEAN NOT NULL DEFAULT TRUE,
+        notes                VARCHAR,
+        created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by           VARCHAR
+    )
+    """,
+    # Per-client overrides on routing — disable a default route, or change target.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.client_routing_overrides (
+        override_id          VARCHAR PRIMARY KEY,
+        client_id            VARCHAR NOT NULL,
+        dataset_code         VARCHAR NOT NULL,
+        downstream_product   VARCHAR NOT NULL,
+        action               VARCHAR NOT NULL,              -- ENABLE | DISABLE | OVERRIDE_TARGET
+        target_system        VARCHAR,
+        target_uri           VARCHAR,
+        rationale            VARCHAR NOT NULL,
+        created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        created_by           VARCHAR NOT NULL
+    )
+    """,
+    # Pipeline instance audit log — every state transition + every override.
+    # Same shape as contract_design_audit_log / policy_audit_log.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.pipeline_instance_audit_log (
+        audit_id           VARCHAR PRIMARY KEY,
+        instance_id        VARCHAR NOT NULL,
+        client_id          VARCHAR NOT NULL,
+        dataset_code       VARCHAR NOT NULL,
+        action             VARCHAR NOT NULL,                -- PROPOSED | CLONED | OVERRIDDEN | SUBMITTED | APPROVED | DEPLOYED | PAUSED | ARCHIVED
+        actor              VARCHAR NOT NULL,
+        from_status        VARCHAR,
+        to_status          VARCHAR,
+        diff_summary       VARCHAR,                         -- JSON
+        ai_reasoning       VARCHAR,
+        token_count        INTEGER,
+        latency_ms         INTEGER,
+        ts                 TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        notes              VARCHAR
+    )
+    """,
 ]
 
 
