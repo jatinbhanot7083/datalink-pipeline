@@ -97,8 +97,22 @@ SAFE_FIELDS: frozenset[str] = frozenset(
         "peer_clients",  # list of other client_ids that have this dataset (for clone reference)
         "override_count",  # int — # of proposed client-level overrides
         "schedule_cron",  # cron string — '0 4 * * *' — DAG cadence
-        "silver_pattern",  # DV2 | STAR | NORMALIZED
+        "silver_pattern",  # HUB_SAT_LINK | NORMALIZED
         "gold_pattern",  # UM_OPERATIONAL | RISK_OPERATIONAL | QUALITY | etc.
+        # --- Phase 15.5 / 15.6 Gold Schema Designer extensions ---
+        "gold_anchor",  # CATALOG_ANCHOR | FHIR_R4_ANCHOR | X12_EDI_ANCHOR | NCPDP_D0_ANCHOR | CMS_ANCHOR | HEDIS_ANCHOR
+        "designer_mode",  # AI_CONSTRUCT | MANUAL_AUTHOR | IMPORT
+        "import_format",  # DDL_SQL | DBT_YAML | FHIR_PROFILE_JSON | JSON_SCHEMA | SNOWFLAKE_DESCRIBE
+        "bronze_field_names",  # list[str] — Bronze column names being mapped (metadata only)
+        "bronze_field_count",  # int
+        "business_key_count",  # int
+        "domain_count",  # int — distinct domains/groups in Bronze fields
+        "is_overkill_flag",  # bool — DV2 vs NORMALIZED Silver recommendation
+        "recommended_pattern",  # HUB_SAT_LINK | NORMALIZED
+        "anchor_reference_hits",  # int — # of RAG chunks consulted from standards corpus
+        "proposed_gold_table_name",  # 'member', 'claim', 'pharmacy_claim'
+        "proposed_column_count",  # int — # of Gold columns in the proposal
+        "mapping_count",  # int — # of Bronze→Gold mapping rules generated
     }
 )
 

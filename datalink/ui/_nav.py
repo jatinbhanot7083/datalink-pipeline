@@ -102,14 +102,16 @@ INTERNAL_PAGE_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         "Author DQ",
         "cat-author",  # indigo wash — "build / author"
         [
-            # Phase 15 — sits FIRST in the Author group: the Pipeline
-            # Architect is the new top-of-funnel — operator picks a dataset
-            # from the Global Gold Catalog, the agent proposes a full
-            # Bronze→Silver→Gold pipeline (clone or build), and one click
-            # deploys all 5 artifacts (DDL, dbt, DAG, GX suite, routing).
+            # Phase 15.6 — Gold Schema Designer is the new top-of-funnel
+            # for the medallion architecture. Operator designs the canonical
+            # Gold schema PER DATASET via AI / Manual / Import. Once LIVE,
+            # every client gets a copy when Pipeline Architect deploys.
+            ("Gold Schema Designer", "/Gold_Schema_Designer", "🥇"),
+            # Phase 15 — Pipeline Architect consumes the LIVE Gold schema
+            # and materialises per-client Bronze→Silver→Gold pipelines.
             ("Pipeline Architect", "/Pipeline_Architect", "🏛"),
             # Phase 14 — Data Contract Architect handles one-off Bronze
-            # contracts for messy vendor files; complementary to Phase 15.
+            # contracts for messy vendor files; complementary to 15.6.
             ("Data Contract Architect", "/Data_Contract_Architect", "🏗"),
             ("DQ AI Architect", "/DQ_AI_Architect", "🧪"),  # NL-driven entry point
             ("DQ Author", "/DQ_Author", "📝"),  # grid editor for power users

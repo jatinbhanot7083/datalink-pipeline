@@ -94,3 +94,4 @@ data/generated/
 
 # Phase 5.7 demo evidence (Playwright screenshots from verify-phase-5.7)
 demo_evidence/
+tmp/
