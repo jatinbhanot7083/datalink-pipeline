@@ -912,6 +912,78 @@ _DDL = [
         notes              VARCHAR
     )
     """,
+    # ========================================================================
+    # PHASE 15.7 — OVERFLOW SAFETY + GREENFIELD INGESTION
+    # ========================================================================
+    # Two production-grade safety mechanisms:
+    #
+    # 1. _variant_overflow column on every Bronze table — captures any
+    #    incoming column NOT in the agreed Bronze contract as JSON. Silver
+    #    and Gold transforms IGNORE the overflow column, so unexpected
+    #    columns NEVER leak downstream to operational databases without
+    #    an explicit handshake. This table records each unexpected
+    #    column observed for HITL review.
+    #
+    # 2. Greenfield datasets — when a client sends data for a dataset
+    #    NOT in the Bronze Master Catalog, the AI agent profiles the
+    #    sample file and proposes a brand-new Bronze + Gold pair. Two
+    #    stage HITL approval (Bronze first, then Gold) before the new
+    #    dataset is promoted to the global registry.
+    # ------------------------------------------------------------------------
+    # Overflow log — append-only. One row per (client, dataset, column_name).
+    # Status walks PENDING_REVIEW -> APPROVED_TO_INCORPORATE -> RESOLVED
+    # (Bronze contract bumped + Gold redesigned).
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.bronze_overflow_log (
+        overflow_id              VARCHAR PRIMARY KEY,
+        client_id                VARCHAR NOT NULL,
+        dataset_code             VARCHAR NOT NULL,
+        column_name              VARCHAR NOT NULL,
+        first_seen_batch_id      VARCHAR,
+        first_seen_source_file   VARCHAR,
+        first_seen_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        last_seen_at             TIMESTAMP,
+        occurrence_count         INTEGER NOT NULL DEFAULT 1,
+        sample_values            VARCHAR,
+        inferred_logical_type    VARCHAR,
+        status                   VARCHAR NOT NULL,
+        resolution_notes         VARCHAR,
+        resolved_by              VARCHAR,
+        resolved_at              TIMESTAMP,
+        promoted_to_bronze_field VARCHAR
+    )
+    """,
+    # Greenfield dataset proposals — one row per AI-proposed brand-new dataset.
+    # Status walks DRAFT -> PENDING_REVIEW -> APPROVED_PROMOTED -> triggers
+    # Gold Schema Designer.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.greenfield_dataset_proposals (
+        greenfield_id            VARCHAR PRIMARY KEY,
+        proposed_dataset_code    VARCHAR NOT NULL,
+        proposed_display_name    VARCHAR NOT NULL,
+        proposed_category        VARCHAR,
+        proposed_default_anchor  VARCHAR NOT NULL DEFAULT 'CATALOG_ANCHOR',
+        client_id                VARCHAR,
+        source_sample_uri        VARCHAR,
+        sample_file_name         VARCHAR,
+        proposed_bronze_columns  VARCHAR NOT NULL,
+        proposed_field_count     INTEGER,
+        proposed_required_count  INTEGER,
+        proposed_optional_count  INTEGER,
+        ai_token_count           INTEGER,
+        ai_latency_ms            INTEGER,
+        ai_rationale             VARCHAR,
+        status                   VARCHAR NOT NULL,
+        promoted_dataset_id      VARCHAR,
+        notes                    VARCHAR,
+        created_by               VARCHAR NOT NULL,
+        created_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        submitted_at             TIMESTAMP,
+        approved_by              VARCHAR,
+        approved_at              TIMESTAMP,
+        rejected_at              TIMESTAMP
+    )
+    """,
 ]
 
 

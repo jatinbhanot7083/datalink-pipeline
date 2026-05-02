@@ -50,7 +50,7 @@ def propose_contract(
     *,
     llm: LlmProvider,
     warehouse: Warehouse,
-    memory: AgentMemoryStore,
+    memory: AgentMemoryStore | None,
     client_id: str,
     source_type: str,
     mode: str,
@@ -73,7 +73,7 @@ def propose_contract(
     query_text = _build_rag_query(mode_enum, payload, source_type)
     grounding_chunks: list[dict[str, Any]] = []
     grounding_meta: list[dict[str, Any]] = []
-    if anchored_standards:
+    if anchored_standards and memory is not None:
         try:
             hits = memory.query_similar_standard_chunks(
                 query_text=query_text,

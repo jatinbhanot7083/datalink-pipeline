@@ -113,6 +113,9 @@ EXPECTED_TABLES: dict[str, int] = {
     "BRONZE_TO_GOLD_MAPPINGS": 11,
     "GOLD_SCHEMA_AUDIT_LOG": 13,
     "SILVER_PATTERN_RECOMMENDATIONS": 17,
+    # Phase 15.7 additions — Overflow safety + Greenfield ingestion
+    "BRONZE_OVERFLOW_LOG": 16,
+    "GREENFIELD_DATASET_PROPOSALS": 24,
 }
 
 for table, min_cols in EXPECTED_TABLES.items():
@@ -437,12 +440,19 @@ else:
 REPO = ROOT
 all_present = True
 for label, rel in artifact_paths.items():
-    p = REPO / rel
-    if not p.exists() or p.stat().st_size <= 0:
-        all_present = False
-        fails(f"artifact file missing: {label}", str(p))
+    # Phase 15.7: silver_dbt may be a comma-separated list of paths when
+    # Gold-LIVE drives DV2 multi-file generation. Split + verify each.
+    rels = [r.strip() for r in rel.split(",")] if "," in rel else [rel]
+    for r in rels:
+        p = REPO / r
+        if not p.exists() or p.stat().st_size <= 0:
+            all_present = False
+            fails(f"artifact file missing: {label}", str(p))
 if all_present:
-    passes(f"All {len(artifact_paths)} artifact files exist on disk with content")
+    file_count = sum(len(v.split(",")) if "," in v else 1 for v in artifact_paths.values())
+    passes(
+        f"All {file_count} artifact files (across {len(artifact_paths)} kinds) exist on disk with content"
+    )
 
 # DB-side: instance LIVE, gx_suite_id present
 inst_rows = WH.query(
@@ -708,6 +718,201 @@ try:
     passes("Phase 15.5 verifier rows cleaned up")
 except Exception as e:
     fails("Phase 15.5 round-trip", f"{type(e).__name__}: {e}")
+
+
+# ============================================================================
+# 10. Phase 15.7 — Gold-LIVE flow + DV2 Silver + Overflow + Greenfield
+# ============================================================================
+
+section("10. Phase 15.7 — Gold-LIVE flow + DV2 Silver builder")
+
+from datalink.agents.pipeline_architect import (  # noqa: E402
+    fetch_live_gold_schema,
+    log_overflow_column,
+)
+from datalink.agents.pipeline_architect.dv2_silver_builder import (  # noqa: E402
+    GoldColumnSpec,
+    MappingSpec,
+    build_bronze_ddl_with_overflow,
+    build_dv2_silver_models,
+)
+
+# 10a. Bronze DDL with _variant_overflow
+ddl = build_bronze_ddl_with_overflow(
+    client_id="aetna",
+    dataset_code="membership",
+    bronze_fields=catalog_fields,
+)
+if "_variant_overflow" in ddl and "VARIANT" in ddl:
+    passes("build_bronze_ddl_with_overflow includes _variant_overflow VARIANT")
+else:
+    fails("Bronze DDL overflow", "missing _variant_overflow column")
+
+# 10b. DV2 Silver builder produces Hubs/Sats given a Gold column spec
+test_gold_cols = [
+    GoldColumnSpec("member_id", "TEXT", False, True, False, True),
+    GoldColumnSpec("first_name", "TEXT", True, False, True, False),
+    GoldColumnSpec("last_name", "TEXT", True, False, True, False),
+    GoldColumnSpec("birth_date", "DATE", True, False, True, False),
+    GoldColumnSpec("street_1", "TEXT", True, False, True, False),
+    GoldColumnSpec("city", "TEXT", True, False, True, False),
+]
+test_mappings = [
+    MappingSpec(
+        "member_id",
+        "COALESCE",
+        "COALESCE(member_card_id, member_medicare_id)",
+        ["member_card_id", "member_medicare_id"],
+    ),
+    MappingSpec("first_name", "DIRECT", "member_first_name", ["member_first_name"]),
+    MappingSpec("last_name", "DIRECT", "member_last_name", ["member_last_name"]),
+    MappingSpec("birth_date", "CAST", "TRY_CAST(member_birth_date AS DATE)", ["member_birth_date"]),
+    MappingSpec(
+        "street_1", "DIRECT", "member_street_address_line1", ["member_street_address_line1"]
+    ),
+    MappingSpec("city", "DIRECT", "member_city", ["member_city"]),
+]
+dv2_files = build_dv2_silver_models(
+    client_id="aetna",
+    dataset_code="membership",
+    gold_columns=test_gold_cols,
+    mappings=test_mappings,
+    bronze_columns=[
+        "member_card_id",
+        "member_medicare_id",
+        "member_first_name",
+        "member_last_name",
+        "member_birth_date",
+        "member_street_address_line1",
+        "member_city",
+    ],
+    silver_pattern="HUB_SAT_LINK",
+)
+hub_count = sum(1 for f in dv2_files if f.startswith("hub_"))
+sat_count = sum(1 for f in dv2_files if f.startswith("sat_"))
+if hub_count >= 1 and sat_count >= 1:
+    passes(f"DV2 builder produced {hub_count} Hub(s) + {sat_count} Sat(s) from 6-col spec")
+else:
+    fails("DV2 builder", f"expected >=1 Hub + >=1 Sat; got {dv2_files}")
+
+# 10c. NORMALIZED fallback when DV2 flagged overkill
+norm_files = build_dv2_silver_models(
+    client_id="aetna",
+    dataset_code="membership",
+    gold_columns=test_gold_cols,
+    mappings=test_mappings,
+    bronze_columns=["member_card_id", "member_first_name"],
+    silver_pattern="NORMALIZED",
+)
+if norm_files and any("TRY_CAST" in v for v in norm_files.values()):
+    passes("NORMALIZED Silver fallback emits TRY_CAST single-file model")
+else:
+    fails("NORMALIZED fallback", f"got {list(norm_files.keys())}")
+
+# 10d. fetch_live_gold_schema returns dict when LIVE / None when missing
+live_or_none = fetch_live_gold_schema(WH, "no_such_dataset_zzz")
+if live_or_none is None:
+    passes("fetch_live_gold_schema returns None for unknown dataset")
+else:
+    fails("fetch_live_gold_schema unknown", "should return None")
+
+# 10e. Overflow log INSERT + UPDATE roundtrip
+test_overflow_col = "phase15_7_verifier_unexpected_col"
+log_overflow_column(
+    warehouse=WH,
+    client_id="phase15_7_verifier",
+    dataset_code="membership",
+    column_name=test_overflow_col,
+    batch_id="verifier-batch-001",
+    sample_values=["A", "B", "C"],
+)
+o_rows = list(
+    WH.query(
+        f"SELECT status, occurrence_count FROM {CONTROL_SCHEMA}.bronze_overflow_log "
+        f"WHERE column_name = $c",
+        {"c": test_overflow_col},
+    )
+)
+if o_rows and o_rows[0]["status"] == "PENDING_REVIEW" and o_rows[0]["occurrence_count"] == 1:
+    passes("log_overflow_column INSERT creates PENDING_REVIEW row")
+else:
+    fails("overflow log INSERT", f"got {o_rows}")
+
+log_overflow_column(
+    warehouse=WH,
+    client_id="phase15_7_verifier",
+    dataset_code="membership",
+    column_name=test_overflow_col,
+    batch_id="verifier-batch-002",
+)
+o_rows = list(
+    WH.query(
+        f"SELECT occurrence_count FROM {CONTROL_SCHEMA}.bronze_overflow_log "
+        f"WHERE column_name = $c",
+        {"c": test_overflow_col},
+    )
+)
+if o_rows and o_rows[0]["occurrence_count"] == 2:
+    passes("log_overflow_column UPDATE bumps occurrence_count idempotently")
+else:
+    fails("overflow log UPDATE", f"got {o_rows}")
+
+# 10f. Greenfield proposal table writable
+greenfield_test_id = str(_uuid.uuid4())
+WH.execute(
+    f"""
+    INSERT INTO {CONTROL_SCHEMA}.greenfield_dataset_proposals
+      (greenfield_id, proposed_dataset_code, proposed_display_name,
+       proposed_default_anchor, proposed_bronze_columns,
+       proposed_field_count, status, created_by)
+    VALUES ($id, 'phase15_7_verifier_test_ds', 'Verifier Test Dataset',
+            'CATALOG_ANCHOR', '[{{"bronze_column_name":"col_a","logical_type":"TEXT"}}]',
+            1, 'DRAFT', 'phase15_7_verifier')
+    """,
+    {"id": greenfield_test_id},
+)
+g_rows = list(
+    WH.query(
+        f"SELECT proposed_dataset_code, status FROM {CONTROL_SCHEMA}.greenfield_dataset_proposals "
+        f"WHERE greenfield_id = $g",
+        {"g": greenfield_test_id},
+    )
+)
+if g_rows and g_rows[0]["status"] == "DRAFT":
+    passes("greenfield_dataset_proposals accepts INSERT")
+else:
+    fails("greenfield insert", f"got {g_rows}")
+
+# Cleanup
+WH.execute(
+    f"DELETE FROM {CONTROL_SCHEMA}.bronze_overflow_log WHERE column_name = $c",
+    {"c": test_overflow_col},
+)
+WH.execute(
+    f"DELETE FROM {CONTROL_SCHEMA}.greenfield_dataset_proposals WHERE greenfield_id = $g",
+    {"g": greenfield_test_id},
+)
+passes("Phase 15.7 verifier artifacts cleaned up")
+
+
+# ============================================================================
+# 11. Phase 15.7 — UI surface for new pages
+# ============================================================================
+
+section("11. Phase 15.7 UI surfaces")
+
+for page_path, page_name in [
+    ("/Pipeline_Architect", "Pipeline Architect"),
+    ("/Gold_Schema_Designer", "Gold Schema Designer"),
+]:
+    try:
+        with urllib.request.urlopen(f"http://localhost:8000{page_path}", timeout=10) as resp:
+            if resp.status == 200:
+                passes(f"{page_name} page serves 200")
+            else:
+                fails(f"{page_name} page", f"HTTP {resp.status}")
+    except Exception as e:
+        fails(f"{page_name} page", f"unreachable: {e}")
 
 
 # ============================================================================

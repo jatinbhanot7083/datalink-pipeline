@@ -123,23 +123,27 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Phase 15 cross-page handoff — make the Pipeline Architect the default
-# entry point. Data Contract Architect remains the right tool for one-off
-# Bronze contracts on messy vendor files that don't fit the catalog yet.
+# Phase 15.7 cross-page handoff — make Gold Schema Designer + Pipeline
+# Architect the default entry points. Data Contract Architect remains the
+# right tool for one-off Bronze contracts on messy vendor files that don't
+# fit the Bronze catalog. Phase 15.7 also offers a "Greenfield" mode in
+# Pipeline Architect that auto-promotes new datasets into the catalog.
 st.markdown(
     f"""
     <div style="background:#fffbeb;border:1px solid #fde68a;
                 padding:.85rem 1.1rem;border-radius:8px;
                 border-left:4px solid {_GOLD};margin-bottom:1.2rem;">
-      <strong>🏛 Looking for a full pipeline?</strong> The new
-      <strong>Pipeline Architect</strong> (Phase 15) materialises
-      Bronze→Silver→Gold pipelines straight from the Global Gold Catalog
-      (33 datasets, 943 fields). One click emits 5 artifacts: Gold DDL,
-      Silver+Gold dbt models, Airflow DAG, GX expectation suite, OnPrem
-      routing rules. Use <em>this</em> page only for one-off Bronze
-      contracts on messy vendor files that don't fit any catalog dataset.
+      <strong>🥇 Looking to design a full pipeline?</strong>
+      <strong>Gold Schema Designer</strong> (Phase 15.6) designs the
+      canonical Gold model; <strong>Pipeline Architect</strong> (Phase
+      15.7) materialises Bronze→Silver(DV2)→Gold per client with
+      <code>_variant_overflow</code> safety + greenfield ingestion. Use
+      <em>this</em> page only for one-off Bronze contracts on messy
+      vendor files that don't fit the Bronze catalog yet.
       <div style="font-size:.82rem;color:#78350f;margin-top:.45rem;">
-        <a href="/Pipeline_Architect" style="color:{_NAVY};font-weight:600;">→ Open Pipeline Architect</a>
+        <a href="/Gold_Schema_Designer" style="color:{_NAVY};font-weight:600;">→ Gold Schema Designer</a>
+        &nbsp;·&nbsp;
+        <a href="/Pipeline_Architect" style="color:{_NAVY};font-weight:600;">→ Pipeline Architect</a>
       </div>
     </div>
     """,

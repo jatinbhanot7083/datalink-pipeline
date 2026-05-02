@@ -495,16 +495,78 @@ else:
 
 
 # ---------------------------------------------------------------------------
+# Phase 15.7 — Gold-LIVE banner
+# ---------------------------------------------------------------------------
+
+gold_status = proposal.get("gold_schema_status")
+silver_pattern = proposal.get("silver_pattern")
+silver_models = proposal.get("silver_dbt_models") or {}
+if gold_status == "LIVE":
+    st.markdown(
+        f"""
+        <div style="background:#dcfce7;border:1px solid #86efac;
+                    border-left:4px solid #15803d;padding:.85rem 1.1rem;
+                    border-radius:8px;margin:.8rem 0 1.2rem 0;">
+          <strong>✅ Gold-LIVE detected</strong> &nbsp;·&nbsp;
+          Anchor: <code>{proposal.get('live_gold_anchor')}</code> &nbsp;·&nbsp;
+          Gold table: <code>{proposal.get('live_gold_table_name')}</code> &nbsp;·&nbsp;
+          {proposal.get('gold_columns_count', 0)} canonical columns &nbsp;·&nbsp;
+          {proposal.get('bronze_to_gold_mapping_count', 0)} Bronze→Gold mappings.
+          <br>
+          <span style="font-size:.85rem;color:#166534;">
+          Silver pattern: <strong>{silver_pattern}</strong>
+          ({len(silver_models)} dbt files generated)
+          {' &nbsp;·&nbsp; <em>(operator-flagged as overkill — review before deploy)</em>' if proposal.get('silver_pattern_is_overkill') else ''}
+          </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+elif gold_status == "MISSING_RECOMMEND_DESIGN":
+    st.markdown(
+        f"""
+        <div style="background:#fef3c7;border:1px solid #fde68a;
+                    border-left:4px solid {_AMBER};padding:.85rem 1.1rem;
+                    border-radius:8px;margin:.8rem 0 1.2rem 0;">
+          <strong>⚠️ No LIVE Gold schema for this dataset</strong> — pipeline is
+          falling back to Phase-15 Bronze-as-Gold mode (1:1 cast). For the full
+          DV2 Hub/Sat/Link Silver + canonical Gold, design Gold first.
+          <div style="font-size:.85rem;color:#78350f;margin-top:.45rem;">
+            <a href="/Gold_Schema_Designer" style="color:{_NAVY};font-weight:600;">→ Open Gold Schema Designer</a>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+# ---------------------------------------------------------------------------
 # ARTIFACT PREVIEWS (DDL, dbt, DAG, GX) — collapsible.
 # ---------------------------------------------------------------------------
 
 st.markdown("### 📄 Artifact previews")
 
+if proposal.get("bronze_ddl_overflow"):
+    with st.expander("🥉 Bronze DDL (with `_variant_overflow` safety column)", expanded=False):
+        st.code(str(proposal["bronze_ddl_overflow"]), language="sql")
+        st.info(
+            "The `_variant_overflow VARIANT` column captures any unexpected "
+            "vendor-supplied columns as JSON. Silver and Gold transforms "
+            "IGNORE it — overflow data NEVER propagates to operational "
+            "databases without an explicit handshake. Pending review queue "
+            "below."
+        )
+
 with st.expander("🥇 Gold DDL", expanded=False):
     st.code(str(proposal["gold_ddl"]), language="sql")
 
-with st.expander("🥈 Silver dbt model", expanded=False):
-    st.code(str(proposal["silver_dbt_sql"]), language="sql")
+if silver_models:
+    with st.expander(f"🥈 Silver DV2 dbt models ({len(silver_models)} files)", expanded=False):
+        for filename, sql in silver_models.items():
+            st.markdown(f"**`{filename}`**")
+            st.code(sql, language="sql")
+else:
+    with st.expander("🥈 Silver dbt model (legacy 1:1 cast)", expanded=False):
+        st.code(str(proposal.get("silver_dbt_sql") or ""), language="sql")
 
 with st.expander("🥇 Gold dbt model", expanded=False):
     st.code(str(proposal["gold_dbt_sql"]), language="sql")
@@ -615,6 +677,51 @@ if deploy_clicked:
             st.error(f"Deploy failed: {type(exc).__name__}: {exc}")
             st.exception(exc)
 
+
+# ---------------------------------------------------------------------------
+# Phase 15.7 — Overflow review panel
+# ---------------------------------------------------------------------------
+
+st.markdown("---")
+st.markdown("## 🚨 Pending overflow columns (HITL handshake required)")
+
+from datalink.agents.pipeline_architect import list_pending_overflow  # noqa: E402
+
+with _warehouse(readonly=True) as wh:
+    pending_overflow = list_pending_overflow(wh, client_id=selected_client)
+
+if not pending_overflow:
+    st.success(
+        f"No pending overflow columns for **{selected_client}**. Every "
+        "incoming column matches the agreed Bronze contract."
+    )
+else:
+    st.warning(
+        f"⚠️ **{len(pending_overflow)} unexpected column(s)** seen in "
+        f"incoming Bronze batches that are NOT in the agreed contract. "
+        f"Data is preserved in `_variant_overflow` but BLOCKED from "
+        f"reaching downstream operational DBs until you handshake."
+    )
+    overflow_rows = []
+    for o in pending_overflow:
+        overflow_rows.append(
+            {
+                "Dataset": o.get("dataset_code"),
+                "Unexpected column": o.get("column_name"),
+                "Inferred type": o.get("inferred_logical_type"),
+                "Occurrences": o.get("occurrence_count"),
+                "First seen": o.get("first_seen_at"),
+                "Last seen": o.get("last_seen_at"),
+                "Status": o.get("status"),
+                "Sample values": (o.get("sample_values") or "")[:80],
+            }
+        )
+    st.dataframe(pd.DataFrame(overflow_rows), use_container_width=True, hide_index=True)
+    st.caption(
+        "To handshake an overflow column: open Gold Schema Designer → re-run "
+        "the AI agent (or Manual edit) → add the column to Gold + Bronze contract → "
+        "approve. The overflow row will auto-flip to RESOLVED on next batch."
+    )
 
 # ---------------------------------------------------------------------------
 # DEPLOYED INSTANCES PANEL — operator monitoring at the bottom of the page.

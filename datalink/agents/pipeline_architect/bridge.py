@@ -32,10 +32,112 @@ from datalink.adapters.protocols import LlmProvider, Warehouse
 from datalink.agents.pipeline_architect.agent import (
     PipelineArchitectAgent,
 )
+from datalink.agents.pipeline_architect.dv2_silver_builder import (
+    GoldColumnSpec,
+    MappingSpec,
+    build_bronze_ddl_with_overflow,
+    build_dv2_silver_models,
+)
 from datalink.logging import get_logger
 from datalink.quality.control import CONTROL_SCHEMA
 
 _log = get_logger(__name__)
+
+
+# =============================================================================
+# Gold-LIVE detection + Greenfield support
+# =============================================================================
+
+
+def fetch_live_gold_schema(warehouse: Warehouse, dataset_code: str) -> dict[str, Any] | None:
+    """Return the LIVE Gold schema for a dataset (or None when no Gold yet).
+
+    Output shape:
+        {
+          "header": <global_gold_schema_datasets row>,
+          "columns": [<global_gold_schema_fields rows, ordered>],
+          "mappings": [<bronze_to_gold_mappings rows>],
+          "silver_pattern_recommendation": <row | None>,
+        }
+    """
+    headers = list(
+        warehouse.query(
+            f"SELECT * FROM {CONTROL_SCHEMA}.global_gold_schema_datasets "
+            f"WHERE dataset_code = $ds AND status = 'LIVE'",
+            {"ds": dataset_code},
+        )
+    )
+    if not headers:
+        return None
+    header = dict(headers[0])
+    cols = list(
+        warehouse.query(
+            f"SELECT * FROM {CONTROL_SCHEMA}.global_gold_schema_fields "
+            f"WHERE gold_dataset_id = $g ORDER BY column_order",
+            {"g": header["gold_dataset_id"]},
+        )
+    )
+    mappings = list(
+        warehouse.query(
+            f"SELECT * FROM {CONTROL_SCHEMA}.bronze_to_gold_mappings "
+            f"WHERE gold_dataset_id = $g",
+            {"g": header["gold_dataset_id"]},
+        )
+    )
+    rec_rows = list(
+        warehouse.query(
+            f"SELECT * FROM {CONTROL_SCHEMA}.silver_pattern_recommendations "
+            f"WHERE dataset_code = $ds AND status = 'LIVE'",
+            {"ds": dataset_code},
+        )
+    )
+    return {
+        "header": header,
+        "columns": cols,
+        "mappings": mappings,
+        "silver_pattern_recommendation": rec_rows[0] if rec_rows else None,
+    }
+
+
+def list_pending_overflow(
+    warehouse: Warehouse,
+    *,
+    client_id: str | None = None,
+    dataset_code: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return rows from bronze_overflow_log with status = PENDING_REVIEW."""
+    where: list[str] = ["status = 'PENDING_REVIEW'"]
+    params: dict[str, Any] = {}
+    if client_id:
+        where.append("client_id = $cid")
+        params["cid"] = client_id
+    if dataset_code:
+        where.append("dataset_code = $ds")
+        params["ds"] = dataset_code
+    rows = warehouse.query(
+        f"SELECT * FROM {CONTROL_SCHEMA}.bronze_overflow_log "
+        f"WHERE {' AND '.join(where)} ORDER BY first_seen_at DESC",
+        params if params else None,
+    )
+    return list(rows)
+
+
+def list_greenfield_proposals(
+    warehouse: Warehouse, *, status: str | None = None
+) -> list[dict[str, Any]]:
+    """Return rows from greenfield_dataset_proposals."""
+    where = ""
+    params: dict[str, Any] = {}
+    if status:
+        where = "WHERE status = $st"
+        params["st"] = status
+    return list(
+        warehouse.query(
+            f"SELECT * FROM {CONTROL_SCHEMA}.greenfield_dataset_proposals "
+            f"{where} ORDER BY created_at DESC",
+            params if params else None,
+        )
+    )
 
 
 # =============================================================================
@@ -203,7 +305,19 @@ def propose_pipeline(
     temperature: float = 0.0,
     actor: str = "operator",
 ) -> dict[str, Any]:
-    """End-to-end: look up catalog + peers, run agent, return a proposal.
+    """End-to-end: look up catalog + peers + LIVE Gold schema, run agent,
+    return a proposal.
+
+    Phase 15.7 top-down behavior:
+      - When a LIVE Gold schema exists for ``dataset_code`` in
+        global_gold_schema_*, the proposal uses it as the canonical Gold
+        model. Silver dbt is generated as DV2 Hub/Sat/Link (or NORMALIZED
+        per the Silver pattern recommendation). Bronze DDL adds the
+        _variant_overflow column for overflow safety.
+      - When no LIVE Gold exists, the function still works in the
+        original Phase 15 mode (Bronze catalog as Gold) but emits a
+        ``gold_schema_status="MISSING_RECOMMEND_DESIGN"`` flag so the UI
+        can surface "design Gold first" guidance.
 
     Does NOT persist — the UI shows the proposal, lets the operator add
     overrides + edits, then calls ``persist_proposal()``.
@@ -214,6 +328,9 @@ def propose_pipeline(
     client_routing_overrides = _fetch_routing_overrides(
         warehouse, client_id=client_id, dataset_code=dataset_code
     )
+
+    # Phase 15.7 — pick up LIVE Gold schema if one exists
+    live_gold = fetch_live_gold_schema(warehouse, dataset_code)
 
     # Peer instances — anyone OTHER than this client with the same dataset.
     all_instances = list_client_instances(warehouse, dataset_code=dataset_code)
@@ -236,6 +353,7 @@ def propose_pipeline(
             "decision_mode": decision_mode,
             "schedule_cron": schedule_cron,
             "temperature": temperature,
+            "live_gold": live_gold,
         }
     )
     duration_ms = int((time.time() - started) * 1000)
@@ -246,6 +364,92 @@ def propose_pipeline(
     proposal = dict(result.payload)
     proposal["tokens_used"] = int(result.tokens_used)
     proposal["duration_ms"] = duration_ms
+
+    # Phase 15.7 — when Gold LIVE, override the Phase 15 Silver/Gold/Bronze
+    # artifacts with Gold-driven DV2 versions. The agent's Phase 15
+    # builders still ran (for narrative compat) but the structural truth
+    # comes from the Gold registry now.
+    if live_gold:
+        gold_cols_raw = list(live_gold["columns"])
+        mappings_raw = list(live_gold["mappings"])
+        rec = live_gold.get("silver_pattern_recommendation") or {}
+        silver_pattern = str(rec.get("recommended_pattern") or "HUB_SAT_LINK")
+        proposed_shape = {}
+        if rec.get("proposed_silver_shape"):
+            try:
+                proposed_shape = json.loads(rec["proposed_silver_shape"])
+            except (TypeError, json.JSONDecodeError):
+                proposed_shape = {}
+
+        gold_specs = [
+            GoldColumnSpec(
+                gold_column_name=str(c["gold_column_name"]),
+                logical_type=str(c.get("logical_type") or "TEXT"),
+                nullable=bool(c.get("nullable", True)),
+                is_business_key=bool(c.get("is_business_key", False)),
+                is_pii=bool(c.get("is_pii", False)),
+                is_phi=bool(c.get("is_phi", False)),
+                description=str(c.get("description") or ""),
+            )
+            for c in gold_cols_raw
+        ]
+        mapping_specs: list[MappingSpec] = []
+        for m in mappings_raw:
+            srcs = m.get("bronze_source_columns")
+            if isinstance(srcs, str):
+                try:
+                    srcs = json.loads(srcs)
+                except json.JSONDecodeError:
+                    srcs = []
+            mapping_specs.append(
+                MappingSpec(
+                    gold_column_name=str(m["gold_column_name"]),
+                    transform_kind=str(m["transform_kind"]),
+                    transform_sql=str(m["transform_sql"]),
+                    bronze_source_columns=list(srcs or []),
+                )
+            )
+        bronze_col_names = [
+            str(f.get("bronze_column_name") or f.get("gold_column_name") or "")
+            for f in catalog_fields
+        ]
+        # DV2 Silver dbt models (multiple files)
+        silver_dbt_models = build_dv2_silver_models(
+            client_id=client_id,
+            dataset_code=dataset_code,
+            gold_columns=gold_specs,
+            mappings=mapping_specs,
+            bronze_columns=bronze_col_names,
+            silver_pattern=silver_pattern,
+            proposed_silver_shape=proposed_shape,
+        )
+        # Bronze DDL with _variant_overflow
+        bronze_ddl = build_bronze_ddl_with_overflow(
+            client_id=client_id,
+            dataset_code=dataset_code,
+            bronze_fields=catalog_fields,
+        )
+        proposal["live_gold_dataset_id"] = live_gold["header"]["gold_dataset_id"]
+        proposal["live_gold_table_name"] = live_gold["header"]["gold_table_name"]
+        proposal["live_gold_anchor"] = live_gold["header"]["gold_anchor"]
+        proposal["silver_pattern"] = silver_pattern
+        proposal["silver_pattern_is_overkill"] = bool(rec.get("is_overkill_flag", False))
+        proposal["silver_dbt_models"] = silver_dbt_models  # dict {filename: sql}
+        proposal["bronze_ddl_overflow"] = bronze_ddl
+        proposal["gold_columns_count"] = len(gold_cols_raw)
+        proposal["bronze_to_gold_mapping_count"] = len(mappings_raw)
+        proposal["gold_schema_status"] = "LIVE"
+        # Replace the legacy Phase 15 silver_dbt_sql (the 1:1 cast) so the
+        # UI/preview reflects the new DV2 reality. Keep the legacy gold_ddl
+        # as-is until we generate one from the Gold registry too.
+        if silver_dbt_models:
+            # Use first DV2 file as the headline preview
+            proposal["silver_dbt_sql"] = next(iter(silver_dbt_models.values()))
+    else:
+        proposal["gold_schema_status"] = "MISSING_RECOMMEND_DESIGN"
+        proposal["silver_pattern"] = "HUB_SAT_LINK"
+        proposal["silver_dbt_models"] = {}
+
     return proposal
 
 
@@ -377,6 +581,31 @@ def approve_and_deploy(
 
     artifact_paths: dict[str, str] = {}
 
+    # --- 0. Bronze DDL with _variant_overflow (Phase 15.7) ------------------
+    bronze_ddl_text = proposal.get("bronze_ddl_overflow")
+    if bronze_ddl_text:
+        bronze_ddl_path = (
+            repo_root
+            / "datalink"
+            / "pipeline"
+            / "bronze"
+            / "ddl"
+            / f"{client_id.lower()}_{dataset_code}.sql"
+        )
+        bronze_ddl_path.parent.mkdir(parents=True, exist_ok=True)
+        bronze_ddl_path.write_text(
+            _format_artifact_header(
+                kind="Bronze DDL (with _variant_overflow)",
+                client_id=client_id,
+                dataset_code=dataset_code,
+                instance_id=instance_id,
+            )
+            + str(bronze_ddl_text),
+            encoding="utf-8",
+        )
+        _chown_to_host_user(bronze_ddl_path)
+        artifact_paths["bronze_ddl"] = str(bronze_ddl_path.relative_to(repo_root))
+
     # --- 1. Gold DDL committed file -----------------------------------------
     gold_ddl_path = (
         repo_root
@@ -400,17 +629,34 @@ def approve_and_deploy(
     _chown_to_host_user(gold_ddl_path)
     artifact_paths["gold_ddl"] = str(gold_ddl_path.relative_to(repo_root))
 
-    # --- 2. Silver dbt model ------------------------------------------------
-    silver_dbt_path = (
-        repo_root / "dbt" / "models" / "silver" / client_id.lower() / f"{dataset_code}_clean.sql"
-    )
-    silver_dbt_path.parent.mkdir(parents=True, exist_ok=True)
-    silver_dbt_path.write_text(
-        str(proposal.get("silver_dbt_sql") or ""),
-        encoding="utf-8",
-    )
-    _chown_to_host_user(silver_dbt_path)
-    artifact_paths["silver_dbt"] = str(silver_dbt_path.relative_to(repo_root))
+    # --- 2. Silver dbt models ----------------------------------------------
+    # Phase 15.7: when Gold-LIVE drives the pipeline, this is a DV2 set
+    # (multiple Hub/Sat/Link models). Otherwise it's a single 1:1 cast.
+    silver_dir = repo_root / "dbt" / "models" / "silver" / client_id.lower() / dataset_code
+    silver_dir.mkdir(parents=True, exist_ok=True)
+    silver_dbt_models = proposal.get("silver_dbt_models") or {}
+    if silver_dbt_models:
+        # Clean prior auto-generated files in this dir to avoid stale Hubs/Sats
+        for old in silver_dir.glob("*.sql"):
+            with __import__("contextlib").suppress(OSError):
+                old.unlink()
+        silver_files: list[str] = []
+        for filename, sql in silver_dbt_models.items():
+            p = silver_dir / filename
+            p.write_text(sql, encoding="utf-8")
+            _chown_to_host_user(p)
+            silver_files.append(str(p.relative_to(repo_root)))
+        artifact_paths["silver_dbt"] = ", ".join(silver_files)
+        silver_dbt_path = silver_dir / next(iter(silver_dbt_models.keys()))
+    else:
+        # Phase-15-style single-file fallback (Bronze-as-Gold legacy path)
+        silver_dbt_path = silver_dir / f"{dataset_code}_clean.sql"
+        silver_dbt_path.write_text(
+            str(proposal.get("silver_dbt_sql") or ""),
+            encoding="utf-8",
+        )
+        _chown_to_host_user(silver_dbt_path)
+        artifact_paths["silver_dbt"] = str(silver_dbt_path.relative_to(repo_root))
 
     # --- 3. Gold dbt model --------------------------------------------------
     gold_dbt_path = (
@@ -496,6 +742,335 @@ def approve_and_deploy(
         "gx_suite_id": gx_suite_id,
         "artifact_paths": artifact_paths,
     }
+
+
+# =============================================================================
+# Phase 15.7 — Greenfield dataset registration
+# =============================================================================
+
+
+def propose_greenfield_dataset(
+    *,
+    llm: LlmProvider,
+    warehouse: Warehouse,
+    client_id: str | None,
+    sample_file_name: str,
+    headers: list[str],
+    sample_rows: list[list[str]],
+    proposed_dataset_code: str,
+    proposed_display_name: str,
+    proposed_category: str | None = None,
+    actor: str = "operator",
+) -> dict[str, Any]:
+    """Profile a brand-new vendor file and propose a Bronze catalog entry.
+
+    Uses the existing Phase 14 ContractArchitect machinery to AI-propose
+    a Bronze schema; persists as DRAFT in greenfield_dataset_proposals.
+    The operator approves → ``approve_greenfield()`` promotes it into
+    global_bronze_catalog_*. Then the normal Gold Schema Designer flow
+    can run against it, and Pipeline Architect can build pipelines.
+
+    Returns the new greenfield_id and the AI's proposed column list.
+    """
+    # Phase 14 ContractArchitect knows how to read a sample header + rows
+    # and propose a Bronze contract. We borrow that machinery here.
+    from datalink.agents.contract_architect import (
+        propose_contract,
+    )
+
+    proposal = propose_contract(
+        llm=llm,
+        warehouse=warehouse,
+        memory=None,  # No RAG for greenfield (no anchor selected yet)
+        client_id=client_id or "global",
+        source_type=proposed_dataset_code.upper(),
+        mode="FILE_DRIVEN",
+        anchored_standards=[],  # CATALOG_ANCHOR — no industry standard selected
+        payload={
+            "file_name": sample_file_name,
+            "headers": headers,
+            "sample_values": sample_rows,
+            "detected_format": "CSV",
+        },
+        temperature=0.0,
+        grounding_k=0,
+        strictness=0.3,
+        actor=actor,
+    )
+
+    # Convert the ContractArchitect proposal into greenfield columns
+    proposed_cols = []
+    for c in proposal.proposed_columns:
+        proposed_cols.append(
+            {
+                "bronze_column_name": c.name,
+                "logical_type": _logical_type_from_contract_type(c.type),
+                "requirement": "Required" if not c.nullable else "Optional",
+                "description": c.rationale,
+                "is_pii": False,
+                "is_phi": False,
+                "is_business_key": "id" in c.name.lower() or "npi" in c.name.lower(),
+            }
+        )
+
+    greenfield_id = str(uuid.uuid4())
+    required_count = sum(1 for c in proposed_cols if c["requirement"] == "Required")
+    optional_count = len(proposed_cols) - required_count
+
+    warehouse.execute(
+        f"""
+        INSERT INTO {CONTROL_SCHEMA}.greenfield_dataset_proposals
+          (greenfield_id, proposed_dataset_code, proposed_display_name,
+           proposed_category, proposed_default_anchor,
+           client_id, source_sample_uri, sample_file_name,
+           proposed_bronze_columns, proposed_field_count,
+           proposed_required_count, proposed_optional_count,
+           ai_token_count, ai_latency_ms, ai_rationale,
+           status, created_by, submitted_at)
+        VALUES ($id, $code, $name,
+                $cat, 'CATALOG_ANCHOR',
+                $cid, NULL, $sfn,
+                $cols, $fc,
+                $rc, $oc,
+                $tok, $lat, $rat,
+                'PENDING_REVIEW', $by, $ts)
+        """,
+        {
+            "id": greenfield_id,
+            "code": proposed_dataset_code,
+            "name": proposed_display_name,
+            "cat": proposed_category,
+            "cid": client_id,
+            "sfn": sample_file_name,
+            "cols": json.dumps(proposed_cols),
+            "fc": len(proposed_cols),
+            "rc": required_count,
+            "oc": optional_count,
+            "tok": int(proposal.tokens_used),
+            "lat": int(proposal.duration_ms),
+            "rat": (proposal.rationale or "")[:4000],
+            "by": actor,
+            "ts": datetime.now(UTC),
+        },
+    )
+    return {
+        "greenfield_id": greenfield_id,
+        "proposed_dataset_code": proposed_dataset_code,
+        "proposed_display_name": proposed_display_name,
+        "proposed_columns": proposed_cols,
+        "field_count": len(proposed_cols),
+        "required_count": required_count,
+        "tokens_used": int(proposal.tokens_used),
+        "duration_ms": int(proposal.duration_ms),
+    }
+
+
+def approve_greenfield(
+    *,
+    warehouse: Warehouse,
+    greenfield_id: str,
+    actor: str,
+    notes: str = "",
+) -> dict[str, Any]:
+    """Promote a PENDING_REVIEW greenfield proposal into the global Bronze
+    catalog tables. After this returns, Gold Schema Designer can be opened
+    against the new dataset_code."""
+    rows = list(
+        warehouse.query(
+            f"SELECT * FROM {CONTROL_SCHEMA}.greenfield_dataset_proposals "
+            f"WHERE greenfield_id = $g",
+            {"g": greenfield_id},
+        )
+    )
+    if not rows:
+        raise ValueError(f"Greenfield proposal {greenfield_id} not found.")
+    cur = rows[0]
+    if cur["status"] != "PENDING_REVIEW":
+        raise ValueError(f"Greenfield proposal status is {cur['status']} — must be PENDING_REVIEW.")
+
+    dataset_code = str(cur["proposed_dataset_code"])
+    display_name = str(cur["proposed_display_name"])
+    category = cur.get("proposed_category")
+    default_anchor = str(cur.get("proposed_default_anchor") or "CATALOG_ANCHOR")
+
+    # Check for collision with existing Bronze catalog
+    existing = list(
+        warehouse.query(
+            f"SELECT dataset_id FROM {CONTROL_SCHEMA}.global_bronze_catalog_datasets "
+            f"WHERE dataset_code = $ds",
+            {"ds": dataset_code},
+        )
+    )
+    if existing:
+        raise ValueError(
+            f"Dataset code {dataset_code!r} already exists in the Bronze catalog. "
+            f"Reject or rename the greenfield proposal."
+        )
+
+    # Insert into global_bronze_catalog_datasets
+    dataset_id = str(uuid.uuid4())
+    warehouse.execute(
+        f"""
+        INSERT INTO {CONTROL_SCHEMA}.global_bronze_catalog_datasets
+          (dataset_id, dataset_code, display_name, category, default_anchor,
+           total_fields, required_fields, optional_fields,
+           is_active, catalog_version, source_doc_uri, registered_by, notes)
+        VALUES ($id, $code, $name, $cat, $anchor,
+                $tf, $rf, $of,
+                TRUE, 1, $src, $by, 'Greenfield-promoted from sample file')
+        """,
+        {
+            "id": dataset_id,
+            "code": dataset_code,
+            "name": display_name,
+            "cat": category,
+            "anchor": default_anchor,
+            "tf": int(cur.get("proposed_field_count") or 0),
+            "rf": int(cur.get("proposed_required_count") or 0),
+            "of": int(cur.get("proposed_optional_count") or 0),
+            "src": cur.get("sample_file_name") or "greenfield",
+            "by": actor,
+        },
+    )
+
+    # Insert each proposed column into global_bronze_catalog_fields
+    cols = json.loads(cur["proposed_bronze_columns"])
+    for i, c in enumerate(cols, start=1):
+        warehouse.execute(
+            f"""
+            INSERT INTO {CONTROL_SCHEMA}.global_bronze_catalog_fields
+              (field_id, dataset_id, dataset_code, field_order,
+               field_display_name, bronze_column_name, requirement,
+               logical_type, description, is_pii, is_phi, is_business_key,
+               catalog_version)
+            VALUES ($id, $dsid, $ds, $ord,
+                    $name, $bcn, $req,
+                    $type, $desc, $pii, $phi, $bk, 1)
+            """,
+            {
+                "id": str(uuid.uuid4()),
+                "dsid": dataset_id,
+                "ds": dataset_code,
+                "ord": i,
+                "name": c["bronze_column_name"],
+                "bcn": c["bronze_column_name"],
+                "req": c["requirement"],
+                "type": c["logical_type"],
+                "desc": c.get("description") or "",
+                "pii": bool(c.get("is_pii", False)),
+                "phi": bool(c.get("is_phi", False)),
+                "bk": bool(c.get("is_business_key", False)),
+            },
+        )
+
+    # Flip greenfield proposal to APPROVED_PROMOTED
+    warehouse.execute(
+        f"""
+        UPDATE {CONTROL_SCHEMA}.greenfield_dataset_proposals
+           SET status = 'APPROVED_PROMOTED',
+               promoted_dataset_id = $did,
+               approved_by = $by,
+               approved_at = $ts,
+               notes = COALESCE(notes, '') || $notes
+         WHERE greenfield_id = $g
+        """,
+        {
+            "did": dataset_id,
+            "by": actor,
+            "ts": datetime.now(UTC),
+            "g": greenfield_id,
+            "notes": f"\n[approved] {notes}" if notes else "",
+        },
+    )
+
+    return {
+        "greenfield_id": greenfield_id,
+        "dataset_code": dataset_code,
+        "dataset_id": dataset_id,
+        "field_count": len(cols),
+        "status": "APPROVED_PROMOTED",
+    }
+
+
+def _logical_type_from_contract_type(contract_type: str) -> str:
+    """Convert a Phase 14 ContractArchitect SQL type to a logical type."""
+    t = contract_type.split("(", 1)[0].strip().upper()
+    if t in {"INTEGER", "BIGINT", "SMALLINT", "TINYINT"}:
+        return "INTEGER"
+    if t in {"DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL", "NUMBER"}:
+        return "DECIMAL"
+    if t == "DATE":
+        return "DATE"
+    if t in {"TIMESTAMP", "DATETIME"}:
+        return "TIMESTAMP"
+    if t == "BOOLEAN":
+        return "BOOLEAN"
+    return "TEXT"
+
+
+# =============================================================================
+# Phase 15.7 — Overflow column logging (called by Bronze ingest task)
+# =============================================================================
+
+
+def log_overflow_column(
+    *,
+    warehouse: Warehouse,
+    client_id: str,
+    dataset_code: str,
+    column_name: str,
+    batch_id: str,
+    source_file: str | None = None,
+    sample_values: list[Any] | None = None,
+    inferred_type: str = "TEXT",
+) -> None:
+    """Record an unexpected column observed during Bronze ingestion.
+
+    Idempotent on (client_id, dataset_code, column_name): if a row already
+    exists with status != EXCLUDED_PERMANENTLY, increment occurrence_count
+    and update last_seen_at. Otherwise INSERT a new PENDING_REVIEW row.
+    """
+    existing = list(
+        warehouse.query(
+            f"SELECT overflow_id, status, occurrence_count "
+            f"FROM {CONTROL_SCHEMA}.bronze_overflow_log "
+            f"WHERE client_id = $c AND dataset_code = $d AND column_name = $col",
+            {"c": client_id, "d": dataset_code, "col": column_name},
+        )
+    )
+    if existing and existing[0]["status"] != "EXCLUDED_PERMANENTLY":
+        warehouse.execute(
+            f"UPDATE {CONTROL_SCHEMA}.bronze_overflow_log "
+            f"SET occurrence_count = occurrence_count + 1, last_seen_at = $ts "
+            f"WHERE overflow_id = $oid",
+            {"ts": datetime.now(UTC), "oid": existing[0]["overflow_id"]},
+        )
+        return
+
+    warehouse.execute(
+        f"""
+        INSERT INTO {CONTROL_SCHEMA}.bronze_overflow_log
+          (overflow_id, client_id, dataset_code, column_name,
+           first_seen_batch_id, first_seen_source_file,
+           first_seen_at, last_seen_at, occurrence_count,
+           sample_values, inferred_logical_type, status)
+        VALUES ($id, $c, $d, $col,
+                $bid, $src,
+                $ts, $ts, 1,
+                $sv, $type, 'PENDING_REVIEW')
+        """,
+        {
+            "id": str(uuid.uuid4()),
+            "c": client_id,
+            "d": dataset_code,
+            "col": column_name,
+            "bid": batch_id,
+            "src": source_file,
+            "ts": datetime.now(UTC),
+            "sv": json.dumps([str(v) for v in (sample_values or [])][:5]),
+            "type": inferred_type,
+        },
+    )
 
 
 # =============================================================================

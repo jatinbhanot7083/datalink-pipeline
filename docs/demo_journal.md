@@ -370,6 +370,170 @@ from session-end summary).
 
 ---
 
+## Phase 15.5–15.7 — TOP-DOWN MEDALLION ARCHITECTURE (DELIVERED 2026-05-02)
+
+**The architecture pivot that closes the loop.** After Phase 15 shipped, Jatin
+flagged that the product catalog xlsx is the **Bronze schema** (vendor mapping
+spec) — NOT Gold. Gold is the AI-constructed canonical model that lives ON TOP.
+Phases 15.5–15.7 correct the foundation, build the Gold designer, rewire the
+Pipeline Architect top-down, and add overflow + greenfield safety.
+
+### Architectural truth (Jatin's design, locked in)
+
+```
+File  →  Bronze (CATALOG_ANCHOR)  →  Silver (HUB_SAT_LINK by default)  →  Gold (canonical)
+                ↑                              ↑                              ↑
+        Vendor mapping spec           Always DV2 Hub/Sat/Link        AI-designed once,
+        (the agreed contract;         (structural pattern, not       global, cloned per
+        what client sends)            anchor-driven)                  client + override
+```
+
+**Anchors govern Bronze + Gold ONLY** (Silver is always DV2 unless tiny lookup
+overkill). The 6 anchors:
+- `CATALOG_ANCHOR` *(default)* — vendor mapping spec is the truth
+- `FHIR_R4_ANCHOR` — clinical/member entities (Patient, Coverage, Claim, etc.)
+- `X12_EDI_ANCHOR` — 837P/I, 834, 270/271, 278
+- `NCPDP_D0_ANCHOR` — pharmacy claims
+- `CMS_ANCHOR` — MMR / MOR / RAPS / MAO004
+- `HEDIS_ANCHOR` — measure data
+
+### What ships in 15.5 — Schema migration
+
+8 Phase 15 CONTROL tables renamed/extended to reflect truth:
+```
+global_gold_catalog_datasets   →  global_bronze_catalog_datasets
+global_gold_catalog_fields     →  global_bronze_catalog_fields
+                                  + .gold_column_name → .bronze_column_name
+                                  + new column .default_anchor (default CATALOG_ANCHOR)
+```
++ 5 new tables for the Gold registry:
+```
+CONTROL.global_gold_schema_datasets        — canonical Gold per dataset
+CONTROL.global_gold_schema_fields          — Gold columns
+CONTROL.bronze_to_gold_mappings            — sparse SQL transform per Gold col
+CONTROL.gold_schema_audit_log              — every state transition
+CONTROL.silver_pattern_recommendations     — DV2 vs NORMALIZED + overkill flag + HITL gate
+```
+
+Idempotent migration script: `scripts/migrate_phase15_5_gold_schema.py`. All
+33 Bronze datasets + 943 fields preserved across rename.
+
+### What ships in 15.6 — Gold Schema Designer (3 modes)
+
+**The new top-of-funnel for the medallion architecture.** Three modes converge
+on the same Gold registry:
+
+1. **🤖 AI-Construct** (`GoldSchemaDesignerAgent`) — real Anthropic Claude
+   haiku-4.5, RAG-grounded against the chosen anchor's corpus
+   (fhir-r4 / x12 / ncpdp-d0 / cms / hedis when applicable). Smoke for
+   Membership/FHIR_R4 produced **42 canonical Gold columns + 42 Bronze→Gold
+   SQL mappings + DV2 Hub/Sat/Link Silver pattern** (~15K tokens, 66s):
+   - `member_id = COALESCE(member_card_id, member_medicare_id, member_medicaid_id)`
+   - `name_full = TRIM(CONCAT_WS(' ', first_name, middle_name, last_name))`
+   - Each column cited against `FHIR Patient.identifier[type='MR'].value` etc.
+
+2. **✏️ Manual-Author** — `st.data_editor` column grid; full PII/PHI/business-key flags
+
+3. **📥 Import** — pluggable parser dispatcher for 5 formats:
+   `DDL_SQL` / `DBT_YAML` / `FHIR_PROFILE_JSON` / `JSON_SCHEMA` / `SNOWFLAKE_DESCRIBE`.
+   Vendor SQL types coerced to 6 logical types.
+
+UI page: `/Gold_Schema_Designer` — sidebar entry FIRST in Author DQ (above Pipeline Architect).
+
+### What ships in 15.7 — Pipeline Architect rewires top-down
+
+When a LIVE Gold schema exists for a dataset, Pipeline Architect now:
+1. Pulls the Gold columns + Bronze→Gold mappings + Silver pattern recommendation
+2. Generates **Bronze DDL with `_variant_overflow VARIANT` column** (the safety net)
+3. Generates **DV2 Silver dbt models** (multiple files: 1 Hub + N Sats + Links)
+   from `proposed_silver_shape` — or NORMALIZED single-file when overkill flagged
+4. Generates Gold dbt model + Airflow DAG + GX suite as before
+5. **Smoke run for Aetna Membership: 7 Silver dbt files emitted** —
+   `hub_member.sql`, `sat_member_demographics.sql`, `sat_member_address.sql`,
+   `sat_member_eligibility.sql`, `sat_member_plan.sql`,
+   `sat_member_provider_attribution.sql`, `sat_member_identifiers.sql`.
+
+### What ships in 15.7 — Variant overflow safety
+
+Every Bronze table gets `_variant_overflow VARIANT`. During ingestion, any
+incoming column NOT in the agreed contract gets folded into that column as JSON
+and logged to `CONTROL.bronze_overflow_log` with status `PENDING_REVIEW`.
+**Silver and Gold transforms IGNORE the overflow column** — unexpected vendor
+data NEVER reaches downstream operational DBs without a HITL handshake.
+
+The Pipeline Architect UI surfaces a **Pending Overflow Columns panel** at the
+bottom of the page showing every unexpected column observed across batches.
+Operator handshakes by re-running Gold Schema Designer to add the column → on
+next batch the overflow row auto-flips to `RESOLVED`.
+
+### What ships in 15.7 — Greenfield ingestion
+
+When a client sends data for a dataset NOT in the Bronze Master Catalog, the AI
+agent profiles the sample file (chains the Phase 14 ContractArchitect logic),
+proposes a brand-new Bronze schema, persists to
+`CONTROL.greenfield_dataset_proposals` as `PENDING_REVIEW`. Operator approves →
+`approve_greenfield()` promotes the dataset into `global_bronze_catalog_*` →
+operator can then open Gold Schema Designer for the new dataset and the rest
+flows normally. Two-stage HITL gate (Bronze first, then Gold).
+
+### Verifier — 62/62 PASS
+
+```
+$ python3 scripts/runbook_verify_phase15.py
+
+  1.  CONTROL DDL — 13 tables (8 base + 5 new Gold registry)   PASS x 13
+  2.  Catalog seed counts                                       PASS x 5
+  3.  Builder determinism                                       PASS x 7
+  4.  Override semantics                                        PASS x 4
+  5.  Agent end-to-end (real Claude + Snowflake)               PASS x 4
+  6.  Persist + deploy (4 file artifacts + GX suite + audit)    PASS x 7
+  7.  /Pipeline_Architect serves 200                            PASS x 1
+  8.  Generated DAGs compile + 5 task callables importable      PASS x 2
+  9.  Phase 15.5 Gold registry round-trip                       PASS x 7
+  10. Phase 15.7 Gold-LIVE flow + DV2 Silver + Overflow + Greenfield  PASS x 9
+  11. Phase 15.7 UI surfaces (Pipeline Architect + Gold Designer)     PASS x 2
+
+  PASS: 62   FAIL: 0
+```
+
+### Demo storyline (the new flow)
+
+1. Operator opens **`/Gold_Schema_Designer`** → picks Membership → AI Construct
+   with `FHIR_R4_ANCHOR` → 42 canonical Gold columns + 42 SQL mappings + Hub/Sat/Link
+   recommendation generated in ~60 seconds → Approve & Save → LIVE.
+2. Operator opens **`/Pipeline_Architect`** → picks Aetna + Membership → green
+   "Gold-LIVE detected" banner; agent generates 7 DV2 Silver files + Bronze DDL
+   with `_variant_overflow` + Gold DDL + Airflow DAG + GX suite.
+3. Operator clicks **Approve & Deploy** → 5 artifact kinds emit (10+ files
+   including the 7 Hub/Sat models) + GX suite registered LIVE + audit trail.
+4. Vendor sends file with extra column → overflow log records it as
+   `PENDING_REVIEW`; downstream gets standard columns only.
+5. Operator opens Pipeline Architect → sees the pending overflow → handshakes
+   by going back to Gold Schema Designer → adds the column to Gold + Bronze
+   contract → next batch auto-flips overflow row to `RESOLVED` and the column
+   starts flowing to downstream.
+
+### Files added / changed
+
+| Path | Lines | Note |
+|---|---|---|
+| `datalink/quality/control.py` | +120 | 5 Gold registry + 2 overflow/greenfield tables |
+| `datalink/agents/gold_schema_designer/__init__.py` | new | Public API |
+| `datalink/agents/gold_schema_designer/agent.py` | new | LLM-driven Gold designer (real Anthropic) |
+| `datalink/agents/gold_schema_designer/bridge.py` | new | Catalog→agent→persist + approve flow |
+| `datalink/agents/gold_schema_designer/importers.py` | new | 5 importer parsers |
+| `datalink/agents/pipeline_architect/dv2_silver_builder.py` | new | DV2 Hub/Sat/Link generator + Bronze-with-overflow DDL |
+| `datalink/agents/pipeline_architect/bridge.py` | +500 | Gold-LIVE detection, DV2 dispatch, overflow log, greenfield helpers |
+| `datalink/agents/pipeline_architect/__init__.py` | +20 | New public API surface |
+| `datalink/phi/guard.py` | +12 | New SAFE_FIELDS for Gold designer |
+| `datalink/ui/pages/13_Pipeline_Architect.py` | +60 | Gold-LIVE banner, overflow panel, DV2 file listing |
+| `datalink/ui/pages/14_Gold_Schema_Designer.py` | new | 3-tab UI (AI / Manual / Import) |
+| `datalink/ui/_nav.py` | +5 | Sidebar entry for Gold Schema Designer |
+| `scripts/migrate_phase15_5_gold_schema.py` | new | Idempotent rename + bootstrap migration |
+| `scripts/runbook_verify_phase15.py` | +200 | Sections 9, 10, 11 added (62 assertions total) |
+
+---
+
 ## Phase 15 — Pipeline Architect (DELIVERED 2026-05-02)
 
 **The new top-of-funnel for data engineering.** Materialises a per-client

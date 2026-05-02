@@ -144,22 +144,25 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Phase 15 cross-page handoff — direct most users to Pipeline Architect
-# for the bulk of suite authoring; this page becomes the home for bespoke
-# checks layered on top of the catalog-driven baselines.
+# Phase 15.7 cross-page handoff — full top-down architecture.
+# DQ suites are now driven from Gold Schema Designer → Pipeline Architect.
+# This page is for bespoke checks layered on top of the auto-anchored baselines.
 st.markdown(
     f"""
     <div style="background:linear-gradient(90deg,{_NAVY}11,{_GOLD}22);
                 padding:.85rem 1.1rem;border-radius:8px;
                 border-left:4px solid {_GOLD};margin-bottom:1.2rem;">
-      <strong>🏛 New: Pipeline Architect (Phase 15)</strong> auto-anchors GX
-      expectation suites from the Global Gold Catalog (33 datasets, 943 fields).
-      Most authoring now happens there — every Pipeline Architect deploy
-      registers a LIVE GX suite automatically. Use this page for
-      <em>bespoke</em> checks layered on top of those baselines, or for
-      datasets that don't fit the catalog yet.
+      <strong>🥇 New: Gold Schema Designer + Pipeline Architect (Phase 15.7)</strong>
+      The medallion architecture now flows top-down: <code>Gold Schema Designer</code>
+      designs the canonical Gold model (AI-Construct / Manual / Import) →
+      <code>Pipeline Architect</code> materialises Bronze→Silver(DV2 Hub/Sat/Link)→Gold
+      per client → every deploy registers a LIVE GX suite automatically.
+      Use this page for <em>bespoke</em> checks layered on top of the
+      auto-anchored baselines.
       <div style="font-size:.82rem;color:#475569;margin-top:.45rem;">
-        <a href="/Pipeline_Architect" style="color:{_NAVY};font-weight:600;">→ Open Pipeline Architect</a>
+        <a href="/Gold_Schema_Designer" style="color:{_NAVY};font-weight:600;">→ Gold Schema Designer</a>
+        &nbsp;·&nbsp;
+        <a href="/Pipeline_Architect" style="color:{_NAVY};font-weight:600;">→ Pipeline Architect</a>
       </div>
     </div>
     """,
