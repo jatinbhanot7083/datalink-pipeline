@@ -913,6 +913,137 @@ _DDL = [
     )
     """,
     # ========================================================================
+    # PHASE 15.8 — INDEPENDENT SILVER AUTHORING (Silver-first, Silver-stop ready)
+    # ========================================================================
+    # Silver gets first-class status: own designer agent, own DRAFT/LIVE/ARCHIVED
+    # lifecycle, own three authoring modes (AI / Manual / Upload). Gold reads
+    # from Silver via silver_to_gold_mappings, NOT directly from Bronze. This
+    # lets operators ship "Silver-stop" pipelines (clean+integrate without
+    # consumption-layer push) and approve Gold later when downstream is ready.
+    #
+    # Mapping chain becomes:  Bronze --(bronze_to_silver_mappings)--> Silver
+    #                         Silver --(silver_to_gold_mappings)--> Gold
+    # ------------------------------------------------------------------------
+    # Silver schema header — one row per (dataset_code, version).
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.global_silver_schema_datasets (
+        silver_dataset_id    VARCHAR PRIMARY KEY,
+        dataset_code         VARCHAR NOT NULL,             -- FK to global_bronze_catalog_datasets.dataset_code
+        silver_pattern       VARCHAR NOT NULL,             -- HUB_SAT_LINK | NORMALIZED
+        version              INTEGER NOT NULL DEFAULT 1,
+        status               VARCHAR NOT NULL,             -- DRAFT | PENDING_REVIEW | LIVE | ARCHIVED
+        silver_anchor        VARCHAR NOT NULL,             -- CATALOG_ANCHOR | FHIR_R4_ANCHOR | X12_EDI_ANCHOR | NCPDP_D0_ANCHOR | CMS_ANCHOR | HEDIS_ANCHOR
+        source               VARCHAR NOT NULL,             -- AI_CONSTRUCT | MANUAL | IMPORT
+        import_format        VARCHAR,                      -- DDL_SQL | DBT_YAML | DBT_PROJECT | JSON_SCHEMA | NULL
+        is_overkill_flag     BOOLEAN NOT NULL DEFAULT FALSE,
+        ai_proposal_json     VARCHAR,
+        ai_rationale         VARCHAR,
+        ai_token_count       INTEGER,
+        ai_latency_ms        INTEGER,
+        notes                VARCHAR,
+        created_by           VARCHAR NOT NULL,
+        created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        submitted_at         TIMESTAMP,
+        approved_by          VARCHAR,
+        approved_at          TIMESTAMP,
+        archived_at          TIMESTAMP
+    )
+    """,
+    # Silver tables — one row per Hub / Sat / Link / Normalized table inside
+    # a Silver schema. parent_silver_table_id points Sats at their Hub.
+    # linked_hub_ids_json (JSON array of silver_table_ids) names the Hubs a
+    # LINK connects.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.global_silver_schema_tables (
+        silver_table_id          VARCHAR PRIMARY KEY,
+        silver_dataset_id        VARCHAR NOT NULL,         -- FK to global_silver_schema_datasets
+        dataset_code             VARCHAR NOT NULL,         -- denormalized
+        table_name               VARCHAR NOT NULL,         -- HUB_MEMBER, SAT_MEMBER_DEMOGRAPHICS, LINK_MEMBER_PROVIDER, member_pcp_silver
+        table_kind               VARCHAR NOT NULL,         -- HUB | SAT | LINK | NORMALIZED
+        parent_silver_table_id   VARCHAR,                  -- FK to itself; SAT.parent = HUB
+        business_keys_json       VARCHAR,                  -- JSON array of column names (HUB only)
+        linked_hub_ids_json      VARCHAR,                  -- JSON array of silver_table_ids (LINK only)
+        table_order              INTEGER NOT NULL DEFAULT 0,
+        description              VARCHAR,
+        created_at               TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # Silver columns — one row per column in any Silver table.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.global_silver_schema_columns (
+        silver_column_id     VARCHAR PRIMARY KEY,
+        silver_table_id      VARCHAR NOT NULL,             -- FK to global_silver_schema_tables
+        silver_dataset_id    VARCHAR NOT NULL,             -- denormalized
+        column_order         INTEGER NOT NULL,
+        column_name          VARCHAR NOT NULL,             -- e.g. 'member_id', 'hash_key', 'first_name'
+        logical_type         VARCHAR NOT NULL DEFAULT 'TEXT',
+        nullable             BOOLEAN NOT NULL DEFAULT TRUE,
+        is_business_key      BOOLEAN NOT NULL DEFAULT FALSE,
+        is_hash_key          BOOLEAN NOT NULL DEFAULT FALSE,    -- TRUE for the SHA-256 PK column on Hubs
+        is_hash_diff         BOOLEAN NOT NULL DEFAULT FALSE,    -- TRUE for change-detection col on Sats
+        is_pii               BOOLEAN NOT NULL DEFAULT FALSE,
+        is_phi               BOOLEAN NOT NULL DEFAULT FALSE,
+        description          VARCHAR,
+        registered_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # Bronze→Silver mapping rules — one row per (silver_column_id). Holds
+    # the SQL expression that derives a Silver column from one or more
+    # Bronze columns.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.bronze_to_silver_mappings (
+        mapping_id              VARCHAR PRIMARY KEY,
+        silver_column_id        VARCHAR NOT NULL,          -- FK to global_silver_schema_columns
+        silver_dataset_id       VARCHAR NOT NULL,          -- denormalized
+        silver_table_name       VARCHAR NOT NULL,          -- denormalized
+        silver_column_name      VARCHAR NOT NULL,          -- denormalized
+        bronze_source_columns   VARCHAR NOT NULL,          -- JSON array of Bronze column names
+        transform_kind          VARCHAR NOT NULL,          -- DIRECT | CONCAT | COALESCE | LOOKUP | CAST | CASE | DERIVED | HASH
+        transform_sql           VARCHAR NOT NULL,          -- SQL expression using Bronze column names
+        rationale               VARCHAR,
+        confidence              DECIMAL(3,2),
+        created_by              VARCHAR NOT NULL,
+        created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # Silver schema audit log — every state transition, edit, revert.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.silver_schema_audit_log (
+        audit_id            VARCHAR PRIMARY KEY,
+        silver_dataset_id   VARCHAR NOT NULL,
+        dataset_code        VARCHAR NOT NULL,
+        action              VARCHAR NOT NULL,              -- PROPOSED | EDITED | IMPORTED | SUBMITTED | APPROVED | REJECTED | ARCHIVED | REVERTED
+        actor               VARCHAR NOT NULL,
+        from_status         VARCHAR,
+        to_status           VARCHAR,
+        diff_summary        VARCHAR,                       -- JSON
+        ai_reasoning        VARCHAR,
+        token_count         INTEGER,
+        latency_ms          INTEGER,
+        ts                  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        notes               VARCHAR
+    )
+    """,
+    # Silver→Gold mappings — replace the Phase-15.6 bronze_to_gold_mappings
+    # for the new flow. Gold columns derive from Silver tables/columns
+    # (often joining multiple Sats around their Hub). silver_source_refs
+    # is a JSON array of {silver_table_id, silver_column_id, alias} objects.
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.silver_to_gold_mappings (
+        mapping_id              VARCHAR PRIMARY KEY,
+        gold_field_id           VARCHAR NOT NULL,          -- FK to global_gold_schema_fields
+        gold_dataset_id         VARCHAR NOT NULL,          -- denormalized
+        gold_column_name        VARCHAR NOT NULL,          -- denormalized
+        silver_source_refs      VARCHAR NOT NULL,          -- JSON array of {{silver_table, silver_column}} refs
+        transform_kind          VARCHAR NOT NULL,          -- DIRECT | CONCAT | COALESCE | LOOKUP | CAST | CASE | DERIVED | JOIN
+        transform_sql           VARCHAR NOT NULL,          -- SQL expression using Silver table.column refs
+        rationale               VARCHAR,
+        confidence              DECIMAL(3,2),
+        created_by              VARCHAR NOT NULL,
+        created_at              TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    )
+    """,
+    # ========================================================================
     # PHASE 15.7 — OVERFLOW SAFETY + GREENFIELD INGESTION
     # ========================================================================
     # Two production-grade safety mechanisms:

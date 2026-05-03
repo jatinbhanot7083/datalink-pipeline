@@ -123,7 +123,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Phase 15.7 cross-page handoff — make Gold Schema Designer + Pipeline
+# Phase 15.7 cross-page handoff — make Data Model Designer + Pipeline
 # Architect the default entry points. Data Contract Architect remains the
 # right tool for one-off Bronze contracts on messy vendor files that don't
 # fit the Bronze catalog. Phase 15.7 also offers a "Greenfield" mode in
@@ -134,14 +134,14 @@ st.markdown(
                 padding:.85rem 1.1rem;border-radius:8px;
                 border-left:4px solid {_GOLD};margin-bottom:1.2rem;">
       <strong>🥇 Looking to design a full pipeline?</strong>
-      <strong>Gold Schema Designer</strong> (Phase 15.6) designs the
+      <strong>Data Model Designer</strong> (Phase 15.6) designs the
       canonical Gold model; <strong>Pipeline Architect</strong> (Phase
       15.7) materialises Bronze→Silver(DV2)→Gold per client with
       <code>_variant_overflow</code> safety + greenfield ingestion. Use
       <em>this</em> page only for one-off Bronze contracts on messy
       vendor files that don't fit the Bronze catalog yet.
       <div style="font-size:.82rem;color:#78350f;margin-top:.45rem;">
-        <a href="/Gold_Schema_Designer" style="color:{_NAVY};font-weight:600;">→ Gold Schema Designer</a>
+        <a href="/Data_Model_Designer" style="color:{_NAVY};font-weight:600;">→ Data Model Designer</a>
         &nbsp;·&nbsp;
         <a href="/Pipeline_Architect" style="color:{_NAVY};font-weight:600;">→ Pipeline Architect</a>
       </div>

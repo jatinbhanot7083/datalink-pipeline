@@ -1,14 +1,20 @@
-"""Gold Schema Designer — Phase 15.6 — top-of-funnel for the medallion architecture.
+"""Data Model Designer — Phase 15.6 — top-of-funnel for the medallion architecture.
 
-The canonical Gold (consumption-layer) schema for each of the 33 datasets is
-designed here. Three modes converge on the same global Gold registry:
+This page captures the WHOLE schema relationship per dataset, not just Gold:
 
-    1. AI Construct  — agent proposes Gold from Bronze + chosen anchor + RAG
-    2. Manual Author — operator hand-builds via column grid
-    3. Import        — paste DDL / YAML / FHIR profile / JSON Schema / DESCRIBE
+    1. Bronze fields  — already loaded from the product catalog (vendor mapping spec)
+    2. Bronze→Gold    — SQL transform rules per Gold column (this page produces them)
+    3. Gold columns   — the canonical consumption-layer model (this page designs them)
+    4. Silver pattern — HUB_SAT_LINK (default) vs NORMALIZED (overkill flagged)
 
-Once a Gold schema is LIVE for a dataset, every client clones from it on
-deploy via the Pipeline Architect; client-level overrides allowed.
+Three authoring modes converge on the same global Gold registry:
+
+    A. AI Construct  — agent proposes Gold from Bronze + chosen anchor + RAG
+    B. Manual Author — operator hand-builds via column grid
+    C. Import        — paste DDL / YAML / FHIR profile / JSON Schema / DESCRIBE
+
+Once a model is LIVE for a dataset, every client clones from it on deploy
+via the Pipeline Architect; client-level overrides allowed.
 """
 
 from __future__ import annotations
@@ -28,7 +34,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 st.set_page_config(
-    page_title="Gold Schema Designer",
+    page_title="Data Model Designer",
     page_icon="🥇",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -51,7 +57,7 @@ from datalink.quality.control import CONTROL_SCHEMA, create_control_tables  # no
 from datalink.ui._nav import render_sidebar, require_client  # noqa: E402
 from datalink.ui._query import warehouse_ctx  # noqa: E402
 
-render_sidebar(active="Gold Schema Designer")
+render_sidebar(active="Data Model Designer")
 
 _NAVY = "#0a1a3e"
 _GOLD = "#d4af37"
@@ -100,15 +106,19 @@ def _warehouse(*, readonly: bool = True) -> Iterator[Any]:
 # Header
 # ---------------------------------------------------------------------------
 
-st.markdown("# 🥇 Gold Schema Designer")
+st.markdown("# 🥇 Data Model Designer")
 st.markdown(
     """
     <div class="gd-hero">
-      <strong>The canonical Gold model for every dataset, designed once.</strong>
-      Pick a dataset; choose an anchor (CATALOG / FHIR R4 / X12 / NCPDP /
-      CMS / HEDIS); let the AI construct, hand-author, or import. Once LIVE
-      every client clones it on deploy via the Pipeline Architect — with
-      optional per-client overrides.
+      <strong>The canonical data model for every dataset, designed once.</strong>
+      This page captures the whole medallion-schema relationship per dataset:
+      the Bronze fields (already in the catalog), the Bronze→Gold mapping
+      rules, the Gold canonical column list, and the Silver pattern
+      recommendation (HUB_SAT_LINK by default, NORMALIZED when DV2 is
+      flagged overkill). Pick a dataset; choose an anchor (CATALOG / FHIR R4
+      / X12 / NCPDP / CMS / HEDIS); let the AI construct, hand-author, or
+      import. Once LIVE every client clones it on deploy via the Pipeline
+      Architect — with optional per-client overrides.
       <div class="gd-meta">
         Backend: <strong>Claude Haiku 4.5 + Voyage 3.5-lite RAG</strong>
         &middot; Bronze catalog: 33 datasets · 943 fields · CATALOG_ANCHOR by default

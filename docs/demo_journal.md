@@ -418,7 +418,7 @@ CONTROL.silver_pattern_recommendations     — DV2 vs NORMALIZED + overkill flag
 Idempotent migration script: `scripts/migrate_phase15_5_gold_schema.py`. All
 33 Bronze datasets + 943 fields preserved across rename.
 
-### What ships in 15.6 — Gold Schema Designer (3 modes)
+### What ships in 15.6 — Data Model Designer (3 modes)
 
 **The new top-of-funnel for the medallion architecture.** Three modes converge
 on the same Gold registry:
@@ -438,7 +438,7 @@ on the same Gold registry:
    `DDL_SQL` / `DBT_YAML` / `FHIR_PROFILE_JSON` / `JSON_SCHEMA` / `SNOWFLAKE_DESCRIBE`.
    Vendor SQL types coerced to 6 logical types.
 
-UI page: `/Gold_Schema_Designer` — sidebar entry FIRST in Author DQ (above Pipeline Architect).
+UI page: `/Data_Model_Designer` — sidebar entry FIRST in Author DQ (above Pipeline Architect).
 
 ### What ships in 15.7 — Pipeline Architect rewires top-down
 
@@ -463,7 +463,7 @@ data NEVER reaches downstream operational DBs without a HITL handshake.
 
 The Pipeline Architect UI surfaces a **Pending Overflow Columns panel** at the
 bottom of the page showing every unexpected column observed across batches.
-Operator handshakes by re-running Gold Schema Designer to add the column → on
+Operator handshakes by re-running Data Model Designer to add the column → on
 next batch the overflow row auto-flips to `RESOLVED`.
 
 ### What ships in 15.7 — Greenfield ingestion
@@ -473,7 +473,7 @@ agent profiles the sample file (chains the Phase 14 ContractArchitect logic),
 proposes a brand-new Bronze schema, persists to
 `CONTROL.greenfield_dataset_proposals` as `PENDING_REVIEW`. Operator approves →
 `approve_greenfield()` promotes the dataset into `global_bronze_catalog_*` →
-operator can then open Gold Schema Designer for the new dataset and the rest
+operator can then open Data Model Designer for the new dataset and the rest
 flows normally. Two-stage HITL gate (Bronze first, then Gold).
 
 ### Verifier — 62/62 PASS
@@ -498,7 +498,7 @@ $ python3 scripts/runbook_verify_phase15.py
 
 ### Demo storyline (the new flow)
 
-1. Operator opens **`/Gold_Schema_Designer`** → picks Membership → AI Construct
+1. Operator opens **`/Data_Model_Designer`** → picks Membership → AI Construct
    with `FHIR_R4_ANCHOR` → 42 canonical Gold columns + 42 SQL mappings + Hub/Sat/Link
    recommendation generated in ~60 seconds → Approve & Save → LIVE.
 2. Operator opens **`/Pipeline_Architect`** → picks Aetna + Membership → green
@@ -509,7 +509,7 @@ $ python3 scripts/runbook_verify_phase15.py
 4. Vendor sends file with extra column → overflow log records it as
    `PENDING_REVIEW`; downstream gets standard columns only.
 5. Operator opens Pipeline Architect → sees the pending overflow → handshakes
-   by going back to Gold Schema Designer → adds the column to Gold + Bronze
+   by going back to Data Model Designer → adds the column to Gold + Bronze
    contract → next batch auto-flips overflow row to `RESOLVED` and the column
    starts flowing to downstream.
 
@@ -528,7 +528,7 @@ $ python3 scripts/runbook_verify_phase15.py
 | `datalink/phi/guard.py` | +12 | New SAFE_FIELDS for Gold designer |
 | `datalink/ui/pages/13_Pipeline_Architect.py` | +60 | Gold-LIVE banner, overflow panel, DV2 file listing |
 | `datalink/ui/pages/14_Gold_Schema_Designer.py` | new | 3-tab UI (AI / Manual / Import) |
-| `datalink/ui/_nav.py` | +5 | Sidebar entry for Gold Schema Designer |
+| `datalink/ui/_nav.py` | +5 | Sidebar entry for Data Model Designer |
 | `scripts/migrate_phase15_5_gold_schema.py` | new | Idempotent rename + bootstrap migration |
 | `scripts/runbook_verify_phase15.py` | +200 | Sections 9, 10, 11 added (62 assertions total) |
 

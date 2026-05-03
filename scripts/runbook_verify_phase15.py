@@ -903,7 +903,7 @@ section("11. Phase 15.7 UI surfaces")
 
 for page_path, page_name in [
     ("/Pipeline_Architect", "Pipeline Architect"),
-    ("/Gold_Schema_Designer", "Gold Schema Designer"),
+    ("/Data_Model_Designer", "Data Model Designer"),
 ]:
     try:
         with urllib.request.urlopen(f"http://localhost:8000{page_path}", timeout=10) as resp:

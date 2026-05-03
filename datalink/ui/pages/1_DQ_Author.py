@@ -145,22 +145,22 @@ st.markdown(
 )
 
 # Phase 15.7 cross-page handoff — full top-down architecture.
-# DQ suites are now driven from Gold Schema Designer → Pipeline Architect.
+# DQ suites are now driven from Data Model Designer → Pipeline Architect.
 # This page is for bespoke checks layered on top of the auto-anchored baselines.
 st.markdown(
     f"""
     <div style="background:linear-gradient(90deg,{_NAVY}11,{_GOLD}22);
                 padding:.85rem 1.1rem;border-radius:8px;
                 border-left:4px solid {_GOLD};margin-bottom:1.2rem;">
-      <strong>🥇 New: Gold Schema Designer + Pipeline Architect (Phase 15.7)</strong>
-      The medallion architecture now flows top-down: <code>Gold Schema Designer</code>
+      <strong>🥇 New: Data Model Designer + Pipeline Architect (Phase 15.7)</strong>
+      The medallion architecture now flows top-down: <code>Data Model Designer</code>
       designs the canonical Gold model (AI-Construct / Manual / Import) →
       <code>Pipeline Architect</code> materialises Bronze→Silver(DV2 Hub/Sat/Link)→Gold
       per client → every deploy registers a LIVE GX suite automatically.
       Use this page for <em>bespoke</em> checks layered on top of the
       auto-anchored baselines.
       <div style="font-size:.82rem;color:#475569;margin-top:.45rem;">
-        <a href="/Gold_Schema_Designer" style="color:{_NAVY};font-weight:600;">→ Gold Schema Designer</a>
+        <a href="/Data_Model_Designer" style="color:{_NAVY};font-weight:600;">→ Data Model Designer</a>
         &nbsp;·&nbsp;
         <a href="/Pipeline_Architect" style="color:{_NAVY};font-weight:600;">→ Pipeline Architect</a>
       </div>

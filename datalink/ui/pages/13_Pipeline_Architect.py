@@ -532,7 +532,7 @@ elif gold_status == "MISSING_RECOMMEND_DESIGN":
           falling back to Phase-15 Bronze-as-Gold mode (1:1 cast). For the full
           DV2 Hub/Sat/Link Silver + canonical Gold, design Gold first.
           <div style="font-size:.85rem;color:#78350f;margin-top:.45rem;">
-            <a href="/Gold_Schema_Designer" style="color:{_NAVY};font-weight:600;">→ Open Gold Schema Designer</a>
+            <a href="/Data_Model_Designer" style="color:{_NAVY};font-weight:600;">→ Open Data Model Designer</a>
           </div>
         </div>
         """,
@@ -718,7 +718,7 @@ else:
         )
     st.dataframe(pd.DataFrame(overflow_rows), use_container_width=True, hide_index=True)
     st.caption(
-        "To handshake an overflow column: open Gold Schema Designer → re-run "
+        "To handshake an overflow column: open Data Model Designer → re-run "
         "the AI agent (or Manual edit) → add the column to Gold + Bronze contract → "
         "approve. The overflow row will auto-flip to RESOLVED on next batch."
     )
