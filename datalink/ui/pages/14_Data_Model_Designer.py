@@ -483,33 +483,87 @@ with st.container():
                     {"ds": selected_dataset_code},
                 )
             )
-        publish_disabled = not (non_global_silver or non_global_gold)
-        if st.button(
-            "🌐 Publish to Global",
-            disabled=publish_disabled,
-            use_container_width=True,
-            help=(
-                "Promote the current LIVE Silver+Gold designs as the "
-                "canonical global template. Future clients clone from this."
-                if not publish_disabled
-                else "No client-scoped LIVE designs to promote. Author + approve Silver/Gold first."
-            ),
-        ):
-            promoted = []
+        # Phase 16.10 — clearer Publish-to-Global state machine:
+        #   1. Already published (Silver+Gold both global)            → green "✓ Already global"
+        #   2. Has client-scoped LIVE that can be promoted            → blue "Click to promote"
+        #   3. No LIVE schemas authored yet (or only global ones)     → grey "Author Silver/Gold first"
+        _has_client_to_promote = bool(non_global_silver or non_global_gold)
+        _both_already_global = _global_status.get("silver") and _global_status.get("gold")
+
+        if _both_already_global and not _has_client_to_promote:
+            st.markdown(
+                f"""
+                <div style="padding:.6rem .8rem;background:#dcfce7;border:1px solid #15803d;
+                            border-radius:6px;font-size:.92rem;line-height:1.4;">
+                  <div style="font-weight:700;color:#15803d;">✓ Already global</div>
+                  <div style="color:#475569;font-size:.82rem;margin-top:.2rem;">
+                    Silver + Gold for <code>{selected_dataset_code}</code> are
+                    already published as the canonical global template. New
+                    clients clone from this — no further action needed.
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+        elif _has_client_to_promote:
+            promote_targets = []
             if non_global_silver:
-                template_store.publish_silver_to_global(
-                    str(non_global_silver[0]["silver_dataset_id"]),
-                    by="ui:designer",
-                )
-                promoted.append("Silver")
+                promote_targets.append("Silver")
             if non_global_gold:
-                template_store.publish_gold_to_global(
-                    str(non_global_gold[0]["gold_dataset_id"]),
-                    by="ui:designer",
-                )
-                promoted.append("Gold")
-            st.success(f"📦 Published to Global: {', '.join(promoted)}")
-            st.rerun()
+                promote_targets.append("Gold")
+            st.markdown(
+                f"""
+                <div style="padding:.6rem .8rem;background:#dbeafe;border:1px solid #1d4ed8;
+                            border-radius:6px;font-size:.92rem;line-height:1.4;margin-bottom:.5rem;">
+                  <div style="font-weight:700;color:#1d4ed8;">📤 Ready to promote</div>
+                  <div style="color:#475569;font-size:.82rem;margin-top:.2rem;">
+                    Will publish <strong>{' + '.join(promote_targets)}</strong> as
+                    the global canonical template for <code>{selected_dataset_code}</code>.
+                    Future clients will clone from this — saves ~$0.008 LLM cost
+                    per onboarded client.
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            if st.button(
+                "🌐 Click to promote → Global",
+                use_container_width=True,
+                type="primary",
+                help="Copy the LIVE client-scoped design over to scope_owner='__global__'. "
+                "Idempotent — safe to re-click.",
+            ):
+                promoted = []
+                if non_global_silver:
+                    template_store.publish_silver_to_global(
+                        str(non_global_silver[0]["silver_dataset_id"]),
+                        by="ui:designer",
+                    )
+                    promoted.append("Silver")
+                if non_global_gold:
+                    template_store.publish_gold_to_global(
+                        str(non_global_gold[0]["gold_dataset_id"]),
+                        by="ui:designer",
+                    )
+                    promoted.append("Gold")
+                st.success(f"📦 Published to Global: {', '.join(promoted)}")
+                st.rerun()
+        else:
+            st.markdown(
+                f"""
+                <div style="padding:.6rem .8rem;background:#f1f5f9;border:1px solid #94a3b8;
+                            border-radius:6px;font-size:.92rem;line-height:1.4;">
+                  <div style="font-weight:700;color:#475569;">⏳ Nothing to promote yet</div>
+                  <div style="color:#64748b;font-size:.82rem;margin-top:.2rem;">
+                    Author and approve a client-scoped <strong>Silver</strong> +
+                    <strong>Gold</strong> for <code>{selected_dataset_code}</code> first
+                    (use the AI Construct or Manual tabs below). Once both are LIVE
+                    under a real client, the promote button appears here.
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
 st.markdown(f"## Designing **{selected_dataset_display}**")
 
@@ -707,7 +761,21 @@ elif layer.startswith("🥈"):
             f"({_ds_for_msg.get('total_fields', '?')} fields), grounded against the "
             f"`{anchor}` corpus when applicable."
         )
-        if st.button("🚀 Propose Silver schema (AI)", type="primary", key="silver_ai_propose"):
+        # Phase 16.10 — AI spend confirmation gate. Disabled by default.
+        _silver_ai_confirm = st.checkbox(
+            "✅ I confirm AI spend (~$0.005 per propose)",
+            value=False,
+            key=f"silver_ai_confirm_{selected_dataset_code}",
+            help="Required to enable Propose. Calls Claude Haiku 4.5 against "
+            "the catalog + RAG corpus. Defaults OFF to prevent accidents.",
+        )
+        if st.button(
+            "🚀 Propose Silver schema (AI)",
+            type="primary",
+            key="silver_ai_propose",
+            disabled=not _silver_ai_confirm,
+            help=None if _silver_ai_confirm else "🔒 Tick the AI-spend confirm box above to enable.",
+        ):
             with (
                 st.spinner(
                     f"Agent designing Silver `{silver_pattern}` for {selected_dataset_display} ({anchor})..."
@@ -1404,7 +1472,21 @@ elif layer.startswith("🥇"):
             f"Agent designs canonical Gold schema for {selected_dataset_display} "
             f"anchored against `{anchor}`."
         )
-        if st.button("🚀 Propose Gold (AI)", type="primary", key="gold_ai_propose"):
+        # Phase 16.10 — AI spend confirmation gate. Disabled by default.
+        _gold_ai_confirm = st.checkbox(
+            "✅ I confirm AI spend (~$0.003 per propose)",
+            value=False,
+            key=f"gold_ai_confirm_{selected_dataset_code}",
+            help="Required to enable Propose. Calls Claude Haiku 4.5 against "
+            "the catalog + RAG corpus. Defaults OFF to prevent accidents.",
+        )
+        if st.button(
+            "🚀 Propose Gold (AI)",
+            type="primary",
+            key="gold_ai_propose",
+            disabled=not _gold_ai_confirm,
+            help=None if _gold_ai_confirm else "🔒 Tick the AI-spend confirm box above to enable.",
+        ):
             with (
                 st.spinner(f"Agent constructing Gold for {selected_dataset_display}..."),
                 _warehouse(readonly=False) as wh,

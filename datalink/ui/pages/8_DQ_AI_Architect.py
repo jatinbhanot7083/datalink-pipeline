@@ -378,9 +378,24 @@ with st.expander("⚙️ AI controls (temperature, grounding)", expanded=False):
             disabled=not ai_grounding_on,
         )
 
+# Phase 16.10 — AI spend confirmation gate. Disabled by default to prevent
+# accidental Propose clicks burning LLM tokens during demo / exploration.
+_dq_ai_confirm = st.checkbox(
+    "✅ I confirm AI spend (~$0.001 per propose)",
+    value=False,
+    key="dq_ai_confirm",
+    help="Required to enable the Propose button. Calls Claude Haiku 4.5 to "
+    "translate your natural-language ask into a GX expectation. "
+    "Defaults OFF — tick to enable, click Propose, no tokens spent until then.",
+)
+
 b1, b2, b3 = st.columns([1, 1, 4])
 propose_clicked = b1.button(
-    "🧠 Propose", type="primary", use_container_width=True, disabled=not prompt.strip()
+    "🧠 Propose",
+    type="primary",
+    use_container_width=True,
+    disabled=(not prompt.strip()) or (not _dq_ai_confirm),
+    help=None if _dq_ai_confirm else "🔒 Tick the AI-spend confirm box above to enable.",
 )
 clear_clicked = b2.button("🗑️ Clear chat", use_container_width=True)
 

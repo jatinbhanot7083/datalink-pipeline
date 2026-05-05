@@ -53,7 +53,7 @@ from datalink.agents.pipeline_architect import (  # noqa: E402
 from datalink.config.loader import load_settings  # noqa: E402
 from datalink.proposals import store as proposal_store  # noqa: E402  Phase 16.1
 from datalink.proposals.store import ProposalStatus  # noqa: E402
-from datalink.quality.control import create_control_tables  # noqa: E402
+from datalink.quality.control import CONTROL_SCHEMA, create_control_tables  # noqa: E402
 from datalink.ui._nav import render_sidebar, require_client  # noqa: E402
 from datalink.ui._query import warehouse_ctx  # noqa: E402
 
@@ -330,6 +330,125 @@ with st.expander("📋 Browse catalog — 33 datasets, click to inspect", expand
             )
         df = pd.DataFrame(rows)
         st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 16.10 — Published Global Templates grid + Clone action
+#
+# This is the "shopping aisle" for new clients: every dataset that has been
+# promoted to global (Silver+Gold+Pipeline LIVE under scope_owner='__global__')
+# shows up here with a one-click [📦 Clone to Client] action. Zero LLM tokens.
+# ═════════════════════════════════════════════════════════════════════════════
+from datalink.templates import store as _tpl_store_grid  # noqa: E402
+
+st.markdown("### 🌍 Published Global Templates")
+st.caption(
+    "Canonical, AI-authored once, cloned per client at zero LLM cost. "
+    "Each row is a fully published template (Silver schema · Gold schema · "
+    "Pipeline). Pick a row and click **Clone to Client** to instantiate "
+    "for a specific tenant."
+)
+
+try:
+    _published_globals = _tpl_store_grid.list_globals()
+except Exception as _exc:
+    _published_globals = []
+    st.warning(f"Could not load global templates: {_exc}")
+
+if not _published_globals:
+    st.info(
+        "📭 No global templates published yet. **How to publish one:**\n\n"
+        "1. Switch the client picker (top-left of page) to "
+        "`🌍 __global__  (build template — AI runs ONCE per dataset)`\n"
+        "2. Pick a dataset and run the AI propose flow once (Silver → Gold "
+        "→ Pipeline)\n"
+        "3. Approve & Deploy — the artifacts auto-publish to global\n\n"
+        "Future clients will then see a `📦 Clone from Global` option here "
+        "and skip the LLM entirely."
+    )
+else:
+    # Count clones from client_pipeline_instances.cloned_from_template_id
+    with _warehouse(readonly=True) as _wh_clones:
+        try:
+            _clone_rows = list(
+                _wh_clones.query(
+                    f"SELECT cloned_from_template_id AS tid, COUNT(*) AS c "
+                    f"FROM {CONTROL_SCHEMA}.client_pipeline_instances "
+                    f"WHERE cloned_from_template_id IS NOT NULL "
+                    f"GROUP BY cloned_from_template_id"
+                )
+            )
+            _clone_count_by_tid = {str(r["tid"]): int(r["c"]) for r in _clone_rows}
+        except Exception:
+            _clone_count_by_tid = {}
+
+    grid_rows = []
+    for g in _published_globals:
+        tid = str(g.get("pipeline_template_id") or "")
+        grid_rows.append(
+            {
+                "Dataset": g.get("dataset_code"),
+                "Silver v": f"v{g.get('silver_version')}" if g.get("silver_version") else "—",
+                "Gold v": f"v{g.get('gold_version')}" if g.get("gold_version") else "—",
+                "Pipeline v": f"v{g.get('pipeline_version')}" if g.get("pipeline_version") else "—",
+                "Anchor": g.get("bronze_anchor") or "—",
+                "Schedule": g.get("schedule_cron") or "—",
+                "🔁 Clones": _clone_count_by_tid.get(tid, 0),
+                "Template ID": (tid[:8] + "…") if tid else "—",
+            }
+        )
+    st.dataframe(pd.DataFrame(grid_rows), use_container_width=True, hide_index=True)
+
+    # Clone-to-client picker
+    _clonable = [g for g in _published_globals if g.get("pipeline_template_id")]
+    if _clonable:
+        st.markdown("##### 📦 Clone a global template to a client")
+        cc1, cc2, cc3 = st.columns([2, 2, 1])
+        with cc1:
+            _clone_dataset = st.selectbox(
+                "Dataset",
+                options=[str(g.get("dataset_code")) for g in _clonable],
+                key="global_clone_dataset_picker",
+                help="Pick the published global template to clone.",
+            )
+        with cc2:
+            _clone_target_client = st.text_input(
+                "Target client",
+                placeholder=selected_client if selected_client and selected_client != "__global__" else "aetna",
+                key="global_clone_target_client",
+                help="Lower-case client_id. Bronze/Silver/Gold schemas auto-create.",
+            )
+        with cc3:
+            st.write("")  # vertical alignment
+            _clone_now = st.button(
+                "📦 Clone now",
+                type="primary",
+                use_container_width=True,
+                disabled=not (_clone_target_client and _clone_target_client.strip()),
+            )
+        if _clone_now and _clone_target_client.strip():
+            try:
+                with _warehouse(readonly=False) as _wh_clone:
+                    result = _tpl_store_grid.clone_to_client(
+                        warehouse=_wh_clone,
+                        dataset_code=_clone_dataset,
+                        target_client_id=_clone_target_client.strip().lower(),
+                        actor=f"ui:pipeline_architect:{_clone_target_client.strip().lower()}",
+                    )
+                st.success(
+                    f"✅ Cloned `{_clone_dataset}` global → "
+                    f"`{_clone_target_client.strip().lower()}`. "
+                    f"New instance: `{str(result.get('new_instance_id', ''))[:8]}…`. "
+                    f"Status: DRAFT — approve & deploy below."
+                )
+                st.rerun()
+            except Exception as _exc:
+                st.error(f"Clone failed: {type(_exc).__name__}: {_exc}")
+    else:
+        st.caption(
+            "_(No clonable templates yet — all rows above are missing the pipeline component. "
+            "Deploy + publish a pipeline against `__global__` to make a row clonable.)_"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -925,10 +1044,20 @@ if saved_active is not None:
         # estimate (variation between runs is small).
         last_cost = saved_active.estimated_cost_usd
         last_tokens = saved_active.total_tokens
+        # Phase 16.10 — Re-propose AI spend gate. Default OFF.
+        _ai_confirm_repropose = st.checkbox(
+            f"✅ Confirm spend ~${last_cost:.4f}",
+            value=False,
+            key=f"ai_confirm_repropose_{SCOPE_KEY}_{saved_active.proposal_id}",
+            help="Required to enable Re-propose. Defaults OFF.",
+        )
         repropose_clicked = st.button(
             f"🔄 Re-propose (~{last_tokens:,} tokens, ~${last_cost:.4f})",
             use_container_width=True,
-            help="Spend ~tokens to regenerate. Auto-archives this saved version (unless pinned).",
+            disabled=not _ai_confirm_repropose,
+            help=("Spend ~tokens to regenerate. Auto-archives this saved version (unless pinned)."
+                  if _ai_confirm_repropose
+                  else "🔒 Tick the confirm box above to enable Re-propose."),
         )
     with bcols[2]:
         discard_clicked = st.button(
@@ -1031,17 +1160,31 @@ _button_help = (
     "Author the missing schemas in Data Model Designer first."
 )
 
+# Phase 16.10 — AI spend confirmation gate. AI buttons MUST be disabled by
+# default until the operator explicitly ticks the confirm box. Prevents
+# accidental clicks burning ~$0.002 per propose × N re-clicks while
+# demoing or exploring the UI.
+_ai_confirm_propose = st.checkbox(
+    "✅ I confirm AI spend (~$0.002 per propose)",
+    value=False,
+    key=f"ai_confirm_propose_{SCOPE_KEY}",
+    help="Required to enable the Propose button. AI Construct calls Claude "
+    "Haiku 4.5 — small but real cost. Tick to enable, click Propose, "
+    "then this auto-resets on next page load.",
+)
+
 propose_btn, _ = st.columns([1, 5])
 with propose_btn:
     propose_clicked = st.button(
         "🚀 Propose pipeline",
-        type="primary" if (saved_active is None and _can_propose) else "secondary",
+        type="primary" if (saved_active is None and _can_propose and _ai_confirm_propose) else "secondary",
         use_container_width=True,
         disabled=(
             not _can_propose
+            or not _ai_confirm_propose
             or (saved_active is not None and saved_active.status == ProposalStatus.APPROVED)
         ),
-        help=_button_help,
+        help=_button_help if _ai_confirm_propose else "🔒 Tick the AI-spend confirm box above to enable.",
     )
 
 if propose_clicked:
