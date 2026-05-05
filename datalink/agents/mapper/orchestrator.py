@@ -129,7 +129,7 @@ def propose_silver_mapping(
         raise KeyError(f"Unknown session_id: {session_id!r}")
     if session.status is not SessionStatus.DRAFT:
         raise ValueError(
-            f"propose_silver_mapping requires DRAFT, " f"session is {session.status.value}"
+            f"propose_silver_mapping requires DRAFT, session is {session.status.value}"
         )
 
     # 1. Profile snapshot (if not already attached).
@@ -435,7 +435,7 @@ def propose_push_script(
         )
     if not session.gold_target_table or not session.gold_sql:
         raise ValueError(
-            "propose_push_script requires a Gold proposal — call " "propose_gold_view() first."
+            "propose_push_script requires a Gold proposal — call propose_gold_view() first."
         )
 
     agent = MapperAgent(llm=llm, warehouse=warehouse)

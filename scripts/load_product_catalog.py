@@ -412,7 +412,7 @@ def _insert_field(
         f"""
         INSERT INTO {CONTROL_SCHEMA}.global_bronze_catalog_fields
             (field_id, dataset_id, dataset_code, field_order,
-             field_display_name, gold_column_name, requirement, logical_type,
+             field_display_name, bronze_column_name, requirement, logical_type,
              description, additional_notes, example,
              is_pii, is_phi, is_business_key, catalog_version, registered_at)
         VALUES ($id, $ds_id, $ds_code, $ord,

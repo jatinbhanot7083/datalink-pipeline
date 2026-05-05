@@ -491,10 +491,10 @@ Context (all metadata, no PHI):
   - Dataset: {dataset_display_name} (code={dataset_code})
   - Bronze anchor: {bronze_anchor} — {bronze_desc}
   - Decision: {decision.value} ({cloned_clause})
-  - Peer clients with the same dataset: {', '.join(peer_clients) if peer_clients else '(none yet)'}
-  - Global Gold Catalog field count: {catalog_dataset.get('total_fields', '?')} (resolved after overrides: {resolved_field_count})
-  - Override count: {override_count}; kinds: {', '.join(deviation_kinds) if deviation_kinds else '(none)'}
-  - Downstream OnPrem products receiving Gold push: {', '.join(downstream_products) if downstream_products else '(none)'}
+  - Peer clients with the same dataset: {", ".join(peer_clients) if peer_clients else "(none yet)"}
+  - Global Gold Catalog field count: {catalog_dataset.get("total_fields", "?")} (resolved after overrides: {resolved_field_count})
+  - Override count: {override_count}; kinds: {", ".join(deviation_kinds) if deviation_kinds else "(none)"}
+  - Downstream OnPrem products receiving Gold push: {", ".join(downstream_products) if downstream_products else "(none)"}
   - Schedule: {schedule_cron}
 
 Your job: produce a CONCISE, operator-readable narrative covering:

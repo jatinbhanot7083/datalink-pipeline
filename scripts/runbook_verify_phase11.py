@@ -311,9 +311,7 @@ def main() -> int:
         for f in failures:
             print(f"   - {f}")
         return 1
-    print(
-        "✅ Phase 11 PASS — drift detection + contract promote loop verified " "(8 scenarios green)"
-    )
+    print("✅ Phase 11 PASS — drift detection + contract promote loop verified (8 scenarios green)")
     return 0
 
 

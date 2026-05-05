@@ -145,7 +145,19 @@ st.markdown(
 from datalink.ui._nav import require_client  # noqa: E402
 
 selected_client = require_client()
+# Phase 16.6 — when no client picked (default = All clients), gate
+# the per-client content with a friendly notice. Pages with a true
+# all-clients view (Pipeline Architect) handle this differently.
+if selected_client is None:
+    import streamlit as _st
 
+    _st.info(
+        "🌐 **All-clients view.** Pick a client from the dropdown above "
+        "to load this client-scoped page. Cross-tenant dashboards "
+        "(Control Tower, PHI Governance, Cost & Tokens, Lineage) live "
+        "elsewhere and don't need a client picker."
+    )
+    _st.stop()
 st.sidebar.header("Filters")
 
 source_options = ["<all>", "CLAIMS", "MEMBERSHIP", "PROVIDER"]

@@ -310,9 +310,7 @@ class ContractArchitectAgent(AgentBase):
             f"You are designing a Bronze-layer data contract for client "
             f"`{client_id}`, source type `{source_type}`, mode `{mode.value}`."
         )
-        parts.append(
-            f"Anchored industry standards (most relevant first): " f"{', '.join(anchored)}."
-        )
+        parts.append(f"Anchored industry standards (most relevant first): {', '.join(anchored)}.")
 
         # Strictness directive
         if strictness >= 0.8:

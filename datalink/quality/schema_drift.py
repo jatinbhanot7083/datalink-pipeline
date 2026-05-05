@@ -558,7 +558,7 @@ def list_recent_drift_events(
             {"c": client_id, "lim": limit},
         )
     return warehouse.query(
-        f"SELECT * FROM {CONTROL_SCHEMA}.schema_drift_log " "ORDER BY detected_at DESC LIMIT $lim",
+        f"SELECT * FROM {CONTROL_SCHEMA}.schema_drift_log ORDER BY detected_at DESC LIMIT $lim",
         {"lim": limit},
     )
 

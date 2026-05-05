@@ -1236,8 +1236,7 @@ class PipelineControl:
         current = self.current(t.pipeline_id, client_id) or PipelineState.RUNNING
         if t.to_state not in self._LEGAL_TRANSITIONS.get(current, set()):
             raise ValueError(
-                f"illegal transition {current} → {t.to_state} for "
-                f"{t.pipeline_id!r}/{client_id!r}"
+                f"illegal transition {current} → {t.to_state} for {t.pipeline_id!r}/{client_id!r}"
             )
         now = datetime.now(UTC)
         if t.to_state == PipelineState.PAUSED:

@@ -217,7 +217,10 @@ def _render_hub_dbt(
     + audit columns. Immutable across batches; INSERT-only semantics."""
     bronze_schema = _bronze_schema(client_id)
     bronze_table = _bronze_table(dataset_code)
-    src_var = f"bronze_{client_id.lower()}"
+    # Phase 16.5 (Wave 5) — use canonical 'bronze' source. Schema resolution
+    # happens via dbt var ``client_id`` at parse time (sources.yml has the
+    # Jinja conditional). Old "bronze_<client>" pattern bypassed that.
+    src_var = "bronze"
 
     # Concatenate BK exprs for hash_key
     hash_inputs = ", ".join(
@@ -249,11 +252,11 @@ SELECT
     _load_dt,
     _record_source
 FROM {{{{ source('{src_var}', '{bronze_table}') }}}}
-WHERE {' AND '.join(f"{bronze_source_for_bk.get(bk, bk)} IS NOT NULL" for bk in business_keys)}
+WHERE {" AND ".join(f"{bronze_source_for_bk.get(bk, bk)} IS NOT NULL" for bk in business_keys)}
 {{% if is_incremental() %}}
   AND {hash_expr} NOT IN (SELECT hash_key FROM {{{{ this }}}})
 {{% endif %}}
-GROUP BY hash_key, {', '.join(business_keys)}, _load_dt, _record_source
+GROUP BY hash_key, {", ".join(business_keys)}, _load_dt, _record_source
 """
 
 
@@ -274,7 +277,10 @@ def _render_sat_dbt(
     change detection + audit columns. INSERT-only with hash_diff dedup."""
     bronze_schema = _bronze_schema(client_id)
     bronze_table = _bronze_table(dataset_code)
-    src_var = f"bronze_{client_id.lower()}"
+    # Phase 16.5 (Wave 5) — use canonical 'bronze' source. Schema resolution
+    # happens via dbt var ``client_id`` at parse time (sources.yml has the
+    # Jinja conditional). Old "bronze_<client>" pattern bypassed that.
+    src_var = "bronze"
 
     hash_inputs = ", ".join(
         f"COALESCE(CAST({bronze_source_for_bk.get(bk, bk)} AS VARCHAR), '')" for bk in business_keys
@@ -354,7 +360,10 @@ def _render_link_dbt(
     """
     bronze_schema = _bronze_schema(client_id)
     bronze_table = _bronze_table(dataset_code)
-    src_var = f"bronze_{client_id.lower()}"
+    # Phase 16.5 (Wave 5) — use canonical 'bronze' source. Schema resolution
+    # happens via dbt var ``client_id`` at parse time (sources.yml has the
+    # Jinja conditional). Old "bronze_<client>" pattern bypassed that.
+    src_var = "bronze"
 
     select_parts: list[str] = []
     hash_inputs: list[str] = []
@@ -430,7 +439,10 @@ def _render_normalized_silver_dbt(
     Silver dbt model — TRY_CAST + required-not-null filter from Bronze
     via mapping rules."""
     bronze_table = _bronze_table(dataset_code)
-    src_var = f"bronze_{client_id.lower()}"
+    # Phase 16.5 (Wave 5) — use canonical 'bronze' source. Schema resolution
+    # happens via dbt var ``client_id`` at parse time (sources.yml has the
+    # Jinja conditional). Old "bronze_<client>" pattern bypassed that.
+    src_var = "bronze"
 
     select_lines: list[str] = []
     where_clauses: list[str] = []
@@ -607,30 +619,31 @@ def build_bronze_ddl_with_overflow(
     dataset_code: str,
     bronze_fields: list[dict[str, Any]],
 ) -> str:
-    """Render a CREATE TABLE for the client's Bronze raw landing table,
-    appending the mandatory `_variant_overflow VARIANT` column for
-    capturing unexpected vendor-supplied columns."""
-    schema = _bronze_schema(client_id)
-    table = _bronze_table(dataset_code)
-    fq = f"{schema}.{table}"
+    """Render a CREATE TABLE for the client's Bronze raw landing table.
 
-    lines: list[str] = []
-    lines.append(
-        f"-- Phase 15.7 Pipeline Architect — Bronze landing for {client_id} / {dataset_code}"
+    Phase 16.1 (Wave 1 Item 2):
+      * Uses ``_ddl_format.render_create_table()`` so column-separator commas
+        sit BEFORE inline comments (Snowflake parses them as separators) —
+        not inside them as the old emitter did.
+      * **All business columns are NULLABLE.** Bronze is raw landing — vendor
+        data legitimately has blanks (Medicaid-only members have no Medicare
+        ID, etc.). NOT NULL belongs in GX expectations, not in Bronze
+        constraints. Forcing NOT NULL there made COPY INTO fail at run-time.
+      * Adds the mandatory ``_variant_overflow VARIANT`` column for capturing
+        unexpected vendor-supplied columns (Phase 15.7 contract).
+    """
+    from datalink.agents.pipeline_architect._ddl_format import (
+        ColumnDef,
+        render_create_table,
     )
-    lines.append("-- Generated from CONTROL.global_bronze_catalog_fields")
-    lines.append(f"-- Generated at: {datetime.now(UTC).isoformat()}")
-    lines.append(f"CREATE TABLE IF NOT EXISTS {fq} (")
 
-    col_lines: list[str] = []
+    fq = f"{_bronze_schema(client_id)}.{_bronze_table(dataset_code)}"
+    business_cols: list[ColumnDef] = []
     for f in bronze_fields:
         name = str(f.get("bronze_column_name") or f.get("gold_column_name") or "")
         if not name or name.startswith("_"):
             continue
         sql_type = _LOGICAL_TO_SQL.get((f.get("logical_type") or "TEXT").upper(), "VARCHAR")
-        nullability = (
-            "NOT NULL" if (f.get("requirement") or "").lower().startswith("req") else "NULL"
-        )
         comment_bits = []
         if f.get("is_pii"):
             comment_bits.append("[PII]")
@@ -639,30 +652,43 @@ def build_bronze_ddl_with_overflow(
         if f.get("is_business_key"):
             comment_bits.append("[BK]")
         comment = " ".join(comment_bits)
-        suffix = f"  -- {comment}" if comment else ""
-        col_lines.append(f"    {name:<32} {sql_type:<14} {nullability}{suffix}")
+        # Bronze: ALWAYS NULL. Even business keys may be absent in vendor
+        # files (we surface the violation via GX, not table constraint).
+        business_cols.append(
+            ColumnDef(name=name, sql_type=sql_type, nullable=True, comment=comment)
+        )
 
-    # Phase 15.7 — variant overflow column
-    col_lines.append(
-        "    -- ── Phase 15.7 variant overflow (any column not in the agreed contract lands here) ──"
+    overflow_col = ColumnDef(
+        name="_variant_overflow",
+        sql_type="VARIANT",
+        nullable=True,
+        comment=(
+            "JSON of unexpected columns; never propagates to Silver/Gold without HITL handshake"
+        ),
     )
-    col_lines.append(
-        f"    {'_variant_overflow':<32} VARIANT        NULL  -- JSON of unexpected columns; never propagates to Silver/Gold without HITL handshake"
+
+    audit_cols = [
+        ColumnDef(name="_load_dt", sql_type="TIMESTAMP"),
+        ColumnDef(name="_source_file", sql_type="VARCHAR"),
+        ColumnDef(name="_batch_id", sql_type="VARCHAR"),
+        ColumnDef(name="_record_source", sql_type="VARCHAR"),
+        ColumnDef(name="_load_type", sql_type="VARCHAR"),
+        ColumnDef(name="_file_row_number", sql_type="BIGINT"),
+        ColumnDef(name="_record_hash", sql_type="VARCHAR"),
+    ]
+
+    return render_create_table(
+        fully_qualified_table=fq,
+        business_columns=business_cols,
+        overflow_column=overflow_col,
+        audit_columns=audit_cols,
+        header_comments=[
+            f"Phase 15.7 Pipeline Architect — Bronze landing for {client_id} / {dataset_code}",
+            "Generated from CONTROL.global_bronze_catalog_fields",
+            f"Generated at: {datetime.now(UTC).isoformat()}",
+            "Phase 16.1 — All business columns NULLABLE (Bronze is raw landing).",
+        ],
+        business_section_label="Bronze business columns (NULL-permissive)",
+        overflow_section_label=("Phase 15.7 variant overflow (any column not in agreed contract)"),
+        audit_section_label="Standard Bronze audit columns",
     )
-
-    # Audit columns
-    col_lines.append("    -- ── Standard Bronze audit columns ──")
-    for n, t in [
-        ("_load_dt", "TIMESTAMP"),
-        ("_source_file", "VARCHAR"),
-        ("_batch_id", "VARCHAR"),
-        ("_record_source", "VARCHAR"),
-        ("_load_type", "VARCHAR"),
-        ("_file_row_number", "BIGINT"),
-        ("_record_hash", "VARCHAR"),
-    ]:
-        col_lines.append(f"    {n:<32} {t}")
-
-    lines.append(",\n".join(col_lines))
-    lines.append(");")
-    return "\n".join(lines) + "\n"

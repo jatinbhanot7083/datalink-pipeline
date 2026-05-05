@@ -152,8 +152,19 @@ st.markdown(
 )
 
 selected_client = require_client()
+# Phase 16.6 — when no client picked (default = All clients), gate
+# the per-client content with a friendly notice. Pages with a true
+# all-clients view (Pipeline Architect) handle this differently.
+if selected_client is None:
+    import streamlit as _st
 
-
+    _st.info(
+        "🌐 **All-clients view.** Pick a client from the dropdown above "
+        "to load this client-scoped page. Cross-tenant dashboards "
+        "(Control Tower, PHI Governance, Cost & Tokens, Lineage) live "
+        "elsewhere and don't need a client picker."
+    )
+    _st.stop()
 # ============================================================================
 # Top controls — Table picker + suite name + author
 # ============================================================================
@@ -434,6 +445,35 @@ if propose_clicked and prompt.strip():
                     grounding_enabled=bool(ai_grounding_on),
                 )
             st.session_state["workshop_proposal"] = proposal_out
+            # Phase 16.5 (Wave 5) — persist proposal to CONTROL.agent_proposals
+            # so cost telemetry + audit trail capture every DQ-Architect run.
+            try:
+                from datalink.proposals import store as p_store
+
+                _toks = int(getattr(proposal_out, "tokens_used", 0) or 0)
+                p_store.save_proposal(
+                    agent_type="dq_proposer",
+                    scope_type="dq_scope",
+                    scope_key=f"{selected_client}:{qualified_table}",
+                    payload={
+                        "expectation_type": proposal_out.expectation_type,
+                        "kwargs": getattr(proposal_out, "kwargs", {}),
+                        "meta": getattr(proposal_out, "meta", {}),
+                        "sample_sql": getattr(proposal_out, "sample_sql", ""),
+                    },
+                    agent_input={
+                        "prompt": prompt.strip(),
+                        "table": qualified_table,
+                        "client_id": selected_client,
+                    },
+                    prompt_tokens=int(_toks * 0.8),
+                    completion_tokens=_toks - int(_toks * 0.8),
+                    model_id=str(getattr(proposal_out, "model_id", "claude-haiku-4.5")),
+                    latency_ms=int(getattr(proposal_out, "duration_ms", 0) or 0),
+                    created_by=f"ui:{selected_client}",
+                )
+            except Exception:
+                pass  # store failure must not break the propose flow
             agent_summary = (
                 f"**{proposal_out.expectation_type}** &mdash; "
                 f"{proposal_out.meta.get('description', '')}"
@@ -469,7 +509,7 @@ if proposal is not None:
     st.markdown(
         f'<div class="ws-prop-head">🤖 Proposal — {proposal.expectation_type}</div>'
         f"<div>{pills}</div>"
-        f"<div class='ws-meta-row'>{proposal.meta.get('description','')}</div>",
+        f"<div class='ws-meta-row'>{proposal.meta.get('description', '')}</div>",
         unsafe_allow_html=True,
     )
 
@@ -523,7 +563,7 @@ if proposal is not None:
             for hit in proposal.grounding:
                 st.markdown(
                     f"**{hit['suite_name']}** "
-                    f"(`{hit.get('status','?')}` · src=`{hit.get('source','?')}` · "
+                    f"(`{hit.get('status', '?')}` · src=`{hit.get('source', '?')}` · "
                     f"distance=`{hit['distance']:.3f}`)"
                 )
                 # Render the source_text in a code block — easy to scan.

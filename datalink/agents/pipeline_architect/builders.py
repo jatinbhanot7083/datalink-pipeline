@@ -222,27 +222,30 @@ def build_gold_ddl(
 ) -> str:
     """Render a CREATE TABLE for the client's Gold copy of the dataset.
 
-    The structure mirrors the global catalog 1:1 unless overrides
-    were applied. Audit columns are appended.
+    Phase 16.1 (Wave 1 Item 2):
+      * Uses the shared ``_ddl_format.render_create_table()`` helper so commas
+        sit BEFORE inline comments (Snowflake parses them as separators) and
+        the last column has no trailing comma.
+      * NOT NULL only on TRUE business keys + cols that are required AND not
+        added by an override. All other cols nullable — Gold Layer handles
+        downstream null handling via dbt SQL + GX expectations, not via
+        CHECK-constraint friction at COPY-INTO time.
     """
-    schema = schema_name("GOLD", client_id)
-    table = gold_table_name(dataset_code)
-    fq = f"{schema}.{table}"
-
-    lines: list[str] = []
-    lines.append(f"-- Phase 15 Pipeline Architect — Gold table for {client_id} / {dataset_code}")
-    lines.append(
-        f"-- Generated from CONTROL.global_bronze_catalog_fields (catalog_version={catalog_version})"
+    from datalink.agents.pipeline_architect._ddl_format import (
+        ColumnDef,
+        render_create_table,
     )
-    lines.append(f"-- Generated at: {datetime.now(UTC).isoformat()}")
-    lines.append(f"CREATE TABLE IF NOT EXISTS {fq} (")
 
-    col_lines: list[str] = []
+    fq = f"{schema_name('GOLD', client_id)}.{gold_table_name(dataset_code)}"
+    business_cols: list[ColumnDef] = []
     for rf in resolved_fields:
         sql_type = _LOGICAL_TO_SQL.get(rf.logical_type.upper(), "VARCHAR")
-        nullability = (
-            "NOT NULL" if rf.requirement == "Required" and not rf.is_added_by_override else "NULL"
-        )
+        # Phase 16.1 — only true business keys and required-non-override fields
+        # get NOT NULL. Everything else is permissive (let GX flag violations,
+        # not the table). Conditional-required fields (like medicare_id only
+        # required for Medicare members) become NULL at the DDL level.
+        is_required = rf.requirement == "Required" and not rf.is_added_by_override
+        nullable = not (is_required and rf.is_business_key)
         comment_bits: list[str] = []
         if rf.field_display_name and rf.field_display_name != rf.gold_column_name:
             comment_bits.append(rf.field_display_name)
@@ -259,20 +262,26 @@ def build_gold_ddl(
             if comment_bits
             else (rf.description[:80] if rf.description else "")
         )
-        col_line = f"    {rf.gold_column_name:<32} {sql_type:<14} {nullability}"
-        if comment:
-            # Use SQL comment to avoid quoting headaches with COMMENT ON syntax
-            col_line += f"  -- {comment}"
-        col_lines.append(col_line)
+        business_cols.append(
+            ColumnDef(
+                name=rf.gold_column_name, sql_type=sql_type, nullable=nullable, comment=comment
+            )
+        )
 
-    # Audit columns
-    audit_lines = [f"    {n:<32} {t}" for n, t in GOLD_AUDIT_COLUMNS]
-    col_lines.append("    -- ── DataLink Gold audit columns (auto-injected) ──")
-    col_lines.extend(audit_lines)
+    audit_cols = [ColumnDef(name=n, sql_type=t, nullable=True) for n, t in GOLD_AUDIT_COLUMNS]
 
-    lines.append(",\n".join(col_lines))
-    lines.append(");")
-    return "\n".join(lines) + "\n"
+    return render_create_table(
+        fully_qualified_table=fq,
+        business_columns=business_cols,
+        audit_columns=audit_cols,
+        header_comments=[
+            f"Phase 15 Pipeline Architect — Gold table for {client_id} / {dataset_code}",
+            f"Generated from CONTROL.global_bronze_catalog_fields (catalog_version={catalog_version})",
+            f"Generated at: {datetime.now(UTC).isoformat()}",
+        ],
+        business_section_label="Gold business columns",
+        audit_section_label="DataLink Gold audit columns (auto-injected)",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -367,7 +376,7 @@ def build_gold_dbt_sql(
 
 {{{{ config(
     materialized = 'table',
-    cluster_by   = [{', '.join(repr(k) for k in business_keys)}]
+    cluster_by   = [{", ".join(repr(k) for k in business_keys)}]
 ) }}}}
 
 WITH ranked AS (

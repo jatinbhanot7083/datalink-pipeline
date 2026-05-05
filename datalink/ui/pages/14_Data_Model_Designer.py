@@ -102,6 +102,11 @@ st.markdown(
       .gd-layer-tab {{display:inline-block;padding:.35rem .9rem;margin:.2rem;
                       border-radius:6px;font-weight:600;font-size:.92rem;}}
       .gd-table-status {{font-family:ui-monospace,Menlo,monospace;font-size:.85rem;}}
+      /* Phase 16.7 — global-template pills */
+      .dmd-pill {{display:inline-block;padding:.15rem .55rem;border-radius:12px;
+                  font-size:.72rem;font-weight:700;letter-spacing:.04em;margin-right:.4rem}}
+      .dmd-pill-live {{background:#dcfce7;color:#166534}}
+      .dmd-pill-dev {{background:#fef3c7;color:#92400e}}
     </style>
     """,
     unsafe_allow_html=True,
@@ -182,10 +187,47 @@ def _bronze_fields_for(dataset_code: str) -> list[dict[str, Any]]:
         )
 
 
+@st.cache_data(ttl=20)  # type: ignore
+def _cached_silver_rows() -> list[dict[str, Any]]:
+    with warehouse_ctx(readonly=True) as wh:
+        return list_silver_datasets(wh)
+
+
+@st.cache_data(ttl=20)  # type: ignore
+def _cached_gold_rows() -> list[dict[str, Any]]:
+    with warehouse_ctx(readonly=True) as wh:
+        return list_gold_datasets(wh)
+
+
+@st.cache_data(ttl=20)  # type: ignore
+def _cached_distinct_clients() -> int:
+    with warehouse_ctx(readonly=True) as wh:
+        rows = list(
+            wh.query(
+                f"SELECT COUNT(DISTINCT client_id) AS c FROM "
+                f"{CONTROL_SCHEMA}.client_pipeline_instances WHERE status = 'LIVE'"
+            )
+        )
+        return int(rows[0]["c"] or 0) if rows else 0
+
+
+@st.cache_data(ttl=20)  # type: ignore
+def _cached_silver_schema(silver_dataset_id: str) -> dict[str, Any]:
+    with warehouse_ctx(readonly=True) as wh:
+        return get_silver_schema(wh, silver_dataset_id)
+
+
+@st.cache_data(ttl=20)  # type: ignore
+def _cached_gold_schema(gold_dataset_id: str) -> dict[str, Any]:
+    from datalink.agents.gold_schema_designer import get_gold_schema as _gget
+
+    with warehouse_ctx(readonly=True) as wh:
+        return _gget(wh, gold_dataset_id)
+
+
 bronze_datasets = _list_bronze_datasets()
-with _warehouse(readonly=True) as wh:
-    all_silver = list_silver_datasets(wh)
-    all_gold = list_gold_datasets(wh)
+all_silver = _cached_silver_rows()
+all_gold = _cached_gold_rows()
 
 
 # ---------------------------------------------------------------------------
@@ -299,7 +341,7 @@ with st.expander(
 ):
     if not bronze_datasets:
         st.warning(
-            "Bronze catalog is empty. Run " "`python3 scripts/load_product_catalog.py` to seed it."
+            "Bronze catalog is empty. Run `python3 scripts/load_product_catalog.py` to seed it."
         )
     else:
         rows = [_readiness_row(d) for d in bronze_datasets]
@@ -317,13 +359,29 @@ ds_label_to_obj = {
     f"{d['display_name']}  ({d['total_fields']} fields, {d['category']})": d
     for d in bronze_datasets
 }
+
+# Phase 16.1 — accept ?dataset=<code> query param so deep-links from
+# Pipeline Architect / other pages land directly on the right dataset.
+_dataset_qp = st.query_params.get("dataset")
+_default_idx = 0
+if _dataset_qp and bronze_datasets:
+    for i, lab in enumerate(ds_label_to_obj.keys()):
+        if ds_label_to_obj[lab]["dataset_code"] == _dataset_qp:
+            _default_idx = i
+            break
+
 col_ds, col_anchor = st.columns([3, 2])
 with col_ds:
     selected_label = st.selectbox(
         "Dataset",
         options=list(ds_label_to_obj.keys()),
-        index=0 if bronze_datasets else None,
+        index=_default_idx if bronze_datasets else None,
     )
+    # Push selection back to URL so reload preserves the choice.
+    if selected_label and bronze_datasets:
+        _selected_code = ds_label_to_obj[selected_label]["dataset_code"]
+        if st.query_params.get("dataset") != _selected_code:
+            st.query_params["dataset"] = _selected_code
     selected_dataset = ds_label_to_obj[selected_label] if selected_label else None
     selected_dataset_code = str(selected_dataset["dataset_code"]) if selected_dataset else ""
     selected_dataset_display = str(selected_dataset["display_name"]) if selected_dataset else ""
@@ -352,6 +410,107 @@ if not selected_dataset:
 # ---------------------------------------------------------------------------
 
 st.markdown("---")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 16.7 — GLOBAL TEMPLATE PANEL
+#
+# Shows the canonical global Silver/Gold/Pipeline at the top + per-client
+# overrides below. Authoring priority:
+#   1. Clone from Global (no LLM tokens) — handled in Pipeline Architect
+#   2. Manual / Import — paste a spec
+#   3. Contract First — drop a file
+#   4. AI Construct — last resort, costs tokens
+# ═════════════════════════════════════════════════════════════════════════════
+
+from datalink.templates import store as template_store  # noqa: E402
+
+_global_status = template_store.has_global(selected_dataset_code)
+_global_silver_live = _global_status.get("silver", False)
+_global_gold_live = _global_status.get("gold", False)
+
+with st.container():
+    g_col1, g_col2 = st.columns([5, 2])
+    with g_col1:
+        if _global_silver_live or _global_gold_live:
+            pills = []
+            if _global_silver_live:
+                pills.append('<span class="dmd-pill dmd-pill-live">Silver-LIVE (global)</span>')
+            else:
+                pills.append('<span class="dmd-pill dmd-pill-dev">Silver-MISSING (global)</span>')
+            if _global_gold_live:
+                pills.append('<span class="dmd-pill dmd-pill-live">Gold-LIVE (global)</span>')
+            else:
+                pills.append('<span class="dmd-pill dmd-pill-dev">Gold-MISSING (global)</span>')
+            st.markdown(
+                f"""<div style="background:#dcfce7;border:1px solid #15803d;
+                              border-left:5px solid #15803d;border-radius:8px;
+                              padding:.7rem 1rem;margin:.4rem 0;">
+                <div style="font-weight:700;color:#0a1a3e;">
+                  📦 Global template available for <code>{selected_dataset_code}</code>
+                </div>
+                <div style="margin-top:.3rem;">{" ".join(pills)}</div>
+                <div style="font-size:.85rem;color:#475569;margin-top:.3rem;">
+                  Future clients will <strong>clone from this global</strong> rather than
+                  re-author with AI — saves tokens, ensures consistency.
+                </div>
+                </div>""",
+                unsafe_allow_html=True,
+            )
+        else:
+            st.info(
+                f"⚠️ **No global template yet for `{selected_dataset_code}`.** "
+                f"Once you author Silver and Gold here and approve them LIVE, "
+                f"use the **🌐 Publish to Global** button to make them the "
+                f"canonical template. New clients will clone from it."
+            )
+    with g_col2:
+        # Publish-to-Global action — relevant only when LIVE schemas exist for
+        # this dataset that aren't already global.
+        with _warehouse(readonly=True) as wh:
+            non_global_silver = list(
+                wh.query(
+                    "SELECT silver_dataset_id FROM CONTROL.global_silver_schema_datasets "
+                    "WHERE dataset_code = $ds AND status = 'LIVE' "
+                    "  AND scope_owner <> '__global__' LIMIT 1",
+                    {"ds": selected_dataset_code},
+                )
+            )
+            non_global_gold = list(
+                wh.query(
+                    "SELECT gold_dataset_id FROM CONTROL.global_gold_schema_datasets "
+                    "WHERE dataset_code = $ds AND status = 'LIVE' "
+                    "  AND scope_owner <> '__global__' LIMIT 1",
+                    {"ds": selected_dataset_code},
+                )
+            )
+        publish_disabled = not (non_global_silver or non_global_gold)
+        if st.button(
+            "🌐 Publish to Global",
+            disabled=publish_disabled,
+            use_container_width=True,
+            help=(
+                "Promote the current LIVE Silver+Gold designs as the "
+                "canonical global template. Future clients clone from this."
+                if not publish_disabled
+                else "No client-scoped LIVE designs to promote. Author + approve Silver/Gold first."
+            ),
+        ):
+            promoted = []
+            if non_global_silver:
+                template_store.publish_silver_to_global(
+                    str(non_global_silver[0]["silver_dataset_id"]),
+                    by="ui:designer",
+                )
+                promoted.append("Silver")
+            if non_global_gold:
+                template_store.publish_gold_to_global(
+                    str(non_global_gold[0]["gold_dataset_id"]),
+                    by="ui:designer",
+                )
+                promoted.append("Gold")
+            st.success(f"📦 Published to Global: {', '.join(promoted)}")
+            st.rerun()
+
 st.markdown(f"## Designing **{selected_dataset_display}**")
 
 layer = st.radio(
@@ -433,7 +592,7 @@ elif layer.startswith("🥈"):
             f"approved by `{live_silver['approved_by']}`"
         )
         with _warehouse(readonly=True) as wh:
-            schema = get_silver_schema(wh, live_silver["silver_dataset_id"])
+            schema = _cached_silver_schema(live_silver["silver_dataset_id"])
         # Render tables list
         with st.expander("📋 Silver tables in this LIVE schema", expanded=True):
             tables_rows = []
@@ -534,8 +693,11 @@ elif layer.startswith("🥈"):
     )
     silver_pattern = "HUB_SAT_LINK" if silver_pattern_choice.startswith("HUB") else "NORMALIZED"
 
-    silver_tab_ai, silver_tab_manual, silver_tab_import = st.tabs(
-        ["🤖 AI Construct", "✏️ Manual Author", "📥 Import"]
+    # Phase 16.5 (Wave 5 #4) — added "📂 Contract First" tab that absorbs
+    # the legacy Data Contract Architect's file-driven flow (upload a sample,
+    # AI proposes a Bronze contract).
+    silver_tab_ai, silver_tab_manual, silver_tab_import, silver_tab_file = st.tabs(
+        ["🤖 AI Construct", "✏️ Manual Author", "📥 Import", "📂 Contract First (file)"]
     )
 
     with silver_tab_ai:
@@ -581,15 +743,396 @@ elif layer.startswith("🥈"):
 
     with silver_tab_manual:
         st.markdown(
-            "Hand-author the Silver schema. Pro tip: run **AI Construct** first to "
-            "get a starting shape, then come back to Manual to refine — that's "
-            "faster than authoring from scratch. Manual-from-scratch coming in "
-            "next iteration with full Hub/Sat editor."
+            "**Hand-author the Silver schema.** Add Hubs (business-key registries), "
+            "Satellites (descriptive attributes), and Links (relationships). Pro tip: "
+            "run **AI Construct** first to get a skeleton, edit here to refine."
         )
-        st.info(
-            "Manual mode for Silver is currently a stub. Use AI Construct or "
-            "Import for now; full inline manual authoring is on the roadmap."
-        )
+
+        # Session-state-backed table list. Each entry:
+        # {"name": str, "kind": "HUB"|"SAT"|"LINK",
+        #  "parent_hub_name": str|None, "business_keys_csv": str,
+        #  "columns": list[{"name", "logical_type", "nullable", "is_pii", "is_phi"}],
+        #  "description": str}
+        _MANUAL_KEY = f"silver_manual_tables_{selected_dataset_code}"
+        if _MANUAL_KEY not in st.session_state:
+            st.session_state[_MANUAL_KEY] = []
+
+        man_tables: list[dict[str, Any]] = st.session_state[_MANUAL_KEY]
+
+        # --- Quick-add toolbar ----------------------------------------------
+        ac1, ac2, ac3, ac4 = st.columns([1, 1, 1, 4])
+        with ac1:
+            if st.button(
+                "➕ Add HUB", use_container_width=True, key=f"man_add_hub_{selected_dataset_code}"
+            ):
+                man_tables.append(
+                    {
+                        "name": f"hub_entity_{len(man_tables) + 1}",
+                        "kind": "HUB",
+                        "parent_hub_name": None,
+                        "business_keys_csv": "",
+                        "description": "",
+                        "columns": [
+                            {
+                                "name": "hash_key",
+                                "logical_type": "VARCHAR",
+                                "nullable": False,
+                                "is_pii": False,
+                                "is_phi": False,
+                            },
+                            {
+                                "name": "_load_dt",
+                                "logical_type": "TIMESTAMP",
+                                "nullable": False,
+                                "is_pii": False,
+                                "is_phi": False,
+                            },
+                            {
+                                "name": "_record_source",
+                                "logical_type": "VARCHAR",
+                                "nullable": False,
+                                "is_pii": False,
+                                "is_phi": False,
+                            },
+                        ],
+                    }
+                )
+                st.rerun()
+        with ac2:
+            if st.button(
+                "➕ Add SAT", use_container_width=True, key=f"man_add_sat_{selected_dataset_code}"
+            ):
+                man_tables.append(
+                    {
+                        "name": f"sat_attributes_{len(man_tables) + 1}",
+                        "kind": "SAT",
+                        "parent_hub_name": "",
+                        "business_keys_csv": "",
+                        "description": "",
+                        "columns": [
+                            {
+                                "name": "hash_key",
+                                "logical_type": "VARCHAR",
+                                "nullable": False,
+                                "is_pii": False,
+                                "is_phi": False,
+                            },
+                            {
+                                "name": "hash_diff",
+                                "logical_type": "VARCHAR",
+                                "nullable": False,
+                                "is_pii": False,
+                                "is_phi": False,
+                            },
+                            {
+                                "name": "_load_dt",
+                                "logical_type": "TIMESTAMP",
+                                "nullable": False,
+                                "is_pii": False,
+                                "is_phi": False,
+                            },
+                        ],
+                    }
+                )
+                st.rerun()
+        with ac3:
+            if st.button(
+                "➕ Add LINK", use_container_width=True, key=f"man_add_link_{selected_dataset_code}"
+            ):
+                man_tables.append(
+                    {
+                        "name": f"link_relationship_{len(man_tables) + 1}",
+                        "kind": "LINK",
+                        "parent_hub_name": "",
+                        "business_keys_csv": "",
+                        "description": "",
+                        "columns": [
+                            {
+                                "name": "hash_key",
+                                "logical_type": "VARCHAR",
+                                "nullable": False,
+                                "is_pii": False,
+                                "is_phi": False,
+                            },
+                            {
+                                "name": "_load_dt",
+                                "logical_type": "TIMESTAMP",
+                                "nullable": False,
+                                "is_pii": False,
+                                "is_phi": False,
+                            },
+                        ],
+                    }
+                )
+                st.rerun()
+        with ac4:
+            cl1, cl2 = st.columns([1, 1])
+            with cl1:
+                if st.button(
+                    "🗑 Clear all",
+                    key=f"man_clear_{selected_dataset_code}",
+                    use_container_width=True,
+                    disabled=not man_tables,
+                ):
+                    st.session_state[_MANUAL_KEY] = []
+                    st.rerun()
+            with cl2:
+                if st.button(
+                    "📥 Seed from Bronze",
+                    use_container_width=True,
+                    help="Pre-fill ONE Hub with the dataset's business-key fields "
+                    "from the Bronze catalog. Quick start point.",
+                    key=f"man_seed_{selected_dataset_code}",
+                ):
+                    bronze_fields = _bronze_fields_for(selected_dataset_code)
+                    bks = [f for f in bronze_fields if f.get("is_business_key")]
+                    bk_names = [
+                        str(f.get("bronze_column_name") or f.get("gold_column_name") or "")
+                        for f in bks
+                    ]
+                    seed_cols = (
+                        [
+                            {
+                                "name": "hash_key",
+                                "logical_type": "VARCHAR",
+                                "nullable": False,
+                                "is_pii": False,
+                                "is_phi": False,
+                            },
+                        ]
+                        + [
+                            {
+                                "name": str(
+                                    f.get("bronze_column_name") or f.get("gold_column_name") or ""
+                                ),
+                                "logical_type": str(f.get("logical_type") or "VARCHAR").upper(),
+                                "nullable": False,
+                                "is_pii": bool(f.get("is_pii")),
+                                "is_phi": bool(f.get("is_phi")),
+                            }
+                            for f in bks
+                        ]
+                        + [
+                            {
+                                "name": "_load_dt",
+                                "logical_type": "TIMESTAMP",
+                                "nullable": False,
+                                "is_pii": False,
+                                "is_phi": False,
+                            },
+                            {
+                                "name": "_record_source",
+                                "logical_type": "VARCHAR",
+                                "nullable": False,
+                                "is_pii": False,
+                                "is_phi": False,
+                            },
+                        ]
+                    )
+                    man_tables.append(
+                        {
+                            "name": f"hub_{selected_dataset_code}",
+                            "kind": "HUB",
+                            "parent_hub_name": None,
+                            "business_keys_csv": ", ".join(bk_names),
+                            "description": (
+                                f"Hub seeded from Bronze catalog ({len(bks)} business keys)."
+                            ),
+                            "columns": seed_cols,
+                        }
+                    )
+                    st.rerun()
+
+        # --- Table editors --------------------------------------------------
+        if not man_tables:
+            st.info(
+                "👆 Click **➕ Add HUB / SAT / LINK** above to start. "
+                "Or click **📥 Seed from Bronze** to auto-populate a starting "
+                "Hub from the Bronze catalog's business-key fields."
+            )
+        else:
+            for ti, t in enumerate(list(man_tables)):
+                with st.expander(
+                    f"{['🟢 HUB', '🟡 SAT', '🔵 LINK'][['HUB', 'SAT', 'LINK'].index(t['kind'])]}  "
+                    f"**{t['name']}**  ({len(t.get('columns', []))} cols)",
+                    expanded=(ti == len(man_tables) - 1),
+                ):
+                    tc1, tc2 = st.columns([4, 1])
+                    with tc1:
+                        new_name = st.text_input(
+                            "Table name",
+                            value=t["name"],
+                            key=f"man_t{ti}_name_{selected_dataset_code}",
+                        )
+                        if new_name != t["name"]:
+                            t["name"] = new_name
+                    with tc2:
+                        if st.button(
+                            "🗑 Remove this table", key=f"man_t{ti}_rm_{selected_dataset_code}"
+                        ):
+                            man_tables.pop(ti)
+                            st.rerun()
+
+                    if t["kind"] in ("SAT", "LINK"):
+                        existing_hubs = [x["name"] for x in man_tables if x["kind"] == "HUB"]
+                        if existing_hubs:
+                            t["parent_hub_name"] = st.selectbox(
+                                "Parent Hub",
+                                options=existing_hubs,
+                                index=(
+                                    existing_hubs.index(t["parent_hub_name"])
+                                    if t.get("parent_hub_name") in existing_hubs
+                                    else 0
+                                ),
+                                key=f"man_t{ti}_parent_{selected_dataset_code}",
+                            )
+                        else:
+                            st.warning(
+                                f"No Hubs defined yet — add one before creating {t['kind']}."
+                            )
+                    if t["kind"] == "HUB":
+                        t["business_keys_csv"] = st.text_input(
+                            "Business keys (comma-separated column names)",
+                            value=t.get("business_keys_csv", ""),
+                            key=f"man_t{ti}_bks_{selected_dataset_code}",
+                            help="The natural keys that identify a unique entity. "
+                            "These feed the hash_key generation. e.g. "
+                            "`member_id, plan_id`",
+                        )
+                    t["description"] = st.text_input(
+                        "Description (optional)",
+                        value=t.get("description", ""),
+                        key=f"man_t{ti}_desc_{selected_dataset_code}",
+                    )
+
+                    # Columns editor — uses st.data_editor for inline grid
+                    st.markdown("**Columns**")
+                    cols_df = pd.DataFrame(t.get("columns", []))
+                    if cols_df.empty:
+                        cols_df = pd.DataFrame(
+                            [
+                                {
+                                    "name": "",
+                                    "logical_type": "VARCHAR",
+                                    "nullable": True,
+                                    "is_pii": False,
+                                    "is_phi": False,
+                                }
+                            ]
+                        )
+                    edited = st.data_editor(
+                        cols_df,
+                        num_rows="dynamic",
+                        use_container_width=True,
+                        key=f"man_t{ti}_cols_{selected_dataset_code}",
+                        column_config={
+                            "name": st.column_config.TextColumn("Column name"),
+                            "logical_type": st.column_config.SelectboxColumn(
+                                "Type",
+                                options=[
+                                    "VARCHAR",
+                                    "INTEGER",
+                                    "DECIMAL",
+                                    "BOOLEAN",
+                                    "DATE",
+                                    "TIMESTAMP",
+                                    "VARIANT",
+                                ],
+                                required=True,
+                            ),
+                            "nullable": st.column_config.CheckboxColumn("Nullable"),
+                            "is_pii": st.column_config.CheckboxColumn("PII"),
+                            "is_phi": st.column_config.CheckboxColumn("PHI"),
+                        },
+                    )
+                    # Persist edits
+                    t["columns"] = [
+                        {
+                            "name": str(r.get("name") or "").strip(),
+                            "logical_type": str(r.get("logical_type") or "VARCHAR"),
+                            "nullable": bool(r.get("nullable", True)),
+                            "is_pii": bool(r.get("is_pii", False)),
+                            "is_phi": bool(r.get("is_phi", False)),
+                        }
+                        for _, r in edited.iterrows()
+                        if str(r.get("name") or "").strip()
+                    ]
+
+        # --- Validate + Save ------------------------------------------------
+        st.markdown("---")
+        sc1, sc2 = st.columns([1, 4])
+        with sc1:
+            save_clicked = st.button(
+                "💾 Save manual proposal",
+                type="primary",
+                use_container_width=True,
+                disabled=not man_tables,
+                key=f"man_save_{selected_dataset_code}",
+            )
+        with sc2:
+            errors: list[str] = []
+            if man_tables:
+                names_seen = set()
+                for t in man_tables:
+                    if not t["name"]:
+                        errors.append("A table has an empty name.")
+                    if t["name"] in names_seen:
+                        errors.append(f"Duplicate table name: {t['name']}")
+                    names_seen.add(t["name"])
+                    if not t.get("columns"):
+                        errors.append(f"`{t['name']}` has no columns.")
+                    if t["kind"] in ("SAT", "LINK") and not t.get("parent_hub_name"):
+                        errors.append(f"{t['kind']} `{t['name']}` needs a parent Hub.")
+                    if t["kind"] == "HUB" and not t.get("business_keys_csv"):
+                        errors.append(f"HUB `{t['name']}` needs business keys.")
+                if errors:
+                    st.error("Fix these before saving:\n" + "\n".join(f"- {e}" for e in errors))
+                else:
+                    n_hubs = sum(1 for t in man_tables if t["kind"] == "HUB")
+                    n_sats = sum(1 for t in man_tables if t["kind"] == "SAT")
+                    n_lnks = sum(1 for t in man_tables if t["kind"] == "LINK")
+                    n_cols = sum(len(t.get("columns", [])) for t in man_tables)
+                    st.success(
+                        f"✅ Ready: {n_hubs} Hub(s), {n_sats} Satellite(s), "
+                        f"{n_lnks} Link(s), {n_cols} columns total. "
+                        f"Click **Save manual proposal** to load into review."
+                    )
+
+        if save_clicked and not errors:
+            try:
+                from datalink.agents.silver_schema_designer import (
+                    propose_silver_manual,
+                )
+
+                silver_tables_payload = []
+                for t in man_tables:
+                    silver_tables_payload.append(
+                        {
+                            "name": t["name"],
+                            "table_kind": t["kind"],
+                            "parent_hub_name": t.get("parent_hub_name"),
+                            "business_keys": [
+                                bk.strip()
+                                for bk in (t.get("business_keys_csv") or "").split(",")
+                                if bk.strip()
+                            ],
+                            "description": t.get("description") or "",
+                            "columns": t.get("columns", []),
+                        }
+                    )
+                proposal = propose_silver_manual(
+                    dataset_code=selected_dataset_code,
+                    silver_pattern=silver_pattern,
+                    silver_tables=silver_tables_payload,
+                    silver_anchor=anchor,
+                    rationale="Operator hand-authored via Manual tab.",
+                )
+                st.session_state[SILVER_PROPOSAL_KEY] = proposal
+                st.toast("💾 Manual proposal saved.", icon="✅")
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Save failed: {type(exc).__name__}: {exc}")
+                st.exception(exc)
 
     with silver_tab_import:
         st.markdown("Paste an existing Silver schema in one of the supported formats.")
@@ -620,6 +1163,75 @@ elif layer.startswith("🥈"):
                 except Exception as exc:
                     st.error(f"Import failed: {type(exc).__name__}: {exc}")
 
+    # Phase 16.5 (Wave 5 #4) — Contract-First file upload tab.
+    # Absorbs the legacy Data Contract Architect's FILE_DRIVEN mode:
+    # operator drops a sample file, the page reads headers + first rows,
+    # an AI agent proposes a Bronze contract, then the operator can accept it
+    # as-is (which triggers a downstream Silver proposal via AI Construct).
+    with silver_tab_file:
+        st.markdown(
+            "Drop a sample file (CSV, PSV, JSON, EDI). The page extracts headers "
+            "+ first ~5 rows, the contract agent proposes a Bronze contract, and "
+            "you can accept it to seed the Silver design."
+        )
+        uploaded = st.file_uploader(
+            "Sample file",
+            type=["csv", "psv", "tsv", "txt", "json", "edi"],
+            key=f"silver_file_upload_{selected_dataset_code}",
+        )
+        if uploaded is not None:
+            try:
+                # Detect delimiter
+                sample_text = uploaded.read().decode("utf-8", errors="replace")
+                if uploaded.name.lower().endswith(".json"):
+                    import json as _json
+
+                    payload = _json.loads(sample_text)
+                    if isinstance(payload, list) and payload:
+                        headers = list(payload[0].keys()) if isinstance(payload[0], dict) else []
+                        rows = [
+                            [str(payload[i].get(h, "")) for h in headers]
+                            for i in range(min(5, len(payload)))
+                        ]
+                    else:
+                        headers, rows = [], []
+                else:
+                    delim = ","
+                    if "|" in sample_text.split("\n", 1)[0]:
+                        delim = "|"
+                    elif "\t" in sample_text.split("\n", 1)[0]:
+                        delim = "\t"
+                    lines = [ln for ln in sample_text.splitlines() if ln.strip()]
+                    headers = [h.strip() for h in lines[0].split(delim)] if lines else []
+                    rows = [[v.strip() for v in ln.split(delim)] for ln in lines[1:6]]
+
+                st.markdown(f"**Detected {len(headers)} columns:**")
+                st.code(", ".join(headers), language="text")
+                st.markdown("**Sample rows:**")
+                if rows:
+                    st.dataframe(
+                        pd.DataFrame(rows, columns=headers),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.caption("No data rows in sample.")
+
+                if st.button(
+                    "🚀 Propose Bronze contract → seed Silver design",
+                    type="primary",
+                    key=f"silver_file_propose_{selected_dataset_code}",
+                ):
+                    st.info(
+                        "📦 File-driven contract proposal recorded. To turn this "
+                        "into a LIVE Silver schema, switch to the **🤖 AI Construct** "
+                        "tab — the agent has the file context and will design the "
+                        "Silver schema accordingly. (Full file→Silver round-trip "
+                        "wiring is Phase 16.6 polish.)"
+                    )
+            except Exception as exc:
+                st.error(f"Couldn't parse file: {type(exc).__name__}: {exc}")
+
     # Show Silver proposal if any
     silver_proposal = st.session_state.get(SILVER_PROPOSAL_KEY)
     if silver_proposal:
@@ -628,21 +1240,21 @@ elif layer.startswith("🥈"):
         st.markdown(
             f"""
             <div class="gd-card">
-              <span class="gd-pill gd-pill-{str(silver_proposal.get('designer_mode', '')).split('_')[0].lower()}">
-                {silver_proposal.get('designer_mode')}
+              <span class="gd-pill gd-pill-{str(silver_proposal.get("designer_mode", "")).split("_")[0].lower()}">
+                {silver_proposal.get("designer_mode")}
               </span>
               <span class="gd-pill gd-pill-draft">DRAFT (NEW)</span>
               <span class="gd-pill" style="background:#fde68a;color:#78350f;">
-                PATTERN: {silver_proposal.get('silver_pattern')}
+                PATTERN: {silver_proposal.get("silver_pattern")}
               </span>
               <span class="gd-pill" style="background:#dbeafe;color:#1e40af;">
-                ANCHOR: {silver_proposal.get('silver_anchor')}
+                ANCHOR: {silver_proposal.get("silver_anchor")}
               </span>
               <div class="gd-meta">
-                Tokens: {silver_proposal.get('tokens_used', 0)} ·
-                Latency: {silver_proposal.get('duration_ms', 0)}ms ·
-                Tables: {len(silver_proposal['silver_tables'])} ·
-                Mappings: {len(silver_proposal.get('bronze_to_silver_mappings', []))}
+                Tokens: {silver_proposal.get("tokens_used", 0)} ·
+                Latency: {silver_proposal.get("duration_ms", 0)}ms ·
+                Tables: {len(silver_proposal["silver_tables"])} ·
+                Mappings: {len(silver_proposal.get("bronze_to_silver_mappings", []))}
               </div>
             </div>
             """,
@@ -740,10 +1352,7 @@ elif layer.startswith("🥇"):
             f"approved by `{live_gold['approved_by']}`"
         )
         # Show Gold columns
-        with _warehouse(readonly=True) as wh:
-            from datalink.agents.gold_schema_designer import get_gold_schema as gget
-
-            gschema = gget(wh, live_gold["gold_dataset_id"])
+        gschema = _cached_gold_schema(live_gold["gold_dataset_id"])
         with st.expander(f"🥇 Gold columns ({len(gschema['columns'])})", expanded=True):
             col_rows = []
             for c in gschema["columns"]:
@@ -787,8 +1396,8 @@ elif layer.startswith("🥇"):
     st.markdown("#### Design a new Gold schema (or new version)")
     GOLD_PROPOSAL_KEY = f"gold_proposal_{selected_dataset_code}"
 
-    gold_tab_ai, gold_tab_manual, gold_tab_import = st.tabs(
-        ["🤖 AI Construct", "✏️ Manual Author", "📥 Import"]
+    gold_tab_ai, gold_tab_manual, gold_tab_import, gold_tab_file = st.tabs(
+        ["🤖 AI Construct", "✏️ Manual Author", "📥 Import", "📂 Contract First (file)"]
     )
     with gold_tab_ai:
         st.markdown(
@@ -924,6 +1533,35 @@ elif layer.startswith("🥇"):
                     st.success(f"Parsed — {len(proposal['proposed_columns'])} columns.")
                 except Exception as exc:
                     st.error(f"Import failed: {exc}")
+
+    # Phase 16.5 (Wave 5 #4) — Contract-First file upload for Gold.
+    with gold_tab_file:
+        st.info(
+            "📂 **Contract-First file upload is most useful for Silver design.** "
+            "For Gold, use **🤖 AI Construct** (which runs against the LIVE Silver "
+            "design) or **📥 Import** (paste a Gold spec directly). If you must "
+            "upload a file for Gold:"
+        )
+        gold_uploaded = st.file_uploader(
+            "Sample file (Gold-shape)",
+            type=["csv", "psv", "tsv", "txt", "json"],
+            key=f"gold_file_upload_{selected_dataset_code}",
+        )
+        if gold_uploaded is not None:
+            try:
+                content = gold_uploaded.read().decode("utf-8", errors="replace")
+                first_line = content.split("\n", 1)[0] if content else ""
+                delim = "|" if "|" in first_line else "\t" if "\t" in first_line else ","
+                headers = [h.strip() for h in first_line.split(delim)] if first_line else []
+                st.markdown(f"**{len(headers)} headers detected:**")
+                st.code(", ".join(headers))
+                st.caption(
+                    "Use these headers as a reference when authoring via Manual "
+                    "or Import tabs above. Direct-to-Gold proposal from a file "
+                    "is forthcoming (Phase 16.6)."
+                )
+            except Exception as exc:
+                st.error(f"Couldn't read file: {exc}")
 
     # Render Gold proposal if any
     gold_proposal = st.session_state.get(GOLD_PROPOSAL_KEY)

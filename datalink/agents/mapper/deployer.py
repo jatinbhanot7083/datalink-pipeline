@@ -200,7 +200,7 @@ def list_deployments(
             {"s": session_id, "lim": limit},
         )
     return warehouse.query(
-        f"SELECT * FROM {CONTROL_SCHEMA}.mapping_artifacts " "ORDER BY deployed_at DESC LIMIT $lim",
+        f"SELECT * FROM {CONTROL_SCHEMA}.mapping_artifacts ORDER BY deployed_at DESC LIMIT $lim",
         {"lim": limit},
     )
 

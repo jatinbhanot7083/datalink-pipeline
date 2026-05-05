@@ -42,13 +42,17 @@ st.set_page_config(
 
 from datalink.agents.llm_router import get_llm  # noqa: E402
 from datalink.agents.pipeline_architect import (  # noqa: E402
+    PipelinePrerequisitesError,
     approve_and_deploy,
+    check_pipeline_prerequisites,
     list_client_instances,
     list_dataset_codes,
     persist_proposal,
     propose_pipeline,
 )
 from datalink.config.loader import load_settings  # noqa: E402
+from datalink.proposals import store as proposal_store  # noqa: E402  Phase 16.1
+from datalink.proposals.store import ProposalStatus  # noqa: E402
 from datalink.quality.control import create_control_tables  # noqa: E402
 from datalink.ui._nav import render_sidebar, require_client  # noqa: E402
 from datalink.ui._query import warehouse_ctx  # noqa: E402
@@ -94,6 +98,22 @@ st.markdown(
       .arch-route-row {{padding:.4rem .6rem;border-radius:4px;background:#f8fafc;
                         border-left:3px solid {_AGENT_BLUE};margin:.2rem 0;}}
       .arch-route-row.disabled {{border-left-color:{_RED};opacity:.6;}}
+
+      /* Phase 16.1 — saved-proposal banner */
+      .saved-prop-card {{background:linear-gradient(90deg,#fffbeb,#fef3c7);
+                         border:1px solid #fbbf24;border-left:5px solid #d97706;
+                         border-radius:8px;padding:1rem 1.2rem;margin:.8rem 0 1.2rem 0;
+                         box-shadow:0 1px 4px rgba(0,0,0,.06);}}
+      .saved-prop-card.approved {{background:linear-gradient(90deg,#f0fdf4,#dcfce7);
+                                  border-color:#86efac;border-left-color:#15803d;}}
+      .saved-prop-card .saved-prop-headline {{font-size:1rem;font-weight:700;
+                                               color:#0a1a3e;margin-bottom:.25rem;}}
+      .saved-prop-card .saved-prop-meta {{font-size:.85rem;color:#475569;}}
+      .saved-prop-card code {{background:#fff;padding:1px 4px;border-radius:3px;
+                              font-size:.8rem;}}
+      .tag-pill {{display:inline-block;padding:.1rem .5rem;border-radius:10px;
+                  font-size:.7rem;font-weight:600;color:#fff;
+                  margin-right:.25rem;margin-bottom:.15rem;}}
     </style>
     """,
     unsafe_allow_html=True,
@@ -131,6 +151,103 @@ st.markdown(
 )
 
 selected_client = require_client()
+
+# Phase 16.9 — special-case the __global__ pseudo-client. This is where AI
+# spends tokens ONCE per dataset to build the canonical pipeline template.
+# All real clients clone this — never spend tokens on AI again.
+GLOBAL_CLIENT = "__global__"
+_is_global_build_mode = selected_client == GLOBAL_CLIENT
+
+# Phase 16.6 — when no client is picked (default), render an "all clients"
+# overview and stop. Deploy / propose forms only render after a real client
+# is chosen from the dropdown.
+if selected_client is None:
+    with _warehouse(readonly=True) as wh:
+        all_instances = list_client_instances(wh)
+        catalog_datasets = list_dataset_codes(wh)
+
+    # Global pipelines (templates) — surface them prominently
+    global_pipelines: list[dict[str, Any]] = []
+    try:
+        from datalink.templates import store as _ts
+
+        global_pipelines = _ts.list_globals()
+    except Exception:
+        global_pipelines = []
+
+    st.markdown("### 🌍 Build a GLOBAL pipeline (template)")
+    st.caption(
+        "**Token-efficient design pattern.** AI runs ONCE per dataset to build "
+        "a canonical pipeline. All real clients clone it instantly — zero "
+        "LLM cost. Use this for any new dataset before onboarding clients."
+    )
+    gcol1, gcol2 = st.columns([1, 4])
+    with gcol1:
+        # st.page_link rejects query-string URLs on internal paths. Use a
+        # plain anchor so we can pass ?client=__global__ deep-link.
+        st.markdown(
+            '<a href="/Pipeline_Architect?client=__global__" target="_self" '
+            'style="display:inline-block;background:#0a1a3e;color:#fff;'
+            "padding:.6rem 1.2rem;border-radius:8px;text-decoration:none;"
+            'font-weight:700;width:100%;text-align:center;">'
+            "🌍 Open Global Builder →</a>",
+            unsafe_allow_html=True,
+        )
+    with gcol2:
+        if global_pipelines:
+            st.success(
+                f"📦 **{len(global_pipelines)} global pipeline(s) published**: "
+                + ", ".join(
+                    f"`{g.get('dataset_code')}` v{g.get('pipeline_version', '?')}"
+                    for g in global_pipelines
+                    if g.get("pipeline_version")
+                )
+                + ". Real clients can clone these in one click."
+            )
+        else:
+            st.info(
+                "No global pipeline templates published yet. **Build one** "
+                "with the button to the left, then onboard real clients via clone."
+            )
+
+    st.markdown("---")
+    st.info(
+        "🌐 **All-clients view.** Pick a real client from the dropdown above "
+        "(or the URL `?client=`) to **propose / deploy / clone** a pipeline "
+        "for that tenant. The table below shows every pipeline instance "
+        "across the platform."
+    )
+    cols = st.columns(3)
+    with cols[0]:
+        st.metric("Bronze datasets", len(catalog_datasets))
+    with cols[1]:
+        st.metric("LIVE pipelines", sum(1 for i in all_instances if i.get("status") == "LIVE"))
+    with cols[2]:
+        st.metric(
+            "Onboarded clients",
+            len({i.get("client_id") for i in all_instances if i.get("client_id")}),
+        )
+
+    st.markdown("### 🏛 All pipelines (every client, every dataset)")
+    if all_instances:
+        df = pd.DataFrame(
+            [
+                {
+                    "Client": i.get("client_id"),
+                    "Dataset": i.get("dataset_code"),
+                    "Status": i.get("status"),
+                    "Anchor": i.get("bronze_anchor"),
+                    "Gold table": f"{i.get('gold_schema')}.{i.get('gold_table')}",
+                    "Schedule": i.get("schedule_cron"),
+                    "Deployed": str(i.get("deployed_at") or "—")[:19],
+                }
+                for i in all_instances
+            ]
+        )
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No pipelines deployed yet platform-wide.")
+    st.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +386,182 @@ with col_sched:
         help="Airflow schedule expression. Default: daily at 04:00 UTC.",
     )
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 16.7 — GLOBAL TEMPLATE PRIORITY PICKER
+#
+# Architecture: every dataset has a CANONICAL global template (Bronze + Silver
+# + Gold + DAG + GX). Operators clone from global by default — zero LLM tokens,
+# 70-80% of pipelines are identical across clients. AI proposal is opt-in
+# (only when the operator explicitly selects "AI Construct" because they need
+# a brand-new pipeline that diverges from global).
+# ═════════════════════════════════════════════════════════════════════════════
+
+from datalink.templates import store as template_store  # noqa: E402
+
+_global_status = template_store.has_global(selected_dataset_code)
+_has_global_pipeline = _global_status.get("pipeline", False)
+_has_global_silver = _global_status.get("silver", False)
+_has_global_gold = _global_status.get("gold", False)
+
+st.markdown("---")
+st.markdown("### 🧬 Choose source — **Global template is the priority path**")
+
+# Source picker: clone-global is default + first option when global exists.
+SOURCE_CLONE = "📦 Clone from Global (no LLM tokens)"
+SOURCE_AI = "🤖 AI Construct (LLM, ~$0.002 per propose)"
+SOURCE_MANUAL = "✏️ Manual / Import (copy a spec)"
+
+source_options = []
+if _has_global_pipeline:
+    source_options.append(SOURCE_CLONE)
+source_options.append(SOURCE_AI)
+source_options.append(SOURCE_MANUAL)
+
+source_choice = st.radio(
+    "Source",
+    options=source_options,
+    index=0,  # default = first option (clone if available, AI otherwise)
+    help=(
+        "Clone-from-global is FREE — instantiates the canonical pipeline "
+        "for this client. AI Construct spends LLM tokens to design a new "
+        "version. Manual lets you paste a spec or DDL."
+    ),
+)
+
+
+# Show global template status pills.
+# Phase 16.9 — wording clarified so it doesn't conflict with the Upstream
+# Readiness panel below. This panel is about the GLOBAL TEMPLATE
+# (canonical clone source); the Upstream Readiness panel is about whether
+# Silver/Gold SCHEMAS exist for the dataset (which they may, regardless
+# of global-template status).
+def _pill(label: str, ok: bool) -> str:
+    cls = "arch-pill-live" if ok else "arch-pill-dev"
+    return f'<span class="arch-pill {cls}">{label}</span>'
+
+
+# Three components of a "complete global template": Silver schema + Gold
+# schema + Pipeline blob. Silver+Gold may already be published (any LIVE
+# Silver/Gold authored in DMD defaults to scope_owner='__global__'); the
+# pipeline part requires deploying once + publishing to global.
+all_three_published = _has_global_silver and _has_global_gold and _has_global_pipeline
+some_published = _has_global_silver or _has_global_gold or _has_global_pipeline
+
+if all_three_published:
+    bg, border, header_icon = "#dcfce7", "#15803d", "✅"
+    headline = "Global template COMPLETE for"
+    subtext = (
+        "All three components published. Real clients see "
+        "<strong>📦 Clone from Global</strong> as their default — "
+        "zero LLM cost to onboard."
+    )
+elif some_published:
+    bg, border, header_icon = "#fef3c7", "#b45309", "🟡"
+    headline = "Global template PARTIAL for"
+    missing = []
+    if not _has_global_silver:
+        missing.append("Silver schema")
+    if not _has_global_gold:
+        missing.append("Gold schema")
+    if not _has_global_pipeline:
+        missing.append("Pipeline (deploy + publish)")
+    subtext = (
+        f"Still needed: <strong>{', '.join(missing)}</strong>. "
+        f"Switch to <strong>🌍 Global Builder</strong> mode "
+        f"(URL <code>?client=__global__</code>) to finish the template "
+        f"with one AI deploy."
+    )
+else:
+    bg, border, header_icon = "#fee2e2", "#991b1b", "🚫"
+    headline = "No global template yet for"
+    subtext = (
+        "Author Silver+Gold (cross-tenant designs) in <strong>Data Model "
+        "Designer</strong>, then run the AI pipeline build ONCE in "
+        "<strong>🌍 Global Builder</strong> (<code>?client=__global__</code>). "
+        "After that, all real clients clone instantly."
+    )
+
+st.markdown(
+    f"""
+    <div style="background:{bg};border:1px solid {border};
+                border-left:5px solid {border};
+                border-radius:8px;padding:.8rem 1.2rem;margin:.5rem 0 1rem 0;">
+      <div style="font-size:.95rem;font-weight:700;color:#0a1a3e;margin-bottom:.4rem;">
+        {header_icon} {headline} <code>{selected_dataset_code}</code>
+      </div>
+      <div>
+        {_pill("Silver schema", _has_global_silver)}
+        {_pill("Gold schema", _has_global_gold)}
+        {_pill("Pipeline template", _has_global_pipeline)}
+      </div>
+      <div style="margin-top:.5rem;font-size:.85rem;color:#475569;">
+        {subtext}
+      </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if source_choice == SOURCE_CLONE and _has_global_pipeline:
+    g = template_store.get_global(selected_dataset_code)
+    pipe = g.get("pipeline", {})
+    st.markdown(
+        f"**Will clone from:** `{pipe.get('template_id', '?')}` "
+        f"(v{pipe.get('version', '?')}) · "
+        f"{g.get('artifact_blob_count', 0)} stored artifact blobs · "
+        f"Silver v{(g.get('silver') or {}).get('version', '?')} · "
+        f"Gold v{(g.get('gold') or {}).get('version', '?')}"
+    )
+    if st.button(
+        f"📦 Clone Global → `{selected_client}` (instantiate, no LLM call)",
+        type="primary",
+        use_container_width=False,
+    ):
+        try:
+            with st.spinner("Cloning global template..."):
+                result = template_store.clone_to_client(
+                    dataset_code=selected_dataset_code,
+                    target_client_id=selected_client,
+                    actor=f"ui:{selected_client}",
+                    notes="Cloned via Pipeline Architect's Global priority path",
+                )
+            st.success(
+                f"📦 **Cloned successfully** — DRAFT instance "
+                f"`{result['pipeline_instance_id'][:8]}…` created. "
+                f"{len(result['artifacts_written'])} artifact files written. "
+                f"Use **Approve & Deploy** below to materialize physical Snowflake tables."
+            )
+            with st.expander("Cloned artifacts"):
+                for f in result["artifacts_written"]:
+                    st.code(f, language="text")
+            st.info(
+                "💡 **No LLM tokens spent.** All artifacts came from the "
+                "canonical global template — edit them in `dbt/models/...` "
+                "or per-client overrides before deploy if needed."
+            )
+        except Exception as exc:
+            st.error(f"Clone failed: {type(exc).__name__}: {exc}")
+
+elif source_choice == SOURCE_MANUAL:
+    st.info(
+        "✏️ **Manual / Import mode.** Paste a Bronze/Silver/Gold spec into "
+        "Data Model Designer's Import tab, then return here to deploy. "
+        "Or: edit the cloned global artifacts after a Clone action."
+    )
+    st.markdown(
+        f'<a href="/Data_Model_Designer?client={selected_client}&dataset='
+        f'{selected_dataset_code}" target="_self">'
+        f"🥇 → Open Data Model Designer (Import / Manual)</a>",
+        unsafe_allow_html=True,
+    )
+
+# When source_choice == SOURCE_AI, the legacy Propose form below is the path —
+# user clicks Propose pipeline button as before (LLM call). Otherwise the form
+# is hidden via the gate.
+_use_ai_propose = source_choice == SOURCE_AI
+
+st.markdown("---")
+
 # Peer instances panel — show what's already live for this dataset
 peer_instances = [i for i in all_instances if i.get("dataset_code") == selected_dataset_code]
 if peer_instances:
@@ -288,31 +581,229 @@ if peer_instances:
         )
     st.dataframe(pd.DataFrame(pdf_rows), use_container_width=True, hide_index=True)
 else:
-    st.info(
-        f"No peer client has the **{selected_dataset_display}** dataset live yet. "
-        f"This deployment will be the **first instance** — future clients can clone from it."
+    if _is_global_build_mode:
+        st.info(
+            f"🌍 **Global Builder mode** — AI will build the canonical "
+            f"`{selected_dataset_display}` pipeline ONCE. Schemas: "
+            f"`BRONZE_GLOBAL` / `SILVER_GLOBAL` / `GOLD_GLOBAL`. "
+            f"DAG deploys **PAUSED** (no data ever flows here). After deploy, "
+            f"the pipeline auto-publishes to global so real clients can clone."
+        )
+    else:
+        st.info(
+            f"No peer client has the **{selected_dataset_display}** dataset live yet. "
+            f"This deployment will be the **first instance** — future clients can clone from it."
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 16.1 (Item 1.C + 1.D) — UPSTREAM PREREQUISITES GATE
+#
+# Pipeline Architect is a CONSUMER of Data Model Designer's LIVE Silver and
+# Gold schemas. It REFUSES to propose unless both upstream schemas are LIVE
+# in the registry (or the operator opts into "Silver-stop" mode).
+#
+# Bronze catalog is the source for Data Model Designer, NOT for us.
+# ---------------------------------------------------------------------------
+
+st.markdown("---")
+st.markdown("### 📋 Upstream readiness")
+
+with _warehouse(readonly=True) as wh:
+    try:
+        prereqs = check_pipeline_prerequisites(wh, selected_dataset_code)
+    except Exception as exc:
+        st.error(f"Could not check prerequisites: {exc}")
+        prereqs = {
+            "ready_for_propose": False,
+            "ready_for_silver_stop": False,
+            "silver_live": False,
+            "gold_live": False,
+            "missing": ["silver", "gold"],
+            "next_steps": [str(exc)],
+        }
+
+
+def _ready_pill(label: str, ok: bool, version: int | None = None) -> str:
+    if ok:
+        v = f" v{version}" if version else ""
+        return f'<span class="arch-pill arch-pill-live">{label}-LIVE{v}</span>'
+    return f'<span class="arch-pill arch-pill-dev">{label}-MISSING</span>'
+
+
+# Render the readiness card. Fix the colors per state so it's unmistakeable.
+_silver_ok = bool(prereqs["silver_live"])
+_gold_ok = bool(prereqs["gold_live"])
+if _silver_ok and _gold_ok:
+    _state_color = "#dcfce7"  # emerald wash
+    _state_border = "#15803d"
+    _state_icon = "✅"
+    _state_text = (
+        "<strong>Both schemas LIVE</strong> for "
+        f"<code>{selected_dataset_display}</code>. Pipeline Architect can "
+        "consume them — Propose enabled."
+    )
+elif _silver_ok and not _gold_ok:
+    _state_color = "#fef3c7"  # amber wash
+    _state_border = "#b45309"
+    _state_icon = "⚠️"
+    _state_text = (
+        f"<strong>Silver LIVE, Gold MISSING</strong> for <code>{selected_dataset_display}</code>. "
+        "Author Gold in Data Model Designer for full Bronze→Silver→Gold, OR "
+        "tick <em>Silver-stop pipeline</em> below to deploy without Gold "
+        "materialization."
+    )
+elif not _silver_ok and _gold_ok:
+    _state_color = "#fee2e2"  # red wash
+    _state_border = "#991b1b"
+    _state_icon = "🚫"
+    _state_text = (
+        f"<strong>Gold LIVE but Silver MISSING</strong> for <code>{selected_dataset_display}</code>. "
+        "Gold without Silver isn't supported — author Silver in Data Model "
+        "Designer first. Pipeline Architect is REFUSING to propose."
+    )
+else:
+    _state_color = "#fee2e2"  # red wash
+    _state_border = "#991b1b"
+    _state_icon = "🚫"
+    _state_text = (
+        f"<strong>Neither Silver nor Gold is LIVE</strong> for "
+        f"<code>{selected_dataset_display}</code>. Open Data Model Designer "
+        "to author both schemas first. Pipeline Architect is REFUSING to "
+        "propose."
+    )
+
+_silver_v = prereqs.get("silver_version")
+_gold_v = prereqs.get("gold_version")
+st.markdown(
+    f"""
+    <div style="background:{_state_color};border:1px solid {_state_border};
+                border-left:5px solid {_state_border};border-radius:8px;
+                padding:1rem 1.2rem;margin:.5rem 0 1rem 0;">
+      <div style="font-size:1rem;font-weight:700;color:#0a1a3e;margin-bottom:.4rem;">
+        {_state_icon} Upstream readiness for <code>{selected_dataset_code}</code>
+      </div>
+      <div style="margin-bottom:.5rem;">
+        {_ready_pill("Silver", _silver_ok, _silver_v)}
+        {_ready_pill("Gold", _gold_ok, _gold_v)}
+        {f'<span class="arch-pill arch-pill-flat">Pattern: {prereqs["silver_pattern"]}</span>' if prereqs.get("silver_pattern") else ""}
+      </div>
+      <div style="font-size:.9rem;color:#1f2937;">{_state_text}</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+# Next steps + deep-link when something's missing.
+# Phase 16.1 (Jatin's UX feedback): make the deep-link the *first* and most
+# prominent action — operator shouldn't have to scan side panel + click.
+if prereqs["missing"]:
+    _dmd_url = f"/Data_Model_Designer?client={selected_client}&dataset={selected_dataset_code}"
+    # Big call-to-action card with a direct link button + concrete step list.
+    st.markdown(
+        f"""
+        <div style="background:#1e3a8a;border-radius:8px;padding:1rem 1.2rem;
+                    margin:.5rem 0;color:#fff;display:flex;
+                    flex-direction:column;gap:.5rem;">
+          <div style="font-size:1.05rem;font-weight:700;">
+            🥇 Author the missing schema(s) in Data Model Designer
+          </div>
+          <div style="font-size:.88rem;color:#dbeafe;">
+            One click takes you there with <code>{selected_client}</code> /
+            <code>{selected_dataset_code}</code> already selected.
+          </div>
+          <a href="{_dmd_url}" target="_self" style="display:inline-block;
+                background:#fbbf24;color:#0a1a3e;font-weight:700;
+                padding:.5rem 1rem;border-radius:6px;text-decoration:none;
+                width:fit-content;margin-top:.25rem;">
+            🚀 Open Data Model Designer →
+          </a>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    with st.expander("📝 Step-by-step next-steps", expanded=False):
+        for step in prereqs["next_steps"]:
+            st.markdown(f"- {step}")
+
+# Silver-stop opt-in checkbox — ONLY shown when prerequisites would refuse
+# the propose AND Silver is LIVE (Gold missing). For other missing-states
+# Silver-stop isn't a meaningful workaround.
+allow_silver_stop = False
+if not prereqs["ready_for_propose"] and prereqs["ready_for_silver_stop"]:
+    allow_silver_stop = st.checkbox(
+        "🟡 Deploy a Silver-stop pipeline (Bronze→Silver only, no Gold)",
+        value=False,
+        help="Override: emit a pipeline that materializes Silver but stops "
+        "before Gold. Use when business consumers can wait on Gold but "
+        "Silver-cleansed data is needed downstream now.",
     )
 
 
 # ---------------------------------------------------------------------------
-# PROPOSAL ACTION — invoke agent, store proposal in session_state.
+# PROPOSAL ACTION — Phase 16.1 saved-proposal pattern.
+#
+#   1. On page load, look up any saved proposal for this (client, dataset)
+#      scope. If found, show a banner with action buttons.
+#   2. "Use Saved" → load payload from CONTROL.agent_proposals, no LLM call.
+#   3. "Re-propose" → confirmation modal showing token cost, then LLM call.
+#   4. "Discard"   → mark REJECTED, fall through to fresh-propose UI.
+#   5. Approval still flows through approve_and_deploy below; we ALSO call
+#      proposal_store.approve() to link the proposal to its instance_id.
 # ---------------------------------------------------------------------------
-
-propose_btn, _ = st.columns([1, 5])
-with propose_btn:
-    propose_clicked = st.button(
-        "🚀 Propose pipeline",
-        type="primary",
-        use_container_width=True,
-    )
 
 PROPOSAL_KEY = f"p15_proposal_{selected_client}_{selected_dataset_code}"
+PROPOSAL_ID_KEY = f"p15_proposal_id_{selected_client}_{selected_dataset_code}"
+SCOPE_TYPE = "client_dataset"
+SCOPE_KEY = f"{selected_client}:{selected_dataset_code}"
 
-if propose_clicked:
+
+def _save_proposal_to_store(proposal_dict: dict, *, parent_proposal_id: str | None = None) -> str:
+    """Persist a freshly-generated proposal into CONTROL.agent_proposals.
+
+    Returns the proposal_id. The agent today exposes only a flat
+    ``tokens_used`` total — we estimate an 80/20 input/output split for
+    cost calculation. When the agent is upgraded to expose split tokens,
+    swap the split here.
+    """
+    total = int(proposal_dict.get("tokens_used", 0))
+    # Anthropic typical ratio for our prompts ≈ 80% input / 20% output.
+    # TODO: have propose_pipeline return split tokens directly.
+    prompt_t = int(total * 0.80)
+    completion_t = total - prompt_t
+    saved = proposal_store.save_proposal(
+        agent_type="pipeline_architect",
+        scope_type=SCOPE_TYPE,
+        scope_key=SCOPE_KEY,
+        payload=proposal_dict,
+        agent_input={
+            "client_id": selected_client,
+            "dataset_code": selected_dataset_code,
+            "bronze_anchor": bronze_anchor,
+            "decision_mode": decision_mode,
+            "schedule_cron": schedule_cron,
+        },
+        prompt_tokens=prompt_t,
+        completion_tokens=completion_t,
+        model_id=str(proposal_dict.get("proposer_model", "claude-haiku-4.5")),
+        latency_ms=int(proposal_dict.get("duration_ms", 0)),
+        created_by=f"ui:{selected_client}",
+    )
+    return saved.proposal_id
+
+
+def _run_propose() -> None:
+    """Invoke the LLM, save to store + session_state. Shared by Propose
+    and Re-propose actions.
+
+    On success: stashes a "just proposed" message in session_state and
+    triggers ``st.rerun()`` so the saved-proposal banner + history table
+    refresh automatically (no manual hard-reload needed).
+    """
     with (
         st.spinner(
-            f"Agent proposing {selected_dataset_display} pipeline for {selected_client} "
-            f"(anchor={bronze_anchor}, decision={decision_mode})..."
+            f"Agent proposing {selected_dataset_display} pipeline for "
+            f"{selected_client} (anchor={bronze_anchor}, decision={decision_mode})..."
         ),
         _warehouse(readonly=False) as wh,
     ):
@@ -328,18 +819,233 @@ if propose_clicked:
                 decision_mode=decision_mode,
                 schedule_cron=schedule_cron,
                 actor=f"ui:{selected_client}",
+                allow_silver_stop=allow_silver_stop,
             )
             st.session_state[PROPOSAL_KEY] = proposal
-            st.success(
+            # Phase 16.1 — persist to CONTROL.agent_proposals so
+            # re-clicks don't burn tokens.
+            try:
+                proposal_id = _save_proposal_to_store(proposal)
+                st.session_state[PROPOSAL_ID_KEY] = proposal_id
+            except Exception as save_exc:
+                # Saving to the store is best-effort. If it fails, the
+                # propose still succeeded — log and continue. The user
+                # can still deploy from session_state.
+                st.warning(
+                    f"⚠️ Saved-proposal store unavailable: {save_exc}. "
+                    "Proposal is still usable in this session."
+                )
+            # Stash success message — st.success doesn't survive rerun, but
+            # session_state does. We pick it up after rerun and show as toast.
+            st.session_state[f"_propose_toast_{SCOPE_KEY}"] = (
                 f"Proposal ready — decision={proposal['decision_mode']}, "
-                f"{proposal['resolved_field_count']} resolved Gold columns, "
+                f"{proposal['resolved_field_count']} Gold cols, "
                 f"{proposal['gx_suite']['expectation_count']} GX expectations, "
-                f"{proposal['tokens_used']} LLM tokens, "
+                f"{proposal['tokens_used']} tokens, "
                 f"{proposal['duration_ms']}ms."
             )
+        except PipelinePrerequisitesError as exc:
+            # Caught at the bridge — translate into the readiness UI.
+            st.error(
+                f"🚫 Cannot propose pipeline for `{exc.dataset_code}`: "
+                f"upstream Silver/Gold not LIVE (missing: {exc.missing}). "
+                f"See **Upstream readiness** card above for next steps."
+            )
+            return
         except Exception as exc:
             st.error(f"Agent failed: {type(exc).__name__}: {exc}")
             st.exception(exc)
+            return  # don't rerun on failure — let the user see the error
+    # Trigger immediate rerun so the saved-proposal banner + history pick up
+    # the new row. Outside the spinner so the spinner closes first.
+    st.rerun()
+
+
+# Phase 16.1 — pick up any "just proposed" toast stashed by _run_propose()
+# before its st.rerun(). Showing here (top of page, post-rerun) means the user
+# sees the success ack without needing a manual refresh.
+_toast_key = f"_propose_toast_{SCOPE_KEY}"
+if _toast_key in st.session_state:
+    st.toast(st.session_state.pop(_toast_key), icon="✅")
+
+# Phase 16.1 — Saved-proposal banner. Renders BEFORE the Propose button.
+# Uses `find_active` which returns the latest DRAFT or APPROVED for the scope.
+try:
+    saved_active = proposal_store.find_active(scope_type=SCOPE_TYPE, scope_key=SCOPE_KEY)
+except Exception:
+    saved_active = None  # fall back to unbanner-ed flow if store unavailable
+
+if saved_active is not None:
+    is_approved = saved_active.status == ProposalStatus.APPROVED
+    age_str = saved_active.created_at.strftime("%Y-%m-%d %H:%M UTC")
+    tag_html = "".join(
+        f'<span class="tag-pill" style="background:#475569">{t}</span>' for t in saved_active.tags
+    )
+    headline_label = "✅ Approved proposal" if is_approved else "📦 Saved proposal"
+    extra_meta = ""
+    if is_approved and saved_active.linked_artifact_id:
+        extra_meta = (
+            f"<br>Linked: <code>{saved_active.linked_artifact_type}:"
+            f"{saved_active.linked_artifact_id[:8]}…</code>"
+        )
+    st.markdown(
+        f"""
+        <div class="saved-prop-card {"approved" if is_approved else ""}">
+          <div class="saved-prop-headline">
+            {headline_label} — v{saved_active.version}
+            <span style="font-size:.78rem;font-weight:500;color:#64748b;margin-left:.5rem;">
+              {age_str} · {saved_active.total_tokens:,} tokens · ${saved_active.estimated_cost_usd:.4f}
+              · by {saved_active.created_by}
+              · status: {saved_active.status.value}
+            </span>
+          </div>
+          <div class="saved-prop-meta">
+            Decision = <code>{saved_active.proposal_payload.get("decision_mode", "?")}</code>
+            &nbsp;·&nbsp;
+            {saved_active.proposal_payload.get("resolved_field_count", "?")} Gold cols
+            &nbsp;·&nbsp;
+            {saved_active.proposal_payload.get("gx_suite", {}).get("expectation_count", "?")} GX expectations
+            {extra_meta}
+            {("<br>Tags: " + tag_html) if tag_html else ""}
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    bcols = st.columns([1.4, 1.6, 1, 1.4, 4])
+    with bcols[0]:
+        use_saved_clicked = st.button(
+            "📋 Use Saved",
+            type="primary",
+            use_container_width=True,
+            help="Load the saved proposal — no LLM call, no tokens spent.",
+        )
+    with bcols[1]:
+        # Cost preview for re-propose. Use the LAST proposal's cost as the
+        # estimate (variation between runs is small).
+        last_cost = saved_active.estimated_cost_usd
+        last_tokens = saved_active.total_tokens
+        repropose_clicked = st.button(
+            f"🔄 Re-propose (~{last_tokens:,} tokens, ~${last_cost:.4f})",
+            use_container_width=True,
+            help="Spend ~tokens to regenerate. Auto-archives this saved version (unless pinned).",
+        )
+    with bcols[2]:
+        discard_clicked = st.button(
+            "🗑 Discard",
+            use_container_width=True,
+            help="Mark this saved proposal REJECTED. Falls back to a fresh propose flow.",
+        )
+    with bcols[3]:
+        if saved_active.pinned:
+            unpin_clicked = st.button(
+                "📌 Unpin",
+                use_container_width=True,
+                help="Allow this proposal to be auto-archived on next re-propose.",
+            )
+            pin_clicked = False
+        else:
+            pin_clicked = st.button(
+                "📌 Pin",
+                use_container_width=True,
+                help="Protect this version from auto-archive. Useful for "
+                "marking a 'golden reference' template.",
+            )
+            unpin_clicked = False
+
+    # Action handlers
+    if use_saved_clicked:
+        st.session_state[PROPOSAL_KEY] = saved_active.proposal_payload
+        st.session_state[PROPOSAL_ID_KEY] = saved_active.proposal_id
+        st.toast("📋 Loaded saved proposal — no LLM call.", icon="✅")
+        st.rerun()
+    if repropose_clicked:
+        # Confirm modal — Streamlit doesn't have native modals, use a
+        # session_state flag to do a two-click confirmation.
+        confirm_key = f"confirm_repropose_{SCOPE_KEY}"
+        if st.session_state.get(confirm_key):
+            st.session_state[confirm_key] = False
+            _run_propose()
+            st.rerun()
+        else:
+            st.session_state[confirm_key] = True
+            st.warning(
+                f"⚠️ Re-proposing will spend ~{last_tokens:,} tokens "
+                f"(~${last_cost:.4f}) and **auto-archive saved v{saved_active.version}**. "
+                f"Click 🔄 Re-propose again to confirm."
+            )
+            st.stop()
+    if discard_clicked:
+        try:
+            proposal_store.reject(
+                saved_active.proposal_id,
+                rejected_by=f"ui:{selected_client}",
+                notes="Discarded from Pipeline Architect UI",
+            )
+            st.session_state.pop(PROPOSAL_KEY, None)
+            st.session_state.pop(PROPOSAL_ID_KEY, None)
+            st.toast("🗑 Proposal discarded.", icon="✅")
+        except Exception as exc:
+            st.error(f"Discard failed: {exc}")
+        st.rerun()
+    if pin_clicked:
+        try:
+            proposal_store.pin(saved_active.proposal_id)
+            st.toast("📌 Pinned — protected from auto-archive.", icon="✅")
+        except Exception as exc:
+            st.error(f"Pin failed: {exc}")
+        st.rerun()
+    if unpin_clicked:
+        try:
+            proposal_store.unpin(saved_active.proposal_id)
+            st.toast("📌 Unpinned.", icon="✅")
+        except Exception as exc:
+            st.error(f"Unpin failed: {exc}")
+        st.rerun()
+
+
+# Standard Propose button — only shown when no saved active proposal exists,
+# OR when the user wants to start fresh after a Discard.
+# Phase 16.1 (1.C): also gated by upstream prereqs.
+# Phase 16.7: also gated by source_choice — only shown when "AI Construct"
+# is the chosen source (the priority path is Clone-from-Global, above).
+if not _use_ai_propose:
+    st.info(
+        f"🤖 **AI Construct mode is OFF** — current source is "
+        f"`{source_choice}`. Switch the source picker above to "
+        f"`{SOURCE_AI}` if you need a fresh AI proposal "
+        f"(spends LLM tokens)."
+    )
+    st.stop()
+_can_propose = prereqs["ready_for_propose"] or (
+    prereqs["ready_for_silver_stop"] and allow_silver_stop
+)
+_button_help = (
+    "Generate a fresh proposal."
+    if _can_propose and saved_active is None
+    else "An approved proposal exists. Use 🔄 Re-propose above to regenerate."
+    if saved_active is not None and saved_active.status == ProposalStatus.APPROVED
+    else f"Click to generate a brand new proposal (will create v{saved_active.version + 1})."
+    if _can_propose and saved_active is not None
+    else "🚫 Upstream Silver/Gold not LIVE — see Upstream readiness card above. "
+    "Author the missing schemas in Data Model Designer first."
+)
+
+propose_btn, _ = st.columns([1, 5])
+with propose_btn:
+    propose_clicked = st.button(
+        "🚀 Propose pipeline",
+        type="primary" if (saved_active is None and _can_propose) else "secondary",
+        use_container_width=True,
+        disabled=(
+            not _can_propose
+            or (saved_active is not None and saved_active.status == ProposalStatus.APPROVED)
+        ),
+        help=_button_help,
+    )
+
+if propose_clicked:
+    _run_propose()
 
 
 # ---------------------------------------------------------------------------
@@ -508,15 +1214,15 @@ if gold_status == "LIVE":
                     border-left:4px solid #15803d;padding:.85rem 1.1rem;
                     border-radius:8px;margin:.8rem 0 1.2rem 0;">
           <strong>✅ Gold-LIVE detected</strong> &nbsp;·&nbsp;
-          Anchor: <code>{proposal.get('live_gold_anchor')}</code> &nbsp;·&nbsp;
-          Gold table: <code>{proposal.get('live_gold_table_name')}</code> &nbsp;·&nbsp;
-          {proposal.get('gold_columns_count', 0)} canonical columns &nbsp;·&nbsp;
-          {proposal.get('bronze_to_gold_mapping_count', 0)} Bronze→Gold mappings.
+          Anchor: <code>{proposal.get("live_gold_anchor")}</code> &nbsp;·&nbsp;
+          Gold table: <code>{proposal.get("live_gold_table_name")}</code> &nbsp;·&nbsp;
+          {proposal.get("gold_columns_count", 0)} canonical columns &nbsp;·&nbsp;
+          {proposal.get("bronze_to_gold_mapping_count", 0)} Bronze→Gold mappings.
           <br>
           <span style="font-size:.85rem;color:#166534;">
           Silver pattern: <strong>{silver_pattern}</strong>
           ({len(silver_models)} dbt files generated)
-          {' &nbsp;·&nbsp; <em>(operator-flagged as overkill — review before deploy)</em>' if proposal.get('silver_pattern_is_overkill') else ''}
+          {" &nbsp;·&nbsp; <em>(operator-flagged as overkill — review before deploy)</em>" if proposal.get("silver_pattern_is_overkill") else ""}
           </span>
         </div>
         """,
@@ -602,34 +1308,61 @@ with st.expander("✅ GX expectation suite", expanded=False):
 
 # ---------------------------------------------------------------------------
 # DEPLOY ACTION — persist + approve_and_deploy in one click.
+# Phase 16.1: deploy buttons grey out when proposal is already APPROVED to
+# prevent double-deploys + token waste from accidental re-clicks.
 # ---------------------------------------------------------------------------
 
 st.markdown("---")
-st.markdown("### 🚢 Deploy")
 
-c1, c2, c3 = st.columns([1, 1, 4])
-with c1:
-    deploy_clicked = st.button(
-        "✅ Approve & Deploy",
-        type="primary",
-        use_container_width=True,
-        help="Persists the proposal as PENDING_REVIEW, then immediately approves "
-        "and emits all 5 artifacts (Gold DDL, Silver dbt, Gold dbt, Airflow DAG, "
-        "GX suite). Status flips to LIVE.",
-    )
-with c2:
-    save_draft_clicked = st.button(
-        "💾 Save as DRAFT",
-        use_container_width=True,
-        help="Persist as PENDING_REVIEW only — does not deploy artifacts. "
-        "Use when you want to come back to review later.",
-    )
+# Check whether the in-session proposal is already approved (= already deployed)
+_pid_in_session = st.session_state.get(PROPOSAL_ID_KEY)
+_already_approved = False
+_linked_instance_id: str | None = None
+if _pid_in_session:
+    try:
+        _saved_p = proposal_store.get(_pid_in_session)
+        if _saved_p and _saved_p.status == ProposalStatus.APPROVED:
+            _already_approved = True
+            _linked_instance_id = _saved_p.linked_artifact_id
+    except Exception:
+        pass  # graceful fallback — keep deploy enabled
 
-deploy_notes = st.text_area(
-    "Deploy notes (audit trail)",
-    placeholder="Optional — will be appended to the audit log.",
-    height=70,
-)
+if _already_approved:
+    st.markdown("### ✅ Already Deployed")
+    st.success(
+        f"This proposal is already approved and deployed as instance "
+        f"`{(_linked_instance_id or '?')[:8]}…`. To redeploy, use 🔄 Re-propose "
+        f"at the top of the page (will create a new version)."
+    )
+    st.markdown("**Deploy buttons disabled** to prevent accidental re-deploy / token waste.")
+    deploy_clicked = False
+    save_draft_clicked = False
+    deploy_notes = ""
+else:
+    st.markdown("### 🚢 Deploy")
+    c1, c2, c3 = st.columns([1, 1, 4])
+    with c1:
+        deploy_clicked = st.button(
+            "✅ Approve & Deploy",
+            type="primary",
+            use_container_width=True,
+            help="Persists the proposal as PENDING_REVIEW, then immediately approves "
+            "and emits all 5 artifacts (Gold DDL, Silver dbt, Gold dbt, Airflow DAG, "
+            "GX suite). Status flips to LIVE.",
+        )
+    with c2:
+        save_draft_clicked = st.button(
+            "💾 Save as DRAFT",
+            use_container_width=True,
+            help="Persist as PENDING_REVIEW only — does not deploy artifacts. "
+            "Use when you want to come back to review later.",
+        )
+
+    deploy_notes = st.text_area(
+        "Deploy notes (audit trail)",
+        placeholder="Optional — will be appended to the audit log.",
+        height=70,
+    )
 
 if save_draft_clicked:
     with _warehouse(readonly=False) as wh:
@@ -665,7 +1398,27 @@ if deploy_clicked:
                 actor=f"ui:{selected_client}",
                 notes=deploy_notes,
             )
+            # Phase 16.1 — link the saved proposal to the deployed instance
+            # so future page loads show "Approved → instance X" banner.
+            saved_pid = st.session_state.get(PROPOSAL_ID_KEY)
+            if saved_pid:
+                try:
+                    proposal_store.approve(
+                        saved_pid,
+                        approved_by=f"ui:{selected_client}",
+                        linked_artifact_type="pipeline_instance",
+                        linked_artifact_id=instance_id,
+                        notes=deploy_notes or None,
+                    )
+                except Exception as link_exc:
+                    # Linking is bookkeeping — deploy already succeeded.
+                    st.warning(
+                        f"⚠️ Couldn't link saved proposal to instance "
+                        f"({link_exc}). Deploy succeeded; manual approve "
+                        f"of proposal {saved_pid[:8]}… needed to re-link."
+                    )
             st.session_state.pop(PROPOSAL_KEY, None)
+            st.session_state.pop(PROPOSAL_ID_KEY, None)
             st.success(
                 f"🎉 LIVE — instance `{instance_id[:8]}…`. "
                 f"GX suite `{deploy_result['gx_suite_id'][:8]}…` registered."
@@ -673,9 +1426,315 @@ if deploy_clicked:
             st.markdown("**Artifacts emitted:**")
             for k, v in deploy_result["artifact_paths"].items():
                 st.markdown(f"- `{k}` → `{v}`")
+
+            # Phase 16.9 — when the deploy is for the GLOBAL pseudo-client,
+            # automatically publish the pipeline as the canonical template +
+            # pause the DAG (the global is a TEMPLATE — never runs data).
+            if _is_global_build_mode:
+                try:
+                    with st.spinner("🌍 Auto-publishing as Global template..."):
+                        new_template_id = template_store.publish_pipeline_to_global(
+                            instance_id,
+                            by="ui:global-builder",
+                            notes=(
+                                "Auto-published — Global Builder mode. "
+                                "Pipeline serves as canonical template only; "
+                                "real clients clone from this."
+                            ),
+                        )
+                    # Pause the global DAG immediately (it's a template)
+                    try:
+                        from datalink.orchestration import airflow_ops
+
+                        global_dag_id = (
+                            f"{GLOBAL_CLIENT.lower()}_{selected_dataset_code.lower()}_pipeline"
+                        )
+                        airflow_ops.pause_dag(global_dag_id)
+                    except Exception:
+                        pass  # Airflow may not have picked up DAG yet — pause on next scan
+                    st.success(
+                        f"🌍 **Global pipeline template published** as "
+                        f"`{new_template_id}`. DAG paused (template only — "
+                        f"no data flows through it). Real clients now see "
+                        f"**📦 Clone from Global** as their default Pipeline "
+                        f"Architect option."
+                    )
+                    st.balloons()
+                except Exception as auto_exc:
+                    st.warning(
+                        f"⚠️ Auto-publish to Global failed: {auto_exc}. "
+                        f"Use the **🌐 Promote as Global** button below to "
+                        f"publish manually."
+                    )
         except Exception as exc:
             st.error(f"Deploy failed: {type(exc).__name__}: {exc}")
             st.exception(exc)
+
+
+# ---------------------------------------------------------------------------
+# Phase 16.1 (Wave 1 Item 3) — Run Pipeline panel
+#
+# Once a pipeline instance is LIVE, the operator needs three buttons to
+# actually exercise it end-to-end without leaving Streamlit:
+#
+#   1. 🧪 Generate sample data (PSV) — creates ~100-row deterministic
+#      synthetic file at data/generated/<dataset>_bronze_sample.psv
+#   2. ▶️ Trigger DAG now            — calls Airflow REST API
+#   3. 👁 View latest run + tasks   — pulls run state, links to logs
+#
+# All three operate via Streamlit / Airflow REST. NO terminal.
+# ---------------------------------------------------------------------------
+
+st.markdown("---")
+
+# Phase 16.9 — in Global Builder mode, the pipeline is a TEMPLATE: it never
+# runs data. Hide the Run-pipeline panel entirely.
+if _is_global_build_mode:
+    st.info(
+        "🌍 **Global Builder mode** — this pipeline is a TEMPLATE only. "
+        "It never ingests data. Real clients **clone** this template and "
+        "trigger their own DAG runs from their Pipeline Architect view."
+    )
+    st.markdown(
+        "**Next step**: switch to a real client (URL `?client=<name>`) "
+        "to clone this global pipeline and run it for that tenant."
+    )
+    st.stop()
+
+st.markdown("### 🚀 Run pipeline")
+
+# Find the LIVE instance for this (client, dataset).
+with _warehouse(readonly=True) as wh:
+    _client_instances_for_run = list_client_instances(wh, client_id=selected_client)
+    _live_instances = [
+        i
+        for i in _client_instances_for_run or []
+        if i.get("dataset_code") == selected_dataset_code and i.get("status") == "LIVE"
+    ]
+_live_instance = _live_instances[0] if _live_instances else None
+_dag_id = (
+    f"{selected_client.lower()}_{selected_dataset_code.lower()}_pipeline"
+    if _live_instance
+    else None
+)
+
+if not _live_instance:
+    st.info(
+        f"Deploy a pipeline instance for `{selected_client}` / "
+        f"`{selected_dataset_code}` (above) to enable run controls."
+    )
+else:
+    st.caption(
+        f"Pipeline LIVE: instance `{str(_live_instance.get('instance_id'))[:8]}…` "
+        f"· DAG `{_dag_id}` · "
+        f"Bronze: `{_live_instance.get('bronze_schema')}.{_live_instance.get('bronze_table')}` "
+        f"· Silver: `{_live_instance.get('silver_schema')}.{_live_instance.get('silver_table')}` "
+        f"· Gold: `{_live_instance.get('gold_schema')}.{_live_instance.get('gold_table')}`"
+    )
+
+    rcol1, rcol2, rcol3, rcol4 = st.columns([1.4, 1.4, 1.4, 4])
+
+    with rcol1:
+        gen_clicked = st.button(
+            "🧪 Generate sample",
+            use_container_width=True,
+            help=f"Synthesize ~100 rows of realistic {selected_dataset_code} data "
+            f"and drop it where the bronze_land_task expects it. Idempotent.",
+        )
+    with rcol2:
+        trigger_clicked = st.button(
+            "▶️ Trigger DAG now",
+            type="primary",
+            use_container_width=True,
+            help="Manually trigger the Airflow DAG. The bronze_land task picks "
+            "up the sample PSV, COPY INTO Bronze, dbt to Silver/Gold.",
+        )
+    with rcol3:
+        # Page link to Run Monitor (built in Item 4)
+        st.page_link(
+            "pages/15_Run_Monitor.py",
+            label="👁 Open Run Monitor",
+            icon="📺",
+            use_container_width=True,
+        )
+
+    if gen_clicked:
+        with st.spinner(f"Generating sample data for {selected_dataset_code}..."):
+            try:
+                # Lazy-import the generator to avoid eager dependency on the script
+                # module at page load.
+                import subprocess
+                from pathlib import Path
+
+                # Use the in-container path for control_tower (the page runs
+                # inside that container).
+                script = Path("/opt/datalink/scripts/generate_membership_bronze_sample.py")
+                if not script.exists():
+                    # Fallback for non-Aetna-Membership case — generic generator
+                    # would go here. For now we only have the Membership generator.
+                    st.error(
+                        f"No sample generator wired for `{selected_dataset_code}` yet. "
+                        f"Wave 4 will add a generic generator. Today this only works "
+                        f"for membership."
+                    )
+                else:
+                    result = subprocess.run(
+                        ["/usr/local/bin/python", str(script)],
+                        capture_output=True,
+                        text=True,
+                        timeout=60,
+                        cwd="/opt/datalink",
+                    )
+                    if result.returncode == 0:
+                        last_line = (result.stdout.strip().splitlines() or ["OK"])[-1]
+                        st.success(f"🧪 Sample generated: {last_line}")
+                    else:
+                        st.error(f"Sample generation failed:\n{result.stderr[:500]}")
+            except Exception as exc:
+                st.error(f"Sample generation error: {exc}")
+
+    if trigger_clicked:
+        from datalink.orchestration import airflow_ops
+
+        with st.spinner(f"Triggering DAG {_dag_id}..."):
+            try:
+                # Make sure DAG is unpaused first (no-op if already)
+                airflow_ops.unpause_dag(_dag_id)
+                run_meta = airflow_ops.trigger_dag(
+                    _dag_id,
+                    conf={
+                        "triggered_by_ui": "pipeline_architect",
+                        "client_id": selected_client,
+                        "dataset_code": selected_dataset_code,
+                    },
+                )
+                st.success(
+                    f"▶️ DAG triggered. Run ID: `{run_meta.get('dag_run_id', '?')}`. "
+                    f"State: `{run_meta.get('state', 'queued')}`. "
+                    f"Use **👁 Open Run Monitor** to watch it progress."
+                )
+            except Exception as exc:
+                if "is_dag_known" in str(exc) or "404" in str(exc):
+                    st.error(
+                        f"DAG `{_dag_id}` not yet picked up by the Airflow scheduler. "
+                        f"This is expected immediately after deploy — the scheduler "
+                        f"scans the dags/ folder every 30s. Wait a moment and retry."
+                    )
+                else:
+                    st.error(f"Trigger failed: {type(exc).__name__}: {exc}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 16.7 (final piece) — PUBLISH PIPELINE TO GLOBAL
+#
+# Once a pipeline has been deployed AND its DAG has run successfully
+# end-to-end at least once, the operator can promote this pipeline as the
+# canonical GLOBAL template for the dataset. This:
+#
+#   1. Inserts a row into CONTROL.global_pipeline_templates (LIVE)
+#   2. Captures every artifact file (Bronze DDL, Silver dbt files,
+#      Gold dbt, Airflow DAG) into CONTROL.global_artifact_blobs
+#   3. Marks the underlying Silver+Gold designs as scope_owner='__global__'
+#      (handled separately in Data Model Designer's Publish to Global,
+#      but we trigger it here too for one-click promotion)
+#
+# After this, every other client onboarding for this dataset starts with
+# 📦 Clone from Global — zero LLM tokens.
+# ---------------------------------------------------------------------------
+
+if _live_instance is not None:
+    st.markdown("---")
+    st.markdown("### 🌐 Promote this pipeline as the canonical Global template")
+
+    # Read current global status
+    _global_now = template_store.has_global(selected_dataset_code)
+    _g_pipe_now = _global_now.get("pipeline", False)
+
+    if _g_pipe_now:
+        # A global already exists — show "Re-publish (creates v2)" affordance
+        _g = template_store.get_global(selected_dataset_code)
+        _g_pipe = _g.get("pipeline") or {}
+        st.success(
+            f"📦 **Global template already published** for "
+            f"`{selected_dataset_code}` — "
+            f"version `v{_g_pipe.get('version', '?')}` "
+            f"(template_id `{str(_g_pipe.get('template_id', ''))[:40]}…`). "
+            f"Future clients clone from it via Pipeline Architect's "
+            f"**📦 Clone from Global** source picker."
+        )
+        if st.button(
+            "🔁 Re-publish (creates v2 — supersedes current global)",
+            help="Promotes THIS pipeline as the new canonical version. The "
+            "prior global gets DEPRECATED. Use after intentional design "
+            "changes you want fanned out to all future clones.",
+        ):
+            try:
+                with st.spinner("Snapshotting + capturing artifact blobs..."):
+                    new_template_id = template_store.publish_pipeline_to_global(
+                        str(_live_instance["instance_id"]),
+                        by=f"ui:{selected_client}",
+                        notes=f"Re-published from {selected_client}'s instance.",
+                    )
+                st.success(
+                    f"📦 Re-published as `{new_template_id}`. "
+                    f"Existing clones are now consuming a deprecated version — "
+                    f"the **Version Browser** will show migration plans."
+                )
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Re-publish failed: {type(exc).__name__}: {exc}")
+    else:
+        # No global yet — primary publish action
+        st.info(
+            f"⚠️ **No global template yet for `{selected_dataset_code}`.** "
+            f"Publish this deployed pipeline as the canonical version so "
+            f"future clients can **clone in one click** instead of "
+            f"re-running the AI agent. **Saves ~$0.002 + ~5s per future client.**"
+        )
+
+        with st.expander("What gets captured by 'Publish to Global'?"):
+            st.markdown(f"""
+- **Pipeline metadata** — anchor (`{_live_instance.get("bronze_anchor")}`),
+  schedule (`{_live_instance.get("schedule_cron")}`), routing rules
+- **Bronze DDL** — `datalink/pipeline/bronze/ddl/{selected_client.lower()}_{selected_dataset_code}.sql`
+- **Gold DDL** — `datalink/pipeline/gold/ddl/{selected_client.lower()}_{selected_dataset_code}.sql`
+- **Silver dbt models** (Hub/Sat/Link files) — entire `dbt/models/silver/{selected_client.lower()}/{selected_dataset_code}/` directory
+- **Gold dbt model** — `dbt/models/gold/{selected_client.lower()}/{selected_dataset_code}.sql`
+- **Airflow DAG** — `dags/{selected_client.lower()}_{selected_dataset_code}_pipeline.py`
+
+All blobs are stored in `CONTROL.global_artifact_blobs`. When a future
+client clones, the blobs are written out as that client's artifacts —
+**zero LLM call, instant materialisation**.
+""")
+
+        if st.button(
+            "🌐 Publish this pipeline as Global template",
+            type="primary",
+            help=f"Snapshot {selected_client}'s {selected_dataset_code} "
+            f"pipeline as the canonical version. Other clients will "
+            f"clone from this with no LLM cost.",
+        ):
+            try:
+                with st.spinner("Snapshotting pipeline + capturing artifact blobs..."):
+                    template_id = template_store.publish_pipeline_to_global(
+                        str(_live_instance["instance_id"]),
+                        by=f"ui:{selected_client}",
+                        notes=(
+                            f"Initial global publish from {selected_client}'s "
+                            f"deployed {selected_dataset_code} pipeline."
+                        ),
+                    )
+                st.success(
+                    f"🎉 **Published as Global template** "
+                    f"`{template_id}`. "
+                    f"Future clients see **📦 Clone from Global** as their "
+                    f"default Pipeline Architect source. **Zero LLM tokens** "
+                    f"to onboard them now."
+                )
+                st.balloons()
+                st.rerun()
+            except Exception as exc:
+                st.error(f"Publish failed: {type(exc).__name__}: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -762,3 +1821,215 @@ else:
             }
         )
     st.dataframe(pd.DataFrame(inst_rows), use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
+# Phase 16.1 — Proposal History + Tag editor
+#
+# History tab: every proposal version for this (client, dataset) scope, newest
+# first, with status / cost / linked-artifact columns. Click any row to view
+# the full payload + restore that version.
+#
+# Tag editor: visible when an active proposal exists. Multi-select against
+# the catalog, with role enforcement (today permissive — Wave 3 enforces).
+# ---------------------------------------------------------------------------
+
+st.markdown("---")
+st.markdown("## 📜 Proposal History — full audit trail")
+st.caption(
+    "Every AI proposal for this (client, dataset) is saved here. No-LLM "
+    "browsing, restore-to-this-version, tag governance, full lineage. "
+    "Pin a version to protect it from auto-archive on re-propose."
+)
+
+try:
+    history = proposal_store.history(scope_type=SCOPE_TYPE, scope_key=SCOPE_KEY, limit=50)
+except Exception as exc:
+    history = []
+    st.warning(f"Could not load proposal history: {exc}")
+
+if not history:
+    st.info(
+        f"No proposals saved yet for `{SCOPE_KEY}`. Click 🚀 Propose pipeline above to create v1."
+    )
+else:
+    # Render as a dataframe of summaries first; rich detail in expanders below.
+    hist_rows = []
+    for h in history:
+        link = (
+            f"{h.linked_artifact_type or ''}:{(h.linked_artifact_id or '')[:8]}…"
+            if h.linked_artifact_id
+            else "—"
+        )
+        pin_marker = "📌" if h.pinned else ""
+        hist_rows.append(
+            {
+                "v": f"v{h.version}",
+                "Status": h.status.value,
+                "Pinned": pin_marker,
+                "Tokens": f"{h.total_tokens:,}",
+                "Cost": f"${h.estimated_cost_usd:.4f}",
+                "Latency": f"{h.latency_ms} ms",
+                "Tags": ", ".join(h.tags) if h.tags else "—",
+                "By": h.created_by,
+                "Created": h.created_at.strftime("%Y-%m-%d %H:%M"),
+                "Linked": link,
+                "ID": h.proposal_id[:8] + "…",
+            }
+        )
+    st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+
+    # Aggregate cost summary — groundwork for the Wave 4 #2 cost dashboard
+    total_spent = sum(h.estimated_cost_usd for h in history)
+    total_tokens = sum(h.total_tokens for h in history)
+    st.caption(
+        f"💰 **Cumulative spend** for this scope: ${total_spent:.4f} across "
+        f"{total_tokens:,} tokens over {len(history)} proposals."
+    )
+
+    # Per-proposal expander — payload preview + restore + manage tags
+    st.markdown("### 🔍 Inspect / Restore / Tag")
+    sel_options = [
+        f"v{h.version}  [{h.status.value}]  ({h.created_at.strftime('%Y-%m-%d %H:%M')})  "
+        f"— {h.proposal_id[:8]}"
+        for h in history
+    ]
+    sel_idx = st.selectbox(
+        "Pick a version to inspect",
+        options=range(len(sel_options)),
+        format_func=lambda i: sel_options[i],
+        key=f"hist_select_{SCOPE_KEY}",
+    )
+    selected_h = history[sel_idx]
+
+    insp_cols = st.columns([1, 1, 1, 1, 4])
+    with insp_cols[0]:
+        if st.button(
+            "📋 Restore as Active",
+            key=f"restore_{selected_h.proposal_id}",
+            help="Loads this version into the proposal display above. "
+            "If the current active proposal is APPROVED, this "
+            "creates a new DRAFT version superseding it.",
+            disabled=(
+                selected_h.status == ProposalStatus.APPROVED
+                and saved_active is not None
+                and saved_active.proposal_id == selected_h.proposal_id
+            ),
+        ):
+            # Load into session_state — the proposal_id is the historical one,
+            # but we mark this as "use saved" semantically.
+            st.session_state[PROPOSAL_KEY] = selected_h.proposal_payload
+            st.session_state[PROPOSAL_ID_KEY] = selected_h.proposal_id
+            st.toast(f"📋 Restored v{selected_h.version} as active.", icon="✅")
+            st.rerun()
+    with insp_cols[1]:
+        if selected_h.pinned:
+            if st.button(
+                "📌 Unpin", key=f"hunpin_{selected_h.proposal_id}", use_container_width=True
+            ):
+                proposal_store.unpin(selected_h.proposal_id)
+                st.toast("📌 Unpinned.", icon="✅")
+                st.rerun()
+        else:
+            if st.button(
+                "📌 Pin",
+                key=f"hpin_{selected_h.proposal_id}",
+                use_container_width=True,
+                help="Protect from auto-archive. Use for golden-reference templates.",
+            ):
+                proposal_store.pin(selected_h.proposal_id)
+                st.toast("📌 Pinned.", icon="✅")
+                st.rerun()
+    with insp_cols[2]:
+        if st.button(
+            "🗑 Archive",
+            key=f"harch_{selected_h.proposal_id}",
+            use_container_width=True,
+            disabled=(selected_h.status == ProposalStatus.ARCHIVED),
+            help="Manually archive this version. Reversible — re-propose "
+            "or restore creates a new version.",
+        ):
+            proposal_store.archive(selected_h.proposal_id, archived_by=f"ui:{selected_client}")
+            st.toast("🗑 Archived.", icon="✅")
+            st.rerun()
+
+    # Payload preview
+    with st.expander(f"Payload for v{selected_h.version} (read-only JSON)"):
+        st.json(selected_h.proposal_payload, expanded=False)
+
+    # Tag editor — multiselect against catalog, scoped to selected version.
+    with st.expander(f"🏷️  Edit tags on v{selected_h.version}", expanded=False):
+        try:
+            catalog = proposal_store.all_tags()
+        except Exception as exc:
+            catalog = []
+            st.warning(f"Tag catalog unavailable: {exc}")
+
+        if catalog:
+            current = set(selected_h.tags)
+            tag_names = sorted(t["tag_name"] for t in catalog)
+            tag_lookup = {t["tag_name"]: t for t in catalog}
+
+            # Group by category for readability
+            categories = sorted({t["tag_category"] for t in catalog})
+            cat_pick = st.selectbox(
+                "Filter by category",
+                options=["(all)", *categories],
+                key=f"tagcat_{selected_h.proposal_id}",
+            )
+            visible_tags = [
+                t
+                for t in tag_names
+                if cat_pick == "(all)" or tag_lookup[t]["tag_category"] == cat_pick
+            ]
+
+            new_set = st.multiselect(
+                "Tags applied to this proposal",
+                options=visible_tags,
+                default=[t for t in visible_tags if t in current],
+                key=f"tagsel_{selected_h.proposal_id}_{cat_pick}",
+                help="Some tags require a role (e.g. `certified-prod` "
+                "requires data-steward). Wave 3 will enforce; today "
+                "every actor passes.",
+            )
+            apply_cols = st.columns([1, 1, 4])
+            with apply_cols[0]:
+                if st.button(
+                    "💾 Apply tag changes", key=f"tagapply_{selected_h.proposal_id}", type="primary"
+                ):
+                    # Diff against current
+                    add_these = set(new_set) - current
+                    remove_these = current - set(new_set)
+                    # Limit removals to the visible category to avoid wiping
+                    # tags from other categories that weren't shown
+                    if cat_pick != "(all)":
+                        cat_tags = {t["tag_name"] for t in catalog if t["tag_category"] == cat_pick}
+                        remove_these = remove_these & cat_tags
+                    actor = f"ui:{selected_client}"
+                    errors: list[str] = []
+                    for tn in add_these:
+                        try:
+                            proposal_store.add_tag(
+                                proposal_id=selected_h.proposal_id,
+                                tag_name=tn,
+                                assigned_by=actor,
+                            )
+                        except Exception as exc:
+                            errors.append(f"add {tn}: {exc}")
+                    for tn in remove_these:
+                        try:
+                            proposal_store.remove_tag(
+                                proposal_id=selected_h.proposal_id,
+                                tag_name=tn,
+                                removed_by=actor,
+                            )
+                        except Exception as exc:
+                            errors.append(f"remove {tn}: {exc}")
+                    if errors:
+                        st.error("Some changes failed:\n" + "\n".join(errors))
+                    else:
+                        st.toast(
+                            f"🏷️ Applied: +{len(add_these)} / -{len(remove_these)} tags.",
+                            icon="✅",
+                        )
+                    st.rerun()

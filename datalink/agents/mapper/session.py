@@ -181,7 +181,7 @@ class MappingSessionRegistry:
 
     def get_session(self, session_id: str) -> MappingSession | None:
         rows = self._wh.query(
-            f"SELECT * FROM {CONTROL_SCHEMA}.mapping_sessions " "WHERE session_id = $i",
+            f"SELECT * FROM {CONTROL_SCHEMA}.mapping_sessions WHERE session_id = $i",
             {"i": session_id},
         )
         return _row_to_session(rows[0]) if rows else None
@@ -402,7 +402,7 @@ class MappingSessionRegistry:
         set_sql = ", ".join(f"{k} = ${k}" for k in sets)
         params = {**sets, "i": session_id}
         self._wh.execute(
-            f"UPDATE {CONTROL_SCHEMA}.mapping_sessions " f"SET {set_sql} WHERE session_id = $i",
+            f"UPDATE {CONTROL_SCHEMA}.mapping_sessions SET {set_sql} WHERE session_id = $i",
             params,
         )
         # Audit names just the fields that changed (terse).
@@ -540,7 +540,7 @@ class MappingSessionRegistry:
         s = self._require(session_id)
         if s.status is not SessionStatus.DRAFT:
             raise ValueError(
-                f"session {session_id!r} is in status {s.status.value} — " f"only DRAFT is editable"
+                f"session {session_id!r} is in status {s.status.value} — only DRAFT is editable"
             )
         return s
 
@@ -555,7 +555,7 @@ class MappingSessionRegistry:
         current = self._require(session_id)
         if to_status not in _LEGAL_TRANSITIONS.get(current.status, set()):
             raise ValueError(
-                f"illegal session transition {current.status} → {to_status} " f"for {session_id!r}"
+                f"illegal session transition {current.status} → {to_status} for {session_id!r}"
             )
         sets: dict[str, Any] = {"status": to_status.value, "updated_at": datetime.now(UTC)}
         if extra_sets:
@@ -563,7 +563,7 @@ class MappingSessionRegistry:
         set_sql = ", ".join(f"{k} = ${k}" for k in sets)
         params = {**sets, "i": session_id}
         self._wh.execute(
-            f"UPDATE {CONTROL_SCHEMA}.mapping_sessions " f"SET {set_sql} WHERE session_id = $i",
+            f"UPDATE {CONTROL_SCHEMA}.mapping_sessions SET {set_sql} WHERE session_id = $i",
             params,
         )
         self._audit(session_id, current.status, to_status, actor, notes)

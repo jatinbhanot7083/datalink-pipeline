@@ -292,9 +292,7 @@ class SnowflakeWarehouse:
         col_list = ", ".join(cols)
         source_cols = ", ".join(f"source.{c}" for c in cols)
 
-        merge_sql = (
-            f"MERGE INTO {target} AS target " f"USING {source} AS source " f"ON {on_clause} "
-        )
+        merge_sql = f"MERGE INTO {target} AS target USING {source} AS source ON {on_clause} "
         if update_set:
             merge_sql += f"WHEN MATCHED THEN UPDATE SET {update_set} "
         merge_sql += f"WHEN NOT MATCHED THEN INSERT ({col_list}) VALUES ({source_cols})"

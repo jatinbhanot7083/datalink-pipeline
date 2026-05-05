@@ -180,8 +180,8 @@ class DqProposerAgent(AgentBase):
             lines = ["", "EXAMPLES OF APPROVED SUITES FOR THIS CLIENT (consult for style):"]
             for i, g in enumerate(grounding[:5], start=1):
                 lines.append(
-                    f"  Example {i} — suite={g.get('suite_name','')} "
-                    f"status={g.get('status','')} source={g.get('source','')} "
+                    f"  Example {i} — suite={g.get('suite_name', '')} "
+                    f"status={g.get('status', '')} source={g.get('source', '')} "
                     f"distance={g.get('distance', 0):.3f}"
                 )
                 # Indent the source_text body so the LLM treats it as one block.

@@ -245,8 +245,7 @@ def profile_source(
     typed = list_columns_typed(warehouse, qualified_table)
     if not typed:
         raise RuntimeError(
-            f"profile_source: no columns returned for {qualified_table!r} — "
-            f"does the table exist?"
+            f"profile_source: no columns returned for {qualified_table!r} — does the table exist?"
         )
 
     # Filter audit columns unless explicitly included.
@@ -255,8 +254,7 @@ def profile_source(
     ]
     if not business_cols:
         raise RuntimeError(
-            f"profile_source: no business columns in {qualified_table!r} "
-            f"(only audit columns found)"
+            f"profile_source: no business columns in {qualified_table!r} (only audit columns found)"
         )
 
     # ---- Stage 1: batched aggregation ------------------------------------

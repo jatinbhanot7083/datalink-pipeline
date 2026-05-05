@@ -85,8 +85,7 @@ def _collect_state(client_id: str) -> dict[str, Any]:
     for tbl in ("RAW_CLAIMS", "RAW_MEMBERSHIP", "RAW_PROVIDER"):
         try:
             r = wh.query(
-                f"SELECT COUNT(*) AS n, COUNT(DISTINCT _batch_id) AS b "
-                f"FROM {bronze_schema}.{tbl}"
+                f"SELECT COUNT(*) AS n, COUNT(DISTINCT _batch_id) AS b FROM {bronze_schema}.{tbl}"
             )[0]
             state[f"bronze_{tbl.lower()}_rows"] = int(r.get("n") or 0)
             state[f"bronze_{tbl.lower()}_batches"] = int(r.get("b") or 0)
@@ -131,8 +130,7 @@ def _collect_state(client_id: str) -> dict[str, Any]:
     # Pipeline control state per (pipeline, client).
     try:
         rows = wh.query(
-            "SELECT pipeline_id, status FROM CONTROL.pipeline_control_state "
-            "WHERE client_id = $c",
+            "SELECT pipeline_id, status FROM CONTROL.pipeline_control_state WHERE client_id = $c",
             {"c": client_id},
         )
         state["pipeline_states"] = {r["pipeline_id"]: r["status"] for r in rows}
@@ -142,7 +140,7 @@ def _collect_state(client_id: str) -> dict[str, Any]:
     # Bronze retention log (presence + most recent status).
     try:
         rows = wh.query(
-            "SELECT status, COUNT(*) AS n FROM CONTROL.bronze_retention_log " "GROUP BY status"
+            "SELECT status, COUNT(*) AS n FROM CONTROL.bronze_retention_log GROUP BY status"
         )
         state["retention_log_by_status"] = {r["status"]: int(r["n"]) for r in rows}
     except Exception as e:
@@ -172,8 +170,9 @@ def _assertions_for_existing() -> list[Assertion]:
         ),
         Assertion(
             name="9.1 Bronze claim row count grew with batches",
-            predicate=lambda s: s.get("bronze_raw_claims_rows", 0)
-            >= 5 * s.get("bronze_raw_claims_batches", 1),
+            predicate=lambda s: (
+                s.get("bronze_raw_claims_rows", 0) >= 5 * s.get("bronze_raw_claims_batches", 1)
+            ),
             detail=lambda s: (
                 f"rows={s.get('bronze_raw_claims_rows', '?')} "
                 f"batches={s.get('bronze_raw_claims_batches', '?')}"
@@ -182,9 +181,9 @@ def _assertions_for_existing() -> list[Assertion]:
         # --- Phase 9.2 — Silver SCD2 ------------------------------------
         Assertion(
             name="9.2 Silver claim Sat dedups via hash_diff (rows < bronze rows)",
-            predicate=lambda s: 0
-            < s.get("silver_sat_claim_details_total", 0)
-            <= s.get("bronze_raw_claims_rows", 0),
+            predicate=lambda s: (
+                0 < s.get("silver_sat_claim_details_total", 0) <= s.get("bronze_raw_claims_rows", 0)
+            ),
             detail=lambda s: (
                 f"sat={s.get('silver_sat_claim_details_total', '?')} ≤ "
                 f"bronze={s.get('bronze_raw_claims_rows', '?')}"
@@ -212,8 +211,9 @@ def _assertions_for_existing() -> list[Assertion]:
         # --- Phase 9.3 — Gold outbox -----------------------------------
         Assertion(
             name="9.3 Gold outbox table exists + has rows",
-            predicate=lambda s: s.get("outbox_patient_auth_rows", 0) > 0
-            or "outbox_err" in s,  # tolerate first-run empty outbox
+            predicate=lambda s: (
+                s.get("outbox_patient_auth_rows", 0) > 0 or "outbox_err" in s
+            ),  # tolerate first-run empty outbox
             detail=lambda s: (
                 f"outbox_rows={s.get('outbox_patient_auth_rows', '?')}"
                 + (f" (err: {s['outbox_err'][:60]})" if "outbox_err" in s else "")
@@ -223,8 +223,7 @@ def _assertions_for_existing() -> list[Assertion]:
             name="9.3 Egress audit log has PUSHED entries",
             predicate=lambda s: s.get("egress_log_pushed", 0) >= 1,
             detail=lambda s: (
-                f"pushed={s.get('egress_log_pushed', '?')} of "
-                f"total={s.get('egress_log_rows', '?')}"
+                f"pushed={s.get('egress_log_pushed', '?')} of total={s.get('egress_log_rows', '?')}"
             ),
         ),
         # --- Phase 9.4 — Pipeline Control ------------------------------

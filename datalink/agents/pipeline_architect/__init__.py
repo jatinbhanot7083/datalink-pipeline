@@ -30,10 +30,14 @@ Phase 15.7 additions:
 
 from .agent import DecisionMode, PipelineArchitectAgent, PipelineProposal
 from .bridge import (
+    PipelinePrerequisitesError,
     approve_and_deploy,
     approve_greenfield,
+    check_pipeline_prerequisites,
+    clone_pipeline_to_client,
     fetch_live_gold_schema,
     list_client_instances,
+    list_clonable_peer_pipelines,
     list_dataset_codes,
     list_greenfield_proposals,
     list_pending_overflow,
@@ -46,11 +50,15 @@ from .bridge import (
 __all__ = [
     "DecisionMode",
     "PipelineArchitectAgent",
+    "PipelinePrerequisitesError",
     "PipelineProposal",
     "approve_and_deploy",
     "approve_greenfield",
+    "check_pipeline_prerequisites",
+    "clone_pipeline_to_client",
     "fetch_live_gold_schema",
     "list_client_instances",
+    "list_clonable_peer_pipelines",
     "list_dataset_codes",
     "list_greenfield_proposals",
     "list_pending_overflow",

@@ -70,7 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     if _column_exists(wh, schema, table, "client_id"):
         print(f"  client_id column already present on {fq}")
     else:
-        sql = f"ALTER TABLE {fq} ADD COLUMN client_id VARCHAR " "NOT NULL DEFAULT 'default'"
+        sql = f"ALTER TABLE {fq} ADD COLUMN client_id VARCHAR NOT NULL DEFAULT 'default'"
         if args.dry_run:
             print(f"  [DRY] {sql}")
         else:
@@ -89,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
     #    PRIMARY KEY for the legacy PK (Snowflake-supported) and then
     #    ADD CONSTRAINT for the new one.
     drop_sql = f"ALTER TABLE {fq} DROP PRIMARY KEY"
-    add_sql = f"ALTER TABLE {fq} ADD CONSTRAINT pk_{table} " "PRIMARY KEY (pipeline_id, client_id)"
+    add_sql = f"ALTER TABLE {fq} ADD CONSTRAINT pk_{table} PRIMARY KEY (pipeline_id, client_id)"
     if args.dry_run:
         print(f"  [DRY] {drop_sql}")
         print(f"  [DRY] {add_sql}")
@@ -117,12 +117,10 @@ def main(argv: list[str] | None = None) -> int:
     has_client_col = _column_exists(wh, schema, table, "client_id")
     if has_client_col:
         rows = wh.query(
-            f"SELECT pipeline_id, client_id, status FROM {fq} " "ORDER BY pipeline_id, client_id"
+            f"SELECT pipeline_id, client_id, status FROM {fq} ORDER BY pipeline_id, client_id"
         )
         for r in rows:
-            print(
-                f"  {r['pipeline_id']:<22}  " f"client={r['client_id']:<14}  status={r['status']}"
-            )
+            print(f"  {r['pipeline_id']:<22}  client={r['client_id']:<14}  status={r['status']}")
     else:
         # Pre-migration / dry-run path: client_id column not yet present.
         rows = wh.query(f"SELECT pipeline_id, status FROM {fq} ORDER BY pipeline_id")

@@ -33,9 +33,9 @@ def main() -> None:
     count_second = pg.table_row_count("ping", schema="test_p4")
     print(f"after second upsert : {count_second} rows  (should equal first)")
 
-    assert (
-        count_first == count_second == 2
-    ), f"idempotency broken: first={count_first} second={count_second}"
+    assert count_first == count_second == 2, (
+        f"idempotency broken: first={count_first} second={count_second}"
+    )
 
     # Now change a value and re-upsert → count same, value updated
     updated = [{"id": 1, "v": "HELLO"}, {"id": 2, "v": "world"}]

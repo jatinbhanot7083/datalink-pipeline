@@ -847,8 +847,7 @@ log_overflow_column(
 )
 o_rows = list(
     WH.query(
-        f"SELECT occurrence_count FROM {CONTROL_SCHEMA}.bronze_overflow_log "
-        f"WHERE column_name = $c",
+        f"SELECT occurrence_count FROM {CONTROL_SCHEMA}.bronze_overflow_log WHERE column_name = $c",
         {"c": test_overflow_col},
     )
 )

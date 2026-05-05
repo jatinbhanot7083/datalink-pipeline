@@ -315,7 +315,7 @@ def main() -> int:
             f"failed_rules={pg_push.failed_rules}"
         )
     else:
-        ok(f"Postgres push: score={pg_push.optimization_score:.2f}, " f"all rules pass")
+        ok(f"Postgres push: score={pg_push.optimization_score:.2f}, all rules pass")
 
     ms_push = propose_push_script(
         llm=llm,
@@ -336,7 +336,7 @@ def main() -> int:
             f"failed_rules={ms_push.failed_rules}"
         )
     else:
-        ok(f"SQL Server push: score={ms_push.optimization_score:.2f}, " f"all rules pass")
+        ok(f"SQL Server push: score={ms_push.optimization_score:.2f}, all rules pass")
 
     s = sess_reg.get_session(sid)
     if s is None or not s.onprem_postgres_sql or not s.onprem_mssql_sql:

@@ -60,7 +60,19 @@ from datalink.ui._nav import render_sidebar, require_client  # noqa: E402
 
 render_sidebar(active="Schema Drift")
 client_id = require_client()
+# Phase 16.6 — when no client picked (default = All clients), gate
+# the per-client content with a friendly notice. Pages with a true
+# all-clients view (Pipeline Architect) handle this differently.
+if client_id is None:
+    import streamlit as _st
 
+    _st.info(
+        "🌐 **All-clients view.** Pick a client from the dropdown above "
+        "to load this client-scoped page. Cross-tenant dashboards "
+        "(Control Tower, PHI Governance, Cost & Tokens, Lineage) live "
+        "elsewhere and don't need a client picker."
+    )
+    _st.stop()
 _NAVY = "#0a1a3e"
 _GOLD = "#d4af37"
 

@@ -76,10 +76,7 @@ def main(argv: list[str] | None = None) -> int:
 
     PipelineControl(adapters.warehouse).ensure()
 
-    print(
-        f"\nBronze retention prune — days={args.days}  "
-        f"{'DRY-RUN' if args.dry_run else 'LIVE'}\n"
-    )
+    print(f"\nBronze retention prune — days={args.days}  {'DRY-RUN' if args.dry_run else 'LIVE'}\n")
     results = prune_all_bronze(
         adapters.warehouse,
         retention_days=args.days,

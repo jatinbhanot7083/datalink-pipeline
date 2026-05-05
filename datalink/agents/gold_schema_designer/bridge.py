@@ -108,8 +108,7 @@ def get_gold_schema(warehouse: Warehouse, gold_dataset_id: str) -> dict[str, Any
     )
     mappings = list(
         warehouse.query(
-            f"SELECT * FROM {CONTROL_SCHEMA}.bronze_to_gold_mappings "
-            f"WHERE gold_dataset_id = $g",
+            f"SELECT * FROM {CONTROL_SCHEMA}.bronze_to_gold_mappings WHERE gold_dataset_id = $g",
             {"g": gold_dataset_id},
         )
     )

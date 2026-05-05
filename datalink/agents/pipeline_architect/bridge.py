@@ -49,6 +49,251 @@ _log = get_logger(__name__)
 # =============================================================================
 
 
+# =============================================================================
+# Phase 16.2 (Wave 2 Item 9) — Cross-client pipeline cloning
+# =============================================================================
+
+
+def list_clonable_peer_pipelines(
+    warehouse: Warehouse,
+    *,
+    dataset_code: str,
+    exclude_client: str | None = None,
+) -> list[dict[str, Any]]:
+    """Return LIVE pipeline instances for ``dataset_code`` belonging to OTHER
+    clients — these are clone candidates."""
+    where = ["status = 'LIVE'", "dataset_code = $ds"]
+    params: dict[str, Any] = {"ds": dataset_code}
+    if exclude_client:
+        where.append("client_id <> $cid")
+        params["cid"] = exclude_client
+    rows = warehouse.query(
+        f"""
+        SELECT instance_id, client_id, dataset_code, bronze_anchor,
+               schedule_cron, gx_suite_id, deployed_at, deployed_by,
+               cloned_from_instance, deviation_count
+          FROM {CONTROL_SCHEMA}.client_pipeline_instances
+         WHERE {" AND ".join(where)}
+         ORDER BY deployed_at DESC
+        """,
+        params,
+    )
+    return list(rows)
+
+
+def clone_pipeline_to_client(
+    *,
+    warehouse: Warehouse,
+    source_instance_id: str,
+    target_client_id: str,
+    actor: str,
+    notes: str = "",
+) -> dict[str, Any]:
+    """Clone a LIVE pipeline from one client to another.
+
+    Reads the source instance row, copies its proposal-derived fields, sets
+    the target client_id + cloned_from_instance lineage, and creates a new
+    DRAFT instance row. Returns the new instance_id (caller still has to
+    call approve_and_deploy() to materialize).
+    """
+    src_rows = list(
+        warehouse.query(
+            f"SELECT * FROM {CONTROL_SCHEMA}.client_pipeline_instances WHERE instance_id = $sid",
+            {"sid": source_instance_id},
+        )
+    )
+    if not src_rows:
+        raise ValueError(f"Source instance {source_instance_id} not found")
+    src = dict(src_rows[0])
+
+    new_id = str(uuid.uuid4())
+    bronze_schema = f"BRONZE_{target_client_id.upper()}"
+    silver_schema = f"SILVER_{target_client_id.upper()}"
+    gold_schema = f"GOLD_{target_client_id.upper()}"
+
+    warehouse.execute(
+        f"""
+        INSERT INTO {CONTROL_SCHEMA}.client_pipeline_instances
+          (instance_id, client_id, dataset_code, status,
+           bronze_anchor, bronze_schema, bronze_table,
+           silver_schema, silver_table, gold_schema, gold_table,
+           schedule_cron, gx_suite_id, dag_uri,
+           cloned_from_instance, deviation_count,
+           ai_proposal_json, ai_reasoning, ai_token_count, ai_latency_ms,
+           created_at, created_by, notes)
+        SELECT $iid, $cid, $ds, 'DRAFT',
+               $ba, $bs, $bt, $ss, $st, $gs, $gt,
+               $sc, $gxs, $dag,
+               $clone_from, 0,
+               $ai_p, $ai_r, $ai_tk, $ai_la,
+               $ts, $by, $notes
+        """,
+        {
+            "iid": new_id,
+            "cid": target_client_id,
+            "ds": src["dataset_code"],
+            "ba": src["bronze_anchor"],
+            "bs": bronze_schema,
+            "bt": src["bronze_table"],  # raw_<dataset> stays the same
+            "ss": silver_schema,
+            "st": src["silver_table"],
+            "gs": gold_schema,
+            "gt": src["gold_table"],
+            "sc": src["schedule_cron"],
+            "gxs": src.get("gx_suite_id"),
+            "dag": src.get("dag_uri"),
+            "clone_from": source_instance_id,
+            "ai_p": src.get("ai_proposal_json"),
+            "ai_r": src.get("ai_reasoning"),
+            "ai_tk": src.get("ai_token_count"),
+            "ai_la": src.get("ai_latency_ms"),
+            "ts": datetime.now(UTC).replace(tzinfo=None),
+            "by": actor,
+            "notes": (
+                f"[CLONE] from {source_instance_id} "
+                f"({src.get('client_id')}/{src['dataset_code']}). {notes}"
+            ),
+        },
+    )
+    _log.info(
+        "pipeline_architect.cloned",
+        new_instance_id=new_id,
+        source=source_instance_id,
+        target_client=target_client_id,
+        dataset=src["dataset_code"],
+    )
+
+    # Record in version_history for cross-client lineage
+    try:
+        from datalink.versioning import store as v_store
+
+        v_store.record_version(
+            artifact_type="pipeline_instance",
+            artifact_id=new_id,
+            artifact_scope_key=f"{target_client_id}:{src['dataset_code']}",
+            snapshot={
+                "client_id": target_client_id,
+                "dataset_code": src["dataset_code"],
+                "bronze_anchor": src["bronze_anchor"],
+                "schedule_cron": src["schedule_cron"],
+                "cloned_from": source_instance_id,
+            },
+            change_kind="CLONE",
+            change_reason=f"Cloned from {src.get('client_id')}/{src['dataset_code']}",
+            cloned_from_artifact_id=str(source_instance_id),
+            cloned_from_version=None,
+            created_by=actor,
+            notes=notes or None,
+        )
+    except Exception as exc:
+        _log.warning("clone.version_record_failed", err=str(exc)[:120])
+
+    return {
+        "new_instance_id": new_id,
+        "target_client_id": target_client_id,
+        "dataset_code": src["dataset_code"],
+        "source_instance_id": source_instance_id,
+        "source_client_id": src.get("client_id"),
+    }
+
+
+# =============================================================================
+# Phase 16.1 — Workflow gate: Pipeline Architect REQUIRES LIVE Silver+Gold.
+# Architectural fix: Pipeline Architect is a CONSUMER of Data Model Designer's
+# LIVE schemas. The Bronze catalog is the source for Data Model Designer, NOT
+# for Pipeline Architect. The latter only sees the LIVE designs.
+# =============================================================================
+
+
+class PipelinePrerequisitesError(Exception):
+    """Raised when Pipeline Architect can't propose because the upstream
+    Silver and/or Gold schemas aren't LIVE in the registry yet."""
+
+    def __init__(self, *, dataset_code: str, missing: list[str], detail: str = "") -> None:
+        super().__init__(detail or f"missing for {dataset_code}: {', '.join(missing)}")
+        self.dataset_code = dataset_code
+        self.missing = missing
+
+
+def check_pipeline_prerequisites(warehouse: Warehouse, dataset_code: str) -> dict[str, Any]:
+    """Return the upstream-readiness state for a dataset.
+
+    Output shape:
+        {
+          "dataset_code": str,
+          "silver_live": bool,
+          "gold_live": bool,
+          "silver_schema_id": str | None,
+          "silver_version": int | None,
+          "silver_pattern": str | None,
+          "gold_dataset_id": str | None,
+          "gold_version": int | None,
+          "ready_for_propose": bool,             # True only when BOTH live
+          "ready_for_silver_stop": bool,         # True when Silver-LIVE only (Gold-stop allowed)
+          "missing": list[str],                  # ['silver'] | ['gold'] | ['silver','gold']
+          "next_steps": list[str],               # human-readable guidance strings
+        }
+
+    Used by the UI to render the readiness banner and gate the Propose
+    button. Used by ``propose_pipeline`` to refuse the LLM call when
+    upstream design isn't ready.
+    """
+    # Local import to avoid module-load cycles (silver_schema_designer
+    # transitively imports adapters).
+    from datalink.agents.silver_schema_designer.bridge import fetch_live_silver
+
+    silver = fetch_live_silver(warehouse, dataset_code)
+    gold = fetch_live_gold_schema(warehouse, dataset_code)
+
+    missing: list[str] = []
+    if silver is None:
+        missing.append("silver")
+    if gold is None:
+        missing.append("gold")
+
+    next_steps: list[str] = []
+    if "silver" in missing and "gold" in missing:
+        next_steps.append(
+            f"Open Data Model Designer → pick `{dataset_code}` → switch to "
+            f"🥈 Silver layer → AI Construct (or Manual / Import) → Approve to LIVE."
+        )
+        next_steps.append(
+            "Then in Data Model Designer → switch to 🥇 Gold layer → "
+            "AI Construct → Approve to LIVE."
+        )
+    elif "silver" in missing:
+        next_steps.append(
+            f"Gold is LIVE but Silver isn't. Open Data Model Designer → "
+            f"`{dataset_code}` → 🥈 Silver layer → Approve to LIVE. "
+            f"Pipeline Architect refuses to propose without Silver."
+        )
+    elif "gold" in missing:
+        next_steps.append(
+            f"Silver is LIVE but Gold isn't. Open Data Model Designer → "
+            f"`{dataset_code}` → 🥇 Gold layer → Approve to LIVE for full "
+            f"Bronze→Silver→Gold. To deploy Silver-only ('Silver-stop'), "
+            f"use the explicit option in the form below."
+        )
+
+    return {
+        "dataset_code": dataset_code,
+        "silver_live": silver is not None,
+        "gold_live": gold is not None,
+        "silver_schema_id": (silver or {}).get("silver_dataset_id"),
+        "silver_version": (silver or {}).get("version"),
+        "silver_pattern": (silver or {}).get("pattern"),
+        "gold_dataset_id": ((gold or {}).get("header") or {}).get("gold_dataset_id"),
+        "gold_version": ((gold or {}).get("header") or {}).get("version"),
+        "ready_for_propose": (silver is not None and gold is not None),
+        "ready_for_silver_stop": (silver is not None),
+        "missing": missing,
+        "next_steps": next_steps,
+        # Hand back the full payloads so callers don't re-fetch.
+        "live_silver": silver,
+        "live_gold": gold,
+    }
+
+
 def fetch_live_gold_schema(warehouse: Warehouse, dataset_code: str) -> dict[str, Any] | None:
     """Return the LIVE Gold schema for a dataset (or None when no Gold yet).
 
@@ -79,8 +324,7 @@ def fetch_live_gold_schema(warehouse: Warehouse, dataset_code: str) -> dict[str,
     )
     mappings = list(
         warehouse.query(
-            f"SELECT * FROM {CONTROL_SCHEMA}.bronze_to_gold_mappings "
-            f"WHERE gold_dataset_id = $g",
+            f"SELECT * FROM {CONTROL_SCHEMA}.bronze_to_gold_mappings WHERE gold_dataset_id = $g",
             {"g": header["gold_dataset_id"]},
         )
     )
@@ -304,24 +548,48 @@ def propose_pipeline(
     schedule_cron: str | None = None,
     temperature: float = 0.0,
     actor: str = "operator",
+    allow_silver_stop: bool = False,
 ) -> dict[str, Any]:
-    """End-to-end: look up catalog + peers + LIVE Gold schema, run agent,
-    return a proposal.
+    """End-to-end: enforce upstream prerequisites, run the agent, return a proposal.
 
-    Phase 15.7 top-down behavior:
-      - When a LIVE Gold schema exists for ``dataset_code`` in
-        global_gold_schema_*, the proposal uses it as the canonical Gold
-        model. Silver dbt is generated as DV2 Hub/Sat/Link (or NORMALIZED
-        per the Silver pattern recommendation). Bronze DDL adds the
-        _variant_overflow column for overflow safety.
-      - When no LIVE Gold exists, the function still works in the
-        original Phase 15 mode (Bronze catalog as Gold) but emits a
-        ``gold_schema_status="MISSING_RECOMMEND_DESIGN"`` flag so the UI
-        can surface "design Gold first" guidance.
+    Phase 16.1 architectural fix: Pipeline Architect is a CONSUMER of
+    Data Model Designer's LIVE Silver and Gold schemas. The Bronze catalog
+    is the source for Data Model Designer, NOT for Pipeline Architect.
+
+    Refuses to propose unless:
+      * BOTH Silver-LIVE AND Gold-LIVE exist for ``dataset_code``, OR
+      * ``allow_silver_stop=True`` AND Silver-LIVE exists (Gold may be missing —
+        emits a Silver-stop pipeline, no Gold materialization).
+
+    Raises :class:`PipelinePrerequisitesError` when prerequisites aren't met.
+    The UI catches this and surfaces a clear "Author X first in Data Model
+    Designer" guidance with deep-link.
 
     Does NOT persist — the UI shows the proposal, lets the operator add
     overrides + edits, then calls ``persist_proposal()``.
     """
+    # ---- Phase 16.1 prerequisite gate ----
+    prereqs = check_pipeline_prerequisites(warehouse, dataset_code)
+    if not prereqs["ready_for_propose"]:
+        if allow_silver_stop and prereqs["ready_for_silver_stop"]:
+            _log.info(
+                "pipeline_architect.silver_stop_explicit",
+                dataset_code=dataset_code,
+                client_id=client_id,
+            )
+            # Allow it — caller knows what they're doing.
+        else:
+            raise PipelinePrerequisitesError(
+                dataset_code=dataset_code,
+                missing=prereqs["missing"],
+                detail=(
+                    f"Cannot propose pipeline for {dataset_code!r}: "
+                    f"upstream Silver/Gold not LIVE. "
+                    f"Missing: {prereqs['missing']}. "
+                    f"Next steps: {' | '.join(prereqs['next_steps'])}"
+                ),
+            )
+
     dataset, catalog_fields = _fetch_catalog_for_dataset(warehouse, dataset_code)
     overrides = _fetch_overrides(warehouse, client_id=client_id, dataset_code=dataset_code)
     default_routing = _fetch_default_routing(warehouse, dataset_code)
@@ -329,8 +597,10 @@ def propose_pipeline(
         warehouse, client_id=client_id, dataset_code=dataset_code
     )
 
-    # Phase 15.7 — pick up LIVE Gold schema if one exists
-    live_gold = fetch_live_gold_schema(warehouse, dataset_code)
+    # Phase 15.7 — pick up LIVE Gold schema (now confirmed present per gate above
+    # unless explicit Silver-stop was permitted)
+    live_gold = prereqs["live_gold"]
+    live_silver = prereqs["live_silver"]
 
     # Peer instances — anyone OTHER than this client with the same dataset.
     all_instances = list_client_instances(warehouse, dataset_code=dataset_code)
@@ -432,6 +702,13 @@ def propose_pipeline(
         proposal["live_gold_dataset_id"] = live_gold["header"]["gold_dataset_id"]
         proposal["live_gold_table_name"] = live_gold["header"]["gold_table_name"]
         proposal["live_gold_anchor"] = live_gold["header"]["gold_anchor"]
+        proposal["live_gold_version"] = live_gold["header"].get("version")
+        # Phase 16.1 — lineage to upstream Silver design (used for "upstream
+        # update available" notifications when Silver version bumps).
+        if live_silver is not None:
+            proposal["live_silver_dataset_id"] = live_silver.get("silver_dataset_id")
+            proposal["live_silver_version"] = live_silver.get("version")
+            proposal["live_silver_pattern"] = live_silver.get("pattern")
         proposal["silver_pattern"] = silver_pattern
         proposal["silver_pattern_is_overkill"] = bool(rec.get("is_overkill_flag", False))
         proposal["silver_dbt_models"] = silver_dbt_models  # dict {filename: sql}
@@ -681,6 +958,50 @@ def approve_and_deploy(
     _chown_to_host_user(dag_path)
     artifact_paths["airflow_dag"] = str(dag_path.relative_to(repo_root))
 
+    # --- 4.5 (Phase 16.1, Wave 1 Item 2) — Execute DDLs against Snowflake ---
+    # Old behavior: deploy emitted SQL files but never ran them. Operator had
+    # to invoke ``scripts/_run_pipeline_ddls.py`` manually from the terminal.
+    # New behavior: deploy = emit + execute. Zero terminal commands.
+    physical_artifacts: dict[str, str] = {}
+    bronze_schema_name = f"BRONZE_{client_id.upper()}"
+    silver_schema_name = f"SILVER_{client_id.upper()}"
+    gold_schema_name = f"GOLD_{client_id.upper()}"
+    for sch in (bronze_schema_name, silver_schema_name, gold_schema_name):
+        try:
+            warehouse.execute(f"CREATE SCHEMA IF NOT EXISTS {sch}")
+            physical_artifacts[f"schema_{sch.lower()}"] = "CREATED"
+        except Exception as exc:
+            _log.warning("deploy.schema_create_failed", schema=sch, err=str(exc)[:120])
+            physical_artifacts[f"schema_{sch.lower()}"] = f"FAILED: {str(exc)[:80]}"
+
+    # Bronze table — only when we have the overflow-aware DDL (Phase 15.7+).
+    if bronze_ddl_text:
+        try:
+            warehouse.execute(str(bronze_ddl_text))
+            physical_artifacts["bronze_table"] = (
+                f"{bronze_schema_name}.raw_{dataset_code.lower()} CREATED"
+            )
+        except Exception as exc:
+            _log.warning("deploy.bronze_ddl_exec_failed", err=str(exc)[:200])
+            physical_artifacts["bronze_table"] = f"FAILED: {str(exc)[:120]}"
+
+    # Gold table.
+    gold_ddl_text = proposal.get("gold_ddl") or ""
+    if gold_ddl_text:
+        try:
+            warehouse.execute(str(gold_ddl_text))
+            physical_artifacts["gold_table"] = f"{gold_schema_name}.{dataset_code.lower()} CREATED"
+        except Exception as exc:
+            _log.warning("deploy.gold_ddl_exec_failed", err=str(exc)[:200])
+            physical_artifacts["gold_table"] = f"FAILED: {str(exc)[:120]}"
+
+    # Silver tables come from dbt at DAG runtime — skip explicit DDL here.
+
+    # Surface the physical-execution result alongside file artifacts so the
+    # UI's deploy success card can show "✅ Bronze table created in Snowflake"
+    # rather than just "Bronze DDL written to <path>".
+    artifact_paths["physical"] = " · ".join(f"{k}={v}" for k, v in physical_artifacts.items())
+
     # --- 5. GX expectation suite (CONTROL.dq_suites row) --------------------
     gx_suite_obj = proposal.get("gx_suite") or {}
     gx_suite_id = _register_gx_suite(
@@ -877,8 +1198,7 @@ def approve_greenfield(
     against the new dataset_code."""
     rows = list(
         warehouse.query(
-            f"SELECT * FROM {CONTROL_SCHEMA}.greenfield_dataset_proposals "
-            f"WHERE greenfield_id = $g",
+            f"SELECT * FROM {CONTROL_SCHEMA}.greenfield_dataset_proposals WHERE greenfield_id = $g",
             {"g": greenfield_id},
         )
     )

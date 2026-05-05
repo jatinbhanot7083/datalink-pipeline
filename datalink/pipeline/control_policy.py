@@ -788,7 +788,7 @@ class PipelineControlPolicyRegistry:
         current = self._require(policy_id)
         if to_status not in _LEGAL_TRANSITIONS.get(current.status, set()):
             raise ValueError(
-                f"illegal policy transition {current.status} → {to_status} " f"for {policy_id!r}"
+                f"illegal policy transition {current.status} → {to_status} for {policy_id!r}"
             )
         sets: dict[str, Any] = {"status": to_status.value}
         if extra_sets:
@@ -796,8 +796,7 @@ class PipelineControlPolicyRegistry:
         set_sql = ", ".join(f"{k} = ${k}" for k in sets)
         params = {**sets, "i": policy_id}
         self._wh.execute(
-            f"UPDATE {CONTROL_SCHEMA}.pipeline_control_policies "
-            f"SET {set_sql} WHERE policy_id = $i",
+            f"UPDATE {CONTROL_SCHEMA}.pipeline_control_policies SET {set_sql} WHERE policy_id = $i",
             params,
         )
         self._audit(policy_id, current.status, to_status, actor, notes)

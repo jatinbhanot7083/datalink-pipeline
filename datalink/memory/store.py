@@ -780,9 +780,9 @@ def suite_source_text(suite_row: dict[str, Any]) -> str:
     no kwargs values that aren't column names or thresholds.
     """
     parts: list[str] = []
-    parts.append(f"Client: {suite_row.get('client_id','')}")
-    parts.append(f"Suite: {suite_row.get('suite_name','')}")
-    parts.append(f"Source: {suite_row.get('source','')}")
+    parts.append(f"Client: {suite_row.get('client_id', '')}")
+    parts.append(f"Suite: {suite_row.get('suite_name', '')}")
+    parts.append(f"Source: {suite_row.get('source', '')}")
     if st := suite_row.get("source_type"):
         parts.append(f"Source-type: {st}")
     if dims := suite_row.get("dq_dimensions"):
@@ -801,10 +801,10 @@ def suite_source_text(suite_row: dict[str, Any]) -> str:
         kw = e.get("kwargs", {}) or {}
         meta = e.get("meta", {}) or {}
         parts.append(
-            f"  - Expectation {i+1}: {e.get('expectation_type','?')} "
+            f"  - Expectation {i + 1}: {e.get('expectation_type', '?')} "
             f"on column={kw.get('column') or kw.get('column_A') or '—'} "
-            f"sev={meta.get('severity','')} dim={meta.get('dq_dimension','')} "
-            f"desc={meta.get('description','')}"
+            f"sev={meta.get('severity', '')} dim={meta.get('dq_dimension', '')} "
+            f"desc={meta.get('description', '')}"
         )
     return "\n".join(parts)
 

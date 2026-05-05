@@ -1,46 +1,51 @@
 {#
-    Multi-tenant schema router — Phase 6.
+    Multi-tenant schema router — Phase 16.5 (Wave 5 dbt fix).
 
-    Mirrors `datalink.tenancy.schema_for()` so Python and dbt agree on the
-    exact schema name for every (client_id, layer) tuple.
+    Routes models to per-tenant + per-layer schemas based on:
+      * dbt var ``client_id`` (default 'default' — back-compat with legacy)
+      * model FQN — first non-package segment indicates layer (silver / gold)
 
     Contract:
 
-        client_id (var) | custom_schema_name | generated schema
-        ----------------+--------------------+-------------------------------
-        'default'       | 'silver'           | {target.schema}_silver
-        'default'       | 'gold_um'          | {target.schema}_gold_um
-        'default'       | <none>             | {target.schema}
-        'acme_health'   | 'silver'           | {target.schema}_silver_ACME_HEALTH
-        'acme_health'   | 'gold_um'          | {target.schema}_gold_um_ACME_HEALTH
-        'acme_health'   | <none>             | {target.schema}_ACME_HEALTH
+        client_id (var) | model FQN segment   | generated schema
+        ----------------+---------------------+----------------------
+        'default'       | (any)               | (legacy behavior — see else branch)
+        'aetna'         | datalink.silver.…   | SILVER_AETNA
+        'aetna'         | datalink.gold.…     | GOLD_AETNA
+        'bcbs'          | datalink.silver.…   | SILVER_BCBS
+        'bcbs'          | datalink.gold.…     | GOLD_BCBS
 
     Invoke as:
+        dbt run --vars '{"client_id": "aetna"}' --select silver.aetna.membership
 
-        dbt run --vars '{"client_id": "acme_health"}'
-
-    If `client_id` is not passed, it defaults to 'default' (backward
-    compatible with every Phase 5.x DAG run).
-
-    ### Why this macro — rather than multiple dbt targets
-
-    dbt supports per-target profiles (via `profiles.yml`), but cycling
-    through 10-15 targets per client is operationally painful: each target
-    needs its own Snowflake / DuckDB connection creds, and CI-time tests
-    would have to enumerate them. A single macro driven by a `--vars` flag
-    keeps the profile count at 1 per environment (local / dev / stage /
-    prod) and scales linearly with new tenants.
+    The CTAS targets BRONZE_AETNA / SILVER_AETNA / GOLD_AETNA in Snowflake,
+    which is what Pipeline Architect's deploy step creates ahead of dbt run.
 #}
 
 {% macro generate_schema_name(custom_schema_name, node) -%}
 
     {%- set client_id = var('client_id', 'default') | string | trim | lower -%}
-    {%- set suffix = '' if client_id == 'default' else '_' ~ client_id | upper -%}
 
-    {%- if custom_schema_name is none -%}
-        {{ target.schema }}{{ suffix }}
+    {%- if client_id == 'default' -%}
+        {# Back-compat: legacy single-tenant flow. Preserve old behaviour
+           (target.schema OR target.schema_<custom>). #}
+        {%- if custom_schema_name is none -%}
+            {{ target.schema }}
+        {%- else -%}
+            {{ target.schema }}_{{ custom_schema_name | trim }}
+        {%- endif -%}
     {%- else -%}
-        {{ target.schema }}_{{ custom_schema_name | trim }}{{ suffix }}
+        {# Per-tenant routing. fqn[1] is the top-level folder under models/. #}
+        {%- set layer = node.fqn[1] | string | lower if node and node.fqn | length > 1 else '' -%}
+        {%- if layer == 'silver' -%}
+            SILVER_{{ client_id | upper }}
+        {%- elif layer == 'gold' -%}
+            GOLD_{{ client_id | upper }}
+        {%- elif custom_schema_name is none -%}
+            {{ target.schema }}_{{ client_id | upper }}
+        {%- else -%}
+            {{ target.schema }}_{{ custom_schema_name | trim }}_{{ client_id | upper }}
+        {%- endif -%}
     {%- endif -%}
 
 {%- endmacro %}

@@ -77,7 +77,7 @@ def main() -> int:
     cur = ctx.cursor()
     try:
         cur.execute(
-            "SELECT CURRENT_USER(), CURRENT_ROLE(), " "CURRENT_WAREHOUSE(), CURRENT_DATABASE(), 1"
+            "SELECT CURRENT_USER(), CURRENT_ROLE(), CURRENT_WAREHOUSE(), CURRENT_DATABASE(), 1"
         )
         row = cur.fetchone()
         if row is None:

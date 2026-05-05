@@ -90,52 +90,68 @@ _NAV_INPUT_INK = "#0a1a3e"  # navy — selectbox internal text on its own white 
 # links by color the same way Notion/Linear/GitHub colour-code their
 # sidebar sections.
 INTERNAL_PAGE_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
+    # Phase 16.3 (Wave 3) — sidebar reorganized in WORKFLOW order: Operate
+    # is the home dashboard, then Author (in pipeline-build sequence), then
+    # Run (the deploy / monitor pages), then Observe (dashboards), then
+    # Inspect (raw data), then Admin.
     (
         "Operate",
-        "cat-operate",  # amber wash — "active ops"
+        "cat-operate",
         [
             ("Control Tower", "/", "🏛️"),
-            ("Pipeline Control", "/Pipeline_Control", "🚦"),  # Phase 12 — thresholds + state
         ],
     ),
     (
-        "Author DQ",
-        "cat-author",  # indigo wash — "build / author"
+        "Author",
+        "cat-author",
         [
-            # Phase 15.6 — Data Model Designer is the new top-of-funnel
-            # for the medallion architecture. Operator designs the whole
-            # medallion-schema relationship PER DATASET (Bronze→Gold mappings,
-            # Gold columns, Silver pattern recommendation) via AI / Manual / Import.
-            # Once LIVE, every client gets a copy when Pipeline Architect deploys.
+            # Top-of-funnel: design Silver+Gold per dataset (cross-client).
             ("Data Model Designer", "/Data_Model_Designer", "🥇"),
-            # Phase 15 — Pipeline Architect consumes the LIVE data model
-            # and materialises per-client Bronze→Silver→Gold pipelines.
+            # Materialise per-client pipelines from the LIVE designs.
             ("Pipeline Architect", "/Pipeline_Architect", "🏛"),
-            # Phase 14 — Data Contract Architect handles one-off Bronze
-            # contracts for messy vendor files outside the master catalog.
-            ("Data Contract Architect", "/Data_Contract_Architect", "🏗"),
-            ("DQ AI Architect", "/DQ_AI_Architect", "🧪"),  # NL-driven entry point
-            ("DQ Author", "/DQ_Author", "📝"),  # grid editor for power users
-            ("DQ Review", "/DQ_Review", "👁️"),  # reviewer queue
-            ("DQ Suite Registry", "/DQ_Suite_Registry", "📚"),  # read-only inventory
-            ("Schema Drift", "/Schema_Drift", "🧬"),  # Phase 11 — contracts + drift
-            ("Smart Mapper", "/Smart_Mapper", "🧠"),  # Phase 13 — NL → dbt + push
+            # DQ authoring — same lifecycle for custom expectations.
+            ("DQ AI Architect", "/DQ_AI_Architect", "🧪"),
+            ("DQ Author", "/DQ_Author", "📝"),
+            ("DQ Review", "/DQ_Review", "👁️"),
+            ("DQ Suite Registry", "/DQ_Suite_Registry", "📚"),
+            ("Schema Drift", "/Schema_Drift", "🧬"),
+        ],
+    ),
+    (
+        "Run",
+        "cat-operate",
+        [
+            ("Run Monitor", "/Run_Monitor", "📺"),
+            ("Pipeline Control", "/Pipeline_Control", "🚦"),
         ],
     ),
     (
         "Observe",
-        "cat-observe",  # emerald wash — "monitor"
+        "cat-observe",
         [
             ("Executive Dashboard", "/Executive_Dashboard", "📈"),
             ("DQ Dashboard", "/DQ_Dashboard", "📊"),
             ("AI Agents", "/AI_Agents", "🤖"),
+            ("Cost & Tokens", "/Cost_Telemetry", "💰"),  # Wave 4 #16
+            ("PHI Governance", "/PHI_Governance", "🛡️"),  # Wave 4 #15
+            ("Lineage", "/Lineage", "🧬"),  # Wave 4 #17
+            ("Anomalies", "/Anomalies", "🚨"),  # Wave 4 #19
         ],
     ),
     (
         "Inspect",
-        "cat-inspect",  # pink wash — "investigate"
+        "cat-inspect",
         [
             ("Warehouse Explorer", "/Warehouse_Explorer", "🔎"),
+            ("Version Browser", "/Version_Browser", "🕒"),
+            ("Contract Marketplace", "/Contract_Marketplace", "🏪"),  # Wave 4 #22
+        ],
+    ),
+    (
+        "Admin",
+        "cat-data",
+        [
+            ("Reset Demo", "/Admin_Reset", "🧨"),
         ],
     ),
 ]
@@ -668,28 +684,98 @@ def _render_client_selector() -> str | None:
     return None if sel == CLIENT_SENTINEL else str(sel)
 
 
-def require_client() -> str:
-    """Halt page rendering until a real client is selected in the sidebar.
+def render_page_client_filter(
+    *,
+    label: str = "Client filter",
+    sentinel_label: str = "🌐 All clients",
+    help_text: str | None = None,
+    persist_to_url: bool = True,
+    key: str = "page_client_filter",
+) -> str | None:
+    """Render an inline client filter at the TOP of a page.
 
-    Call this at the top of any page whose content is client-scoped.
-    When no selection is active, shows a prompt and st.stop()s. When a
-    real client is active, returns it.
+    Phase 16.6: replaces the obsolete global sidebar client picker. Each
+    page that needs client-scoped content calls this near the top.
 
-    MUST be called AFTER ``render_sidebar(...)`` so the selector widget
-    has already been drawn. This function ONLY READS session_state —
-    it does not attempt to write, because Streamlit forbids external
-    modification of a key that's bound to an instantiated widget.
+    Returns the selected client_id or ``None`` when "All clients" is picked
+    (which is the default — pages should render multi-tenant by default).
+
+    Behavior:
+      * Reads ``?client=`` from the URL on first render so deep-links work.
+      * Writes back to URL on change so cross-page links preserve selection.
+      * "All clients" is always the first option (default).
     """
-    sel = st.session_state.get("client_id")
-    if not sel or not isinstance(sel, str) or sel == CLIENT_SENTINEL or sel == "default":
-        st.info(
-            "👆 **Pick a client from the sidebar.** "
-            "Every page renders content scoped to the selected tenant."
-        )
-        st.stop()
-        # mypy doesn't know st.stop() halts — appease the return-type check.
-        raise RuntimeError("unreachable: st.stop() halts execution")
-    return str(sel)
+    # Phase 16.9 — exclude the __global__ pseudo-client from the discovered
+    # tenant list. We add it explicitly with a friendly label so it appears
+    # exactly ONCE in the dropdown (and at the top, where it belongs as the
+    # "build template" option).
+    clients = [c for c in _list_real_clients() if c != "__global__"]
+    global_option = "🌍 __global__  (build template — AI runs ONCE per dataset)"
+    options = [sentinel_label, global_option, *clients]
+
+    # Bootstrap from URL if we have one
+    qp_client = st.query_params.get("client")
+    if qp_client == "__global__":
+        st.session_state.setdefault(key, global_option)
+    elif qp_client and qp_client in clients:
+        st.session_state.setdefault(key, qp_client)
+    else:
+        st.session_state.setdefault(key, sentinel_label)
+
+    # If session value got out of sync (stale option no longer in catalog),
+    # fall back to sentinel
+    if st.session_state[key] not in options:
+        st.session_state[key] = sentinel_label
+
+    sel = st.selectbox(
+        label,
+        options=options,
+        key=key,
+        help=help_text
+        or (
+            "Default = all clients. Pick one to scope this page to that "
+            "tenant. Selection follows you across pages via URL."
+        ),
+    )
+
+    # Translate display label → actual client_id value
+    if sel == global_option:
+        actual_client = "__global__"
+    elif sel == sentinel_label:
+        actual_client = None
+    else:
+        actual_client = str(sel)
+
+    # Sync URL
+    if persist_to_url:
+        if actual_client:
+            if st.query_params.get("client") != actual_client:
+                st.query_params["client"] = actual_client
+        elif "client" in st.query_params:
+            del st.query_params["client"]
+
+    return actual_client
+
+
+def require_client() -> str | None:  # type: ignore[override]
+    """Phase 16.6 (Jatin's directive) — every page renders ALL CLIENTS by
+    default. The dropdown at the top of each page is a FILTER, not a gate.
+
+    Behavior:
+      * Renders an inline picker at the top of the page (default = "🌐 All clients").
+      * Returns ``None`` when "All clients" is selected → page should render
+        cross-tenant aggregate / list view.
+      * Returns the selected ``client_id`` string when a tenant is picked →
+        page filters its content to that client.
+      * Never calls ``st.stop()``. Action sections that need a real client
+        (e.g. Deploy button) check the return value and disable themselves
+        with a helpful "Pick a client to enable…" notice.
+
+    Same return type as ``render_page_client_filter()`` — they're functionally
+    identical now. ``require_client`` is kept for back-compat with pages that
+    already call it.
+    """
+    return render_page_client_filter()
 
 
 def render_sidebar(active: str | None = None) -> None:
@@ -728,8 +814,18 @@ def render_sidebar(active: str | None = None) -> None:
                 unsafe_allow_html=True,
             )
 
-        # ---- CLIENT SELECTOR (global, one per session) ----
-        _render_client_selector()
+        # Phase 16.6 — global client selector REMOVED from sidebar.
+        # Each page now renders its own client filter via
+        # ``render_page_client_filter()``. Reasoning:
+        #   * Sidebar was forcing operators to pick a client before any
+        #     page would render — including pages that should show ALL
+        #     clients by default (Control Tower, PHI Governance, Cost
+        #     dashboard, etc.).
+        #   * Per-page filters give cross-tenant default + explicit scope
+        #     when needed. Better UX, less click-friction.
+        #
+        # The URL ``?client=`` propagation still works via _resolve_current_client()
+        # so deep-links remain functional.
 
         # ---- DASHBOARDS — grouped by lifecycle stage ----
         # Each group renders its own section label + a stack of link cards
