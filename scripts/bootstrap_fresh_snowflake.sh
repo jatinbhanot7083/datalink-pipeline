@@ -9,8 +9,16 @@
 #  PRE-FLIGHT (you must do these before running this script):
 #    1. Update .env with new SNOWFLAKE_ACCOUNT / USER / PASSWORD
 #    2. In the new Snowflake account's web UI, run:
-#         CREATE WAREHOUSE DATALINK_WH WAREHOUSE_SIZE='XSMALL'
-#             AUTO_SUSPEND=60 AUTO_RESUME=TRUE;
+#         -- Recipe per docs/demo_journal.md §"5th ingredient": MEDIUM warehouse,
+#         -- 1-hour warm window, 5-minute statement timeout. ~5× faster than
+#         -- XSMALL for the metadata queries the UI issues; negligible cost.
+#         CREATE WAREHOUSE DATALINK_WH
+#             WAREHOUSE_SIZE = 'MEDIUM'
+#             AUTO_SUSPEND   = 3600
+#             AUTO_RESUME    = TRUE
+#             STATEMENT_TIMEOUT_IN_SECONDS        = 300
+#             STATEMENT_QUEUED_TIMEOUT_IN_SECONDS = 60
+#             INITIALLY_SUSPENDED = TRUE;
 #         CREATE DATABASE DATALINK_DEV;
 #         CREATE ROLE DATALINK_ENGINEER;
 #         GRANT USAGE ON WAREHOUSE DATALINK_WH TO ROLE DATALINK_ENGINEER;

@@ -45,13 +45,17 @@ Run this ONCE in a Snowflake worksheet on the fresh account, as `ACCOUNTADMIN`:
 ```sql
 USE ROLE ACCOUNTADMIN;
 
--- Performance-tuned warehouse (was the cause of 8-9s page loads on 2026-05-04)
+-- Performance-tuned warehouse — MEDIUM with 1-hour warm window.
+-- Recipe per docs/demo_journal.md §"5th ingredient": MEDIUM is ~5× faster
+-- than XSMALL for the metadata-style queries our dashboards issue.
+-- Cost impact ~$0.10 per demo session — negligible for the UX gain.
 CREATE WAREHOUSE IF NOT EXISTS DATALINK_WH
-    WAREHOUSE_SIZE = 'SMALL'                  -- 2x faster than XSMALL for our workload
-    AUTO_SUSPEND = 300                        -- stay warm 5 min idle (vs 60s default)
-    AUTO_RESUME = TRUE
-    STATEMENT_TIMEOUT_IN_SECONDS = 60         -- fail fast on rogue queries
-    INITIALLY_SUSPENDED = FALSE;
+    WAREHOUSE_SIZE = 'MEDIUM'                       -- 5x faster than XSMALL for UI workloads
+    AUTO_SUSPEND   = 3600                           -- 1-hour warm window (vs 60s default)
+    AUTO_RESUME    = TRUE
+    STATEMENT_TIMEOUT_IN_SECONDS        = 300       -- fail rogue queries at 5 min
+    STATEMENT_QUEUED_TIMEOUT_IN_SECONDS = 60        -- fail queue waits at 1 min
+    INITIALLY_SUSPENDED = TRUE;
 
 CREATE DATABASE IF NOT EXISTS DATALINK_DEV;
 CREATE ROLE IF NOT EXISTS DATALINK_ENGINEER;
@@ -62,11 +66,13 @@ GRANT ALL ON FUTURE SCHEMAS IN DATABASE DATALINK_DEV TO ROLE DATALINK_ENGINEER;
 GRANT ALL ON FUTURE TABLES IN DATABASE DATALINK_DEV TO ROLE DATALINK_ENGINEER;
 GRANT ROLE DATALINK_ENGINEER TO USER <YOUR_USERNAME>;
 
--- If warehouse already exists with defaults, alter it instead:
+-- If warehouse already exists with stale config, ALTER it to the canonical recipe:
 ALTER WAREHOUSE DATALINK_WH SET
-    WAREHOUSE_SIZE = 'SMALL'
-    AUTO_SUSPEND = 300
-    STATEMENT_TIMEOUT_IN_SECONDS = 60;
+    WAREHOUSE_SIZE                      = 'MEDIUM',
+    AUTO_SUSPEND                        = 3600,
+    AUTO_RESUME                         = TRUE,
+    STATEMENT_TIMEOUT_IN_SECONDS        = 300,
+    STATEMENT_QUEUED_TIMEOUT_IN_SECONDS = 60;
 
 -- Wake it up so the next page nav is hot:
 ALTER WAREHOUSE DATALINK_WH RESUME IF SUSPENDED;

@@ -21,15 +21,31 @@
 USE ROLE ACCOUNTADMIN;
 
 -- ----------------------------------------------------------------------------
--- 1. Compute warehouse — the smallest size, with aggressive auto-suspend so
---    it costs near-zero while idle.
+-- 1. Compute warehouse — MEDIUM size with 1-hour warm window for snappy UI.
+--    Recipe per docs/demo_journal.md §"5th ingredient — Snowflake-side
+--    warehouse tuning": MEDIUM is ~5× faster than XSMALL on the metadata
+--    queries the dashboards issue. Demo cost is ~$0.10 per session — the
+--    UX gain is worth it. AUTO_SUSPEND=3600 keeps the warehouse hot for
+--    a full hour of idle time before it cools off (otherwise every click
+--    after a coffee break pays a 3-10s spin-up).
 -- ----------------------------------------------------------------------------
 CREATE WAREHOUSE IF NOT EXISTS DATALINK_WH
-  WITH WAREHOUSE_SIZE = 'XSMALL'
-       AUTO_SUSPEND  = 60       -- seconds of idle before suspend
-       AUTO_RESUME   = TRUE     -- wake on first query
+  WITH WAREHOUSE_SIZE = 'MEDIUM'
+       AUTO_SUSPEND  = 3600                          -- 1-hour warm window
+       AUTO_RESUME   = TRUE                          -- wake on first query
+       STATEMENT_TIMEOUT_IN_SECONDS        = 300     -- fail rogue queries at 5 min
+       STATEMENT_QUEUED_TIMEOUT_IN_SECONDS = 60      -- fail queue waits at 1 min
        INITIALLY_SUSPENDED = TRUE
        COMMENT = 'Compute warehouse for DataLink dev pipelines';
+
+-- If the warehouse already exists from a prior bootstrap, ALTER it to the
+-- canonical recipe (CREATE IF NOT EXISTS won't update an existing one).
+ALTER WAREHOUSE DATALINK_WH SET
+  WAREHOUSE_SIZE = 'MEDIUM',
+  AUTO_SUSPEND   = 3600,
+  AUTO_RESUME    = TRUE,
+  STATEMENT_TIMEOUT_IN_SECONDS        = 300,
+  STATEMENT_QUEUED_TIMEOUT_IN_SECONDS = 60;
 
 -- ----------------------------------------------------------------------------
 -- 2. Database + schemas. Per-client schemas (BRONZE_AETNA, etc) are created
