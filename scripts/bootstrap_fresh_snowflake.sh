@@ -150,15 +150,54 @@ print(f'  ✅ {n} tables present in {CONTROL_SCHEMA} (expected 43+)')
 " || { step_fail "create_control_tables failed"; exit 1; }
 
 # ----------------------------------------------------------------------------
-# Step 4 — Phase 15.5 + 15.8 migrations
+# Step 4 — All schema migrations in order (15.5 → 17.4)
+#
+# Each script is idempotent. Running them on a fresh account creates the
+# tables/columns. Running them on an account that already has the migration
+# applied is a no-op.
 # ----------------------------------------------------------------------------
-banner " Step 4: Phase 15.5 + 15.8 migrations"
+banner " Step 4: Schema migrations 15.5 → 17.4 (idempotent)"
 
+# Phase 15 — Gold schema registry + Silver registry
 "${REPO_ROOT}/.venv/bin/python3" "${REPO_ROOT}/scripts/migrate_phase15_5_gold_schema.py" \
-    2>&1 | tail -8 | sed 's/^/  /' || { step_fail "Phase 15.5 migration failed"; exit 1; }
+    2>&1 | tail -6 | sed 's/^/  /' || { step_fail "Phase 15.5 migration failed"; exit 1; }
+step_pass "Phase 15.5 — Gold schema registry"
 
 "${REPO_ROOT}/.venv/bin/python3" "${REPO_ROOT}/scripts/migrate_phase15_8_silver_registry.py" \
-    2>&1 | tail -10 | sed 's/^/  /' || { step_fail "Phase 15.8 migration failed"; exit 1; }
+    2>&1 | tail -6 | sed 's/^/  /' || { step_fail "Phase 15.8 migration failed"; exit 1; }
+step_pass "Phase 15.8 — Silver registry foundation"
+
+# Phase 16.1 — Saved-proposal store (avoids re-burning LLM tokens)
+"${REPO_ROOT}/.venv/bin/python3" "${REPO_ROOT}/scripts/migrate_phase16_agent_proposals.py" \
+    2>&1 | tail -6 | sed 's/^/  /' || { step_fail "Phase 16.1 migration failed"; exit 1; }
+step_pass "Phase 16.1 — Saved-proposal store"
+
+# Phase 16.2 — Universal version registry
+"${REPO_ROOT}/.venv/bin/python3" "${REPO_ROOT}/scripts/migrate_phase16_2_versioning.py" \
+    2>&1 | tail -6 | sed 's/^/  /' || { step_fail "Phase 16.2 migration failed"; exit 1; }
+step_pass "Phase 16.2 — Universal version registry"
+
+# Phase 16.7 — Global template layer (introduces scope_owner column)
+"${REPO_ROOT}/.venv/bin/python3" "${REPO_ROOT}/scripts/migrate_phase16_7_global_templates.py" \
+    2>&1 | tail -6 | sed 's/^/  /' || { step_fail "Phase 16.7 migration failed"; exit 1; }
+step_pass "Phase 16.7 — Global template layer"
+
+# Phase 17.1 — Rename __global__ → GLOBAL_CORP. No-op on fresh account
+# (no rows to UPDATE, no legacy schemas to rename) but harmless.
+docker exec datalink-control-tower python /opt/datalink/scripts/migrate_phase17_1_global_corp_rename.py \
+    2>&1 | tail -6 | sed 's/^/  /' || step_warn "Phase 17.1 migration completed with skips (expected on fresh account)"
+step_pass "Phase 17.1 — Naming canonicalization (GLOBAL_CORP)"
+
+# Phase 17.2 — _extra (Bronze) + _extensions (Silver Sat) VARIANT columns.
+# Skipped automatically when no Bronze/Sat tables exist yet.
+docker exec datalink-control-tower python /opt/datalink/scripts/migrate_phase17_2_extra_extensions.py \
+    2>&1 | tail -6 | sed 's/^/  /' || step_warn "Phase 17.2 migration completed with skips (expected on fresh account)"
+step_pass "Phase 17.2 — VARIANT extension columns"
+
+# Phase 17.4 — Gold semver + per-client subscriptions
+docker exec datalink-control-tower python /opt/datalink/scripts/migrate_phase17_4_gold_versioning.py \
+    2>&1 | tail -8 | sed 's/^/  /' || { step_fail "Phase 17.4 migration failed"; exit 1; }
+step_pass "Phase 17.4 — Gold semver + subscriptions"
 
 # ----------------------------------------------------------------------------
 # Step 5 — Load Bronze catalog (datasets / fields / routing rules)
