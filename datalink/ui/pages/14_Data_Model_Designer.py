@@ -144,7 +144,9 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-require_client()
+# Phase 17.4 UX: capture return value so the dashboard panel below can
+# filter subscriptions by selected client (None = show all clients).
+selected_client_filter = require_client()
 
 
 # ---------------------------------------------------------------------------
@@ -350,11 +352,203 @@ with st.expander(
         st.dataframe(styled, use_container_width=True, hide_index=True, height=520)
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 17.4 UX — Gold Versioning Dashboard (top-level, no clicks required)
+#
+# Renders BY DEFAULT for ALL datasets and ALL clients. Filters by the
+# sidebar client picker when one is selected. No layer radio button or
+# dataset picker required to see this — it's the cross-cutting overview.
+# ═════════════════════════════════════════════════════════════════════════════
+
+st.markdown("## 🏷️ Gold Versioning Dashboard")
+_filter_caption = (
+    f"Filtered to client `{selected_client_filter}`."
+    if selected_client_filter
+    else "**All clients** view. Pick a client in the sidebar to filter subscriptions."
+)
+st.caption(
+    f"All Gold versions across all datasets + per-client subscriptions + "
+    f"compatibility advisor. {_filter_caption}"
+)
+
+with _warehouse(readonly=True) as _wh_dash:
+    try:
+        _all_gold_versions = list(
+            _wh_dash.query(
+                f"SELECT dataset_code, version, semver_major, semver_minor, "
+                f"       compatibility_class, parent_version, status, "
+                f"       migration_window_days, created_at, scope_owner "
+                f"FROM {CONTROL_SCHEMA}.global_gold_schema_datasets "
+                f"WHERE scope_owner = 'GLOBAL_CORP' "
+                f"ORDER BY dataset_code, version DESC"
+            )
+        )
+    except Exception:
+        _all_gold_versions = []
+
+    try:
+        if selected_client_filter:
+            _all_subs = list(
+                _wh_dash.query(
+                    f"SELECT * FROM {CONTROL_SCHEMA}.client_gold_subscriptions "
+                    f"WHERE client_id = $c ORDER BY dataset_code",
+                    {"c": selected_client_filter},
+                )
+            )
+        else:
+            _all_subs = list(
+                _wh_dash.query(
+                    f"SELECT * FROM {CONTROL_SCHEMA}.client_gold_subscriptions "
+                    f"ORDER BY client_id, dataset_code"
+                )
+            )
+    except Exception:
+        _all_subs = []
+
+# ── Cross-cutting versions grid ─────────────────────────────────────────────
+st.markdown("##### 📦 All published Gold versions")
+if _all_gold_versions:
+    _ver_view = []
+    for r in _all_gold_versions:
+        smv = f"v{r.get('semver_major') or 1}.{r.get('semver_minor') or 0}"
+        cls = r.get("compatibility_class") or ""
+        compat_badge = (
+            "🟢 ADDITIVE" if cls == "ADDITIVE"
+            else "🔴 BREAKING" if cls == "BREAKING"
+            else ""
+        )
+        _ver_view.append({
+            "Dataset": r.get("dataset_code"),
+            "Semver": smv,
+            "DB v": r.get("version"),
+            "Status": r.get("status"),
+            "Compat": compat_badge,
+            "Parent v": r.get("parent_version") or "—",
+            "Window (d)": r.get("migration_window_days") or "—",
+            "Created": str(r.get("created_at") or "")[:19],
+        })
+    st.dataframe(pd.DataFrame(_ver_view), use_container_width=True, hide_index=True)
+else:
+    st.info("No Gold versions registered yet. Author one in the Gold tab below.")
+
+# ── Cross-client subscriptions grid ─────────────────────────────────────────
+st.markdown("##### 🤝 Client subscriptions")
+if _all_subs:
+    _sub_view = []
+    for r in _all_subs:
+        status_emoji = {
+            "NONE": "✓",
+            "DUAL_RUN": "🟡 dual-run",
+            "CUTOVER_PENDING": "🟠 cutover pending",
+            "CUTOVER_DONE": "✓ migrated",
+        }.get(str(r.get("migration_status") or "NONE"), str(r.get("migration_status")))
+        target = f"→ v{r['migration_target']}" if r.get("migration_target") else ""
+        _sub_view.append({
+            "Client": r["client_id"],
+            "Dataset": r["dataset_code"],
+            "On version": f"v{r['subscribed_version']}",
+            "Migration": f"{status_emoji} {target}".strip(),
+            "Subscribed": str(r.get("subscribed_at") or "")[:19],
+        })
+    st.dataframe(pd.DataFrame(_sub_view), use_container_width=True, hide_index=True)
+else:
+    if selected_client_filter:
+        st.caption(
+            f"_(No subscriptions for `{selected_client_filter}`.  Auto-populated "
+            f"once a LIVE pipeline exists for this client.)_"
+        )
+    else:
+        st.caption("_(No subscriptions yet.)_")
+
+# ── Compatibility advisor (cross-dataset) ───────────────────────────────────
+st.markdown("##### 🔍 Compatibility advisor")
+# Group versions by dataset so user can pick a dataset that has 2+ versions.
+_versions_by_ds: dict[str, list[dict[str, Any]]] = {}
+for r in _all_gold_versions:
+    _versions_by_ds.setdefault(str(r["dataset_code"]), []).append(r)
+_eligible_ds = [ds for ds, vs in _versions_by_ds.items() if len(vs) >= 2]
+
+if not _eligible_ds:
+    st.caption(
+        "_(Compatibility advisor activates when any dataset has 2+ Gold versions.  "
+        "Today: nothing to compare yet.)_"
+    )
+else:
+    cc1, cc2, cc3 = st.columns([2, 1, 1])
+    with cc1:
+        _adv_ds = st.selectbox(
+            "Dataset",
+            options=_eligible_ds,
+            key="dashboard_advisor_dataset",
+            help="Only datasets with 2+ Gold versions appear here.",
+        )
+    _ds_versions = sorted(
+        [int(v["version"]) for v in _versions_by_ds[_adv_ds]], reverse=True
+    )
+    with cc2:
+        _adv_to = st.selectbox(
+            "To version",
+            options=_ds_versions,
+            index=0,
+            key="dashboard_advisor_to",
+        )
+    with cc3:
+        _adv_from = st.selectbox(
+            "From version",
+            options=_ds_versions,
+            index=min(1, len(_ds_versions) - 1),
+            key="dashboard_advisor_from",
+        )
+
+    if _adv_from != _adv_to:
+        from datalink.versioning import gold_schema as _gs_dash
+
+        with _warehouse(readonly=True) as _wh_compat_dash:
+            try:
+                _report = _gs_dash.compute_compatibility(
+                    warehouse=_wh_compat_dash,
+                    dataset_code=_adv_ds,
+                    from_version=int(_adv_from),
+                    to_version=int(_adv_to),
+                )
+            except Exception as _exc:
+                st.error(f"Compatibility computation failed: {_exc}")
+                _report = None
+        if _report:
+            if _report.overall == "ADDITIVE":
+                st.success(f"🟢 **ADDITIVE** — {_report.summary()}")
+            else:
+                st.error(f"🔴 **BREAKING** — {_report.summary()}")
+            if _report.deltas:
+                _delta_view = [
+                    {
+                        "Column": d.column_name,
+                        "Change": d.change_type,
+                        "Class": d.classification,
+                        "Detail": d.detail,
+                    }
+                    for d in _report.deltas
+                ]
+                st.dataframe(
+                    pd.DataFrame(_delta_view),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.caption(
+                    "_(No column-level deltas — versions are structurally identical.)_"
+                )
+    else:
+        st.caption("_(Pick two different versions to see the diff.)_")
+
+st.markdown("---")
+
+
 # ---------------------------------------------------------------------------
 # Dataset + anchor pickers
 # ---------------------------------------------------------------------------
 
-st.markdown("## 🎯 Pick a dataset")
+st.markdown("## 🎯 Pick a dataset (drill into one for authoring)")
 ds_label_to_obj = {
     f"{d['display_name']}  ({d['total_fields']} fields, {d['category']})": d
     for d in bronze_datasets
