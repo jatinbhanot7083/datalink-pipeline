@@ -50,6 +50,10 @@ Public API:
     )
 """
 
+# Phase 17.4 — specialized Gold semver + per-client subscription helpers
+# (parallel to the generic store above, tailored for the BREAKING/ADDITIVE
+# compatibility classification needed for downstream-product migrations).
+from datalink.versioning import gold_schema  # noqa: F401
 from datalink.versioning.store import (  # noqa: F401
     UpstreamNotification,
     VersionEvent,

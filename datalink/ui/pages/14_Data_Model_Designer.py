@@ -1440,7 +1440,133 @@ elif layer.startswith("🥇"):
     else:
         st.info(f"No LIVE Gold schema for **{selected_dataset_display}** yet.")
 
-    # Gold version history
+    # ─────────────────────────────────────────────────────────────────────
+    # Phase 17.4 — Gold semver + per-client subscription panel
+    # ─────────────────────────────────────────────────────────────────────
+    st.markdown("#### 🏷️ Versioning + Subscribers (Phase 17.4)")
+    with _warehouse(readonly=True) as _wh_ver:
+        try:
+            _ver_rows = list(
+                _wh_ver.query(
+                    "SELECT version, semver_major, semver_minor, compatibility_class, "
+                    "       parent_version, migration_window_days, status "
+                    f"FROM {CONTROL_SCHEMA}.global_gold_schema_datasets "
+                    "WHERE dataset_code = $ds AND scope_owner = 'GLOBAL_CORP' "
+                    "ORDER BY version DESC",
+                    {"ds": selected_dataset_code},
+                )
+            )
+        except Exception:
+            _ver_rows = []
+        try:
+            _sub_rows = list(
+                _wh_ver.query(
+                    f"SELECT * FROM {CONTROL_SCHEMA}.client_gold_subscriptions "
+                    "WHERE dataset_code = $ds ORDER BY client_id",
+                    {"ds": selected_dataset_code},
+                )
+            )
+        except Exception:
+            _sub_rows = []
+
+    vcol1, vcol2 = st.columns([1, 1])
+    with vcol1:
+        st.caption("**Published Gold versions**")
+        if _ver_rows:
+            ver_view = []
+            for r in _ver_rows:
+                smv = f"v{r.get('semver_major') or 1}.{r.get('semver_minor') or 0}"
+                cls = r.get("compatibility_class") or ""
+                badge = ""
+                if cls == "ADDITIVE":
+                    badge = "🟢 ADDITIVE"
+                elif cls == "BREAKING":
+                    badge = "🔴 BREAKING"
+                ver_view.append(
+                    {
+                        "Semver": smv,
+                        "DB v": r.get("version"),
+                        "Status": r.get("status"),
+                        "Compat": badge,
+                        "Parent v": r.get("parent_version") or "—",
+                        "Window (d)": r.get("migration_window_days") or "—",
+                    }
+                )
+            st.dataframe(pd.DataFrame(ver_view), use_container_width=True, hide_index=True)
+        else:
+            st.info("No Gold versions registered yet.")
+    with vcol2:
+        st.caption("**Client subscriptions**")
+        if _sub_rows:
+            sub_view = []
+            for r in _sub_rows:
+                status_emoji = {
+                    "NONE": "✓",
+                    "DUAL_RUN": "🟡 dual-run",
+                    "CUTOVER_PENDING": "🟠 cutover pending",
+                    "CUTOVER_DONE": "✓ migrated",
+                }.get(str(r.get("migration_status") or "NONE"), str(r.get("migration_status")))
+                target = (
+                    f"→ v{r['migration_target']}" if r.get("migration_target") else ""
+                )
+                sub_view.append(
+                    {
+                        "Client": r["client_id"],
+                        "On version": f"v{r['subscribed_version']}",
+                        "Migration": f"{status_emoji} {target}".strip(),
+                        "Subscribed": str(r.get("subscribed_at") or "")[:19],
+                    }
+                )
+            st.dataframe(pd.DataFrame(sub_view), use_container_width=True, hide_index=True)
+        else:
+            st.caption(
+                "_(No subscriptions yet — they auto-populate when LIVE pipelines exist.)_"
+            )
+
+    # Compatibility advisor: pick two versions, show ADDITIVE/BREAKING report
+    if len(_ver_rows) >= 2:
+        with st.expander("🔍 Compatibility advisor (compare two Gold versions)", expanded=False):
+            adv_c1, adv_c2 = st.columns(2)
+            ver_options = [r["version"] for r in _ver_rows]
+            with adv_c1:
+                from_v = st.selectbox("From version", options=ver_options, key=f"compat_from_{selected_dataset_code}")
+            with adv_c2:
+                to_v = st.selectbox("To version", options=ver_options, index=0, key=f"compat_to_{selected_dataset_code}")
+            if from_v != to_v:
+                from datalink.versioning import gold_schema as _gs
+                with _warehouse(readonly=True) as _wh_compat:
+                    try:
+                        report = _gs.compute_compatibility(
+                            warehouse=_wh_compat,
+                            dataset_code=selected_dataset_code,
+                            from_version=int(from_v),
+                            to_version=int(to_v),
+                        )
+                    except Exception as _exc:
+                        st.error(f"Compatibility computation failed: {_exc}")
+                        report = None
+                if report:
+                    if report.overall == "ADDITIVE":
+                        st.success(f"🟢 **ADDITIVE** — {report.summary()}")
+                    else:
+                        st.error(f"🔴 **BREAKING** — {report.summary()}")
+                    if report.deltas:
+                        delta_view = [
+                            {
+                                "Column": d.column_name,
+                                "Change": d.change_type,
+                                "Class": d.classification,
+                                "Detail": d.detail,
+                            }
+                            for d in report.deltas
+                        ]
+                        st.dataframe(
+                            pd.DataFrame(delta_view), use_container_width=True, hide_index=True
+                        )
+                    else:
+                        st.caption("(No column-level deltas — versions are structurally identical.)")
+
+    # Legacy Gold version history (Phase 15.x — kept for audit)
     gold_versions = [g for g in all_gold if g["dataset_code"] == selected_dataset_code]
     if gold_versions:
         with st.expander(f"📜 Gold version history ({len(gold_versions)})", expanded=False):
