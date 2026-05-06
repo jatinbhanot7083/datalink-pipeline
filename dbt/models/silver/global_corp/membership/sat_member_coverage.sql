@@ -2,15 +2,15 @@
 -- Sat       : SAT_MEMBER_COVERAGE
 -- Hub       : HUB_MEMBER
 -- Dataset   : membership
--- Client    : __global__
--- Source    : BRONZE___GLOBAL__.raw_membership
+-- Client    : global_corp
+-- Source    : BRONZE_GLOBAL_CORP.raw_membership
 -- Pattern   : Satellite (descriptive, hash-diff change-detected)
 
 {{ config(
     materialized = 'incremental',
     unique_key   = ['hash_key', '_hash_diff'],
     on_schema_change = 'fail',
-    tags = ['datalink', 'phase15', 'dv2', 'silver', 'sat', '__global__', 'membership']
+    tags = ['datalink', 'phase15', 'dv2', 'silver', 'sat', 'global_corp', 'membership']
 ) }}
 
 WITH bronze AS (

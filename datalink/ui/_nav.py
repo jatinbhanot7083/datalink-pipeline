@@ -705,17 +705,23 @@ def render_page_client_filter(
       * Writes back to URL on change so cross-page links preserve selection.
       * "All clients" is always the first option (default).
     """
-    # Phase 16.9 — exclude the __global__ pseudo-client from the discovered
+    # Phase 17.1 — exclude the GLOBAL_CORP pseudo-client from the discovered
     # tenant list. We add it explicitly with a friendly label so it appears
     # exactly ONCE in the dropdown (and at the top, where it belongs as the
-    # "build template" option).
-    clients = [c for c in _list_real_clients() if c != "__global__"]
-    global_option = "🌍 __global__  (build template — AI runs ONCE per dataset)"
+    # "build template" option). Legacy ``__global__`` rows are also filtered
+    # for the transition window — the migration script renames them.
+    _legacy_global = "__global__"
+    _global_corp = "GLOBAL_CORP"
+    clients = [
+        c for c in _list_real_clients() if c not in (_legacy_global, _global_corp)
+    ]
+    global_option = "🌍 GLOBAL_CORP  (build template — AI runs ONCE per dataset)"
     options = [sentinel_label, global_option, *clients]
 
-    # Bootstrap from URL if we have one
+    # Bootstrap from URL if we have one. Accept both new + legacy values for
+    # graceful redirect from old bookmarks.
     qp_client = st.query_params.get("client")
-    if qp_client == "__global__":
+    if qp_client in (_global_corp, _legacy_global):
         st.session_state.setdefault(key, global_option)
     elif qp_client and qp_client in clients:
         st.session_state.setdefault(key, qp_client)
@@ -740,7 +746,7 @@ def render_page_client_filter(
 
     # Translate display label → actual client_id value
     if sel == global_option:
-        actual_client = "__global__"
+        actual_client = _global_corp
     elif sel == sentinel_label:
         actual_client = None
     else:

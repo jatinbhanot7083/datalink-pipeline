@@ -1,13 +1,13 @@
 """Auto-generated Airflow DAG — Phase 15 Pipeline Architect.
 
-  client_id        : __global__
+  client_id        : global_corp
   dataset_code     : membership
   bronze_anchor    : FLAT_FILE  (Pipe-delimited or CSV vendor extract)
   schedule         : 0 4 * * *
   catalog_version  : 1
   onprem routing   : CC → postgres, E360 → snowflake_share, EC → sqlserver, ESV → snowflake_share, RBN → postgres
 
-DO NOT EDIT BY HAND. Re-generate via `make rebuild-dag CLIENT=__global__ DATASET=membership`
+DO NOT EDIT BY HAND. Re-generate via `make rebuild-dag CLIENT=global_corp DATASET=membership`
 or the Pipeline Architect UI. Manual edits are clobbered on re-deploy.
 """
 
@@ -37,13 +37,13 @@ DEFAULT_ARGS = {
 
 
 with DAG(
-    dag_id="__global___membership_pipeline",
-    description="Phase 15 — __global__ / membership (Bronze→Silver→Gold→OnPrem)",
+    dag_id="global_corp_membership_pipeline",
+    description="Phase 15 — global_corp / membership (Bronze→Silver→Gold→OnPrem)",
     default_args=DEFAULT_ARGS,
     start_date=datetime(2026, 1, 1),
     schedule="0 4 * * *",
     catchup=False,
-    tags=["datalink", "phase15", "__global__", "membership", "flat_file"],
+    tags=["datalink", "phase15", "global_corp", "membership", "flat_file"],
     max_active_runs=1,
 ) as dag:
     start = EmptyOperator(task_id="start")
@@ -52,7 +52,7 @@ with DAG(
         task_id="bronze_land",
         python_callable=bronze_land_task,
         op_kwargs={
-            "client_id": "__global__",
+            "client_id": "global_corp",
             "dataset_code": "membership",
             "bronze_anchor": "FLAT_FILE",
         },
@@ -62,7 +62,7 @@ with DAG(
         task_id="bronze_validate",
         python_callable=bronze_validate_task,
         op_kwargs={
-            "client_id": "__global__",
+            "client_id": "global_corp",
             "dataset_code": "membership",
         },
     )
@@ -71,7 +71,7 @@ with DAG(
         task_id="silver_dbt",
         python_callable=silver_dbt_task,
         op_kwargs={
-            "client_id": "__global__",
+            "client_id": "global_corp",
             "dataset_code": "membership",
         },
     )
@@ -80,7 +80,7 @@ with DAG(
         task_id="gold_dbt",
         python_callable=gold_dbt_task,
         op_kwargs={
-            "client_id": "__global__",
+            "client_id": "global_corp",
             "dataset_code": "membership",
         },
     )
@@ -89,7 +89,7 @@ with DAG(
         task_id="onprem_push",
         python_callable=onprem_push_task,
         op_kwargs={
-            "client_id": "__global__",
+            "client_id": "global_corp",
             "dataset_code": "membership",
             "targets": [
                 {

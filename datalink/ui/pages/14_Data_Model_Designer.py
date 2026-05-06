@@ -471,7 +471,7 @@ with st.container():
                 wh.query(
                     "SELECT silver_dataset_id FROM CONTROL.global_silver_schema_datasets "
                     "WHERE dataset_code = $ds AND status = 'LIVE' "
-                    "  AND scope_owner <> '__global__' LIMIT 1",
+                    "  AND scope_owner NOT IN ('GLOBAL_CORP', '__global__') LIMIT 1",
                     {"ds": selected_dataset_code},
                 )
             )
@@ -479,7 +479,7 @@ with st.container():
                 wh.query(
                     "SELECT gold_dataset_id FROM CONTROL.global_gold_schema_datasets "
                     "WHERE dataset_code = $ds AND status = 'LIVE' "
-                    "  AND scope_owner <> '__global__' LIMIT 1",
+                    "  AND scope_owner NOT IN ('GLOBAL_CORP', '__global__') LIMIT 1",
                     {"ds": selected_dataset_code},
                 )
             )
@@ -530,7 +530,7 @@ with st.container():
                 "🌐 Click to promote → Global",
                 use_container_width=True,
                 type="primary",
-                help="Copy the LIVE client-scoped design over to scope_owner='__global__'. "
+                help="Copy the LIVE client-scoped design over to scope_owner='GLOBAL_CORP'. "
                 "Idempotent — safe to re-click.",
             ):
                 promoted = []

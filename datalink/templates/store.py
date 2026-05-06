@@ -1,15 +1,22 @@
-"""Global Template store — Phase 16.7.
+"""Global Template store — Phase 16.7 (renamed in 17.1).
 
 Backend for the "publish-to-global, clone-to-client" pattern. The platform
 maintains ONE canonical version per dataset across Silver/Gold/Pipeline +
 artifact blobs. Clients clone from this — no LLM tokens spent.
 
 Storage:
-  * CONTROL.global_silver_schema_datasets WHERE scope_owner='__global__'
-  * CONTROL.global_gold_schema_datasets   WHERE scope_owner='__global__'
+  * CONTROL.global_silver_schema_datasets WHERE scope_owner='GLOBAL_CORP'
+  * CONTROL.global_gold_schema_datasets   WHERE scope_owner='GLOBAL_CORP'
   * CONTROL.global_pipeline_templates
   * CONTROL.global_artifact_blobs
   * CONTROL.global_migration_plans (HITL workflow when global changes)
+
+Naming history:
+  * Phase 16.7: introduced as ``__global__`` (Python-dunder convention — wrong).
+  * Phase 17.1: renamed to ``GLOBAL_CORP`` (enterprise-grade naming).
+    The legacy literal is accepted at read time (see GLOBAL_SCOPE_LEGACY)
+    to allow gradual migration of pre-existing rows; new writes always
+    use the canonical ``GLOBAL_CORP``.
 """
 
 from __future__ import annotations
@@ -25,7 +32,16 @@ from datalink.quality.control import CONTROL_SCHEMA
 
 _log = get_logger(__name__)
 
-GLOBAL_SCOPE = "__global__"
+# Phase 17.1: canonical name. All NEW writes use this value.
+GLOBAL_SCOPE = "GLOBAL_CORP"
+# Legacy value still found in pre-17.1 rows. Read paths accept either via
+# the SCOPE_OWNER_PREDICATE helper below until the migration script has
+# rewritten every row.
+GLOBAL_SCOPE_LEGACY = "__global__"
+# SQL fragment usable in WHERE clauses to match either form (transition only).
+SCOPE_OWNER_PREDICATE = (
+    f"scope_owner IN ('{GLOBAL_SCOPE}', '{GLOBAL_SCOPE_LEGACY}')"
+)
 
 
 class GlobalTemplateError(Exception):
@@ -75,11 +91,11 @@ def list_globals() -> list[dict[str, Any]]:
             p.schedule_cron
         FROM (
             SELECT * FROM {CONTROL_SCHEMA}.global_silver_schema_datasets
-            WHERE scope_owner = '{GLOBAL_SCOPE}' AND status = 'LIVE'
+            WHERE {SCOPE_OWNER_PREDICATE} AND status = 'LIVE'
         ) s
         FULL OUTER JOIN (
             SELECT * FROM {CONTROL_SCHEMA}.global_gold_schema_datasets
-            WHERE scope_owner = '{GLOBAL_SCOPE}' AND status = 'LIVE'
+            WHERE {SCOPE_OWNER_PREDICATE} AND status = 'LIVE'
         ) g ON g.dataset_code = s.dataset_code
         FULL OUTER JOIN (
             SELECT * FROM {CONTROL_SCHEMA}.global_pipeline_templates
@@ -99,9 +115,9 @@ def has_global(dataset_code: str) -> dict[str, bool]:
             f"""
         SELECT
           (SELECT COUNT(*) FROM {CONTROL_SCHEMA}.global_silver_schema_datasets
-            WHERE scope_owner='{GLOBAL_SCOPE}' AND dataset_code = $ds AND status='LIVE') AS s,
+            WHERE {SCOPE_OWNER_PREDICATE} AND dataset_code = $ds AND status='LIVE') AS s,
           (SELECT COUNT(*) FROM {CONTROL_SCHEMA}.global_gold_schema_datasets
-            WHERE scope_owner='{GLOBAL_SCOPE}' AND dataset_code = $ds AND status='LIVE') AS g,
+            WHERE {SCOPE_OWNER_PREDICATE} AND dataset_code = $ds AND status='LIVE') AS g,
           (SELECT COUNT(*) FROM {CONTROL_SCHEMA}.global_pipeline_templates
             WHERE dataset_code = $ds AND status='LIVE') AS p
         """,
@@ -124,7 +140,7 @@ def get_global(dataset_code: str) -> dict[str, Any]:
     silver = list(
         _wh().query(
             f"SELECT * FROM {CONTROL_SCHEMA}.global_silver_schema_datasets "
-            f"WHERE scope_owner='{GLOBAL_SCOPE}' AND dataset_code = $ds AND status='LIVE' "
+            f"WHERE {SCOPE_OWNER_PREDICATE} AND dataset_code = $ds AND status='LIVE' "
             f"ORDER BY version DESC LIMIT 1",
             {"ds": dataset_code},
         )
@@ -132,7 +148,7 @@ def get_global(dataset_code: str) -> dict[str, Any]:
     gold = list(
         _wh().query(
             f"SELECT * FROM {CONTROL_SCHEMA}.global_gold_schema_datasets "
-            f"WHERE scope_owner='{GLOBAL_SCOPE}' AND dataset_code = $ds AND status='LIVE' "
+            f"WHERE {SCOPE_OWNER_PREDICATE} AND dataset_code = $ds AND status='LIVE' "
             f"ORDER BY version DESC LIMIT 1",
             {"ds": dataset_code},
         )
@@ -172,7 +188,7 @@ def get_global(dataset_code: str) -> dict[str, Any]:
 def publish_silver_to_global(silver_dataset_id: str, *, by: str) -> str:
     """Mark an existing Silver schema design as GLOBAL.
 
-    Sets scope_owner='__global__' on the row. The Silver becomes the canonical
+    Sets scope_owner='GLOBAL_CORP' on the row. The Silver becomes the canonical
     template for that dataset; future clients clone from it.
     """
     _wh().execute(
@@ -606,7 +622,7 @@ def plan_migration(
         rows = list(
             _wh().query(
                 f"SELECT DISTINCT scope_owner FROM {CONTROL_SCHEMA}.global_silver_schema_datasets "
-                f"WHERE forked_from_global_version = $v AND scope_owner <> '{GLOBAL_SCOPE}'",
+                f"WHERE forked_from_global_version = $v AND scope_owner NOT IN ('{GLOBAL_SCOPE}', '{GLOBAL_SCOPE_LEGACY}')",
                 {"v": from_version},
             )
         )
@@ -615,7 +631,7 @@ def plan_migration(
         rows = list(
             _wh().query(
                 f"SELECT DISTINCT scope_owner FROM {CONTROL_SCHEMA}.global_gold_schema_datasets "
-                f"WHERE forked_from_global_version = $v AND scope_owner <> '{GLOBAL_SCOPE}'",
+                f"WHERE forked_from_global_version = $v AND scope_owner NOT IN ('{GLOBAL_SCOPE}', '{GLOBAL_SCOPE_LEGACY}')",
                 {"v": from_version},
             )
         )

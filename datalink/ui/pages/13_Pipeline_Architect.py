@@ -152,11 +152,13 @@ st.markdown(
 
 selected_client = require_client()
 
-# Phase 16.9 — special-case the __global__ pseudo-client. This is where AI
+# Phase 17.1 — special-case the GLOBAL_CORP pseudo-client. This is where AI
 # spends tokens ONCE per dataset to build the canonical pipeline template.
 # All real clients clone this — never spend tokens on AI again.
-GLOBAL_CLIENT = "__global__"
-_is_global_build_mode = selected_client == GLOBAL_CLIENT
+# Legacy alias ``__global__`` kept temporarily for in-flight session links.
+GLOBAL_CLIENT = "GLOBAL_CORP"
+GLOBAL_CLIENT_LEGACY = "__global__"
+_is_global_build_mode = selected_client in (GLOBAL_CLIENT, GLOBAL_CLIENT_LEGACY)
 
 # Phase 16.6 — when no client is picked (default), render an "all clients"
 # overview and stop. Deploy / propose forms only render after a real client
@@ -184,9 +186,9 @@ if selected_client is None:
     gcol1, gcol2 = st.columns([1, 4])
     with gcol1:
         # st.page_link rejects query-string URLs on internal paths. Use a
-        # plain anchor so we can pass ?client=__global__ deep-link.
+        # plain anchor so we can pass ?client=GLOBAL_CORP deep-link.
         st.markdown(
-            '<a href="/Pipeline_Architect?client=__global__" target="_self" '
+            '<a href="/Pipeline_Architect?client=GLOBAL_CORP" target="_self" '
             'style="display:inline-block;background:#0a1a3e;color:#fff;'
             "padding:.6rem 1.2rem;border-radius:8px;text-decoration:none;"
             'font-weight:700;width:100%;text-align:center;">'
@@ -336,7 +338,7 @@ with st.expander("📋 Browse catalog — 33 datasets, click to inspect", expand
 # Phase 16.10 — Published Global Templates grid + Clone action
 #
 # This is the "shopping aisle" for new clients: every dataset that has been
-# promoted to global (Silver+Gold+Pipeline LIVE under scope_owner='__global__')
+# promoted to global (Silver+Gold+Pipeline LIVE under scope_owner='GLOBAL_CORP')
 # shows up here with a one-click [📦 Clone to Client] action. Zero LLM tokens.
 # ═════════════════════════════════════════════════════════════════════════════
 from datalink.templates import store as _tpl_store_grid  # noqa: E402
@@ -359,7 +361,7 @@ if not _published_globals:
     st.info(
         "📭 No global templates published yet. **How to publish one:**\n\n"
         "1. Switch the client picker (top-left of page) to "
-        "`🌍 __global__  (build template — AI runs ONCE per dataset)`\n"
+        "`🌍 GLOBAL_CORP  (build template — AI runs ONCE per dataset)`\n"
         "2. Pick a dataset and run the AI propose flow once (Silver → Gold "
         "→ Pipeline)\n"
         "3. Approve & Deploy — the artifacts auto-publish to global\n\n"
@@ -414,7 +416,7 @@ else:
         with cc2:
             _clone_target_client = st.text_input(
                 "Target client",
-                placeholder=selected_client if selected_client and selected_client != "__global__" else "aetna",
+                placeholder=selected_client if selected_client and selected_client not in (GLOBAL_CLIENT, GLOBAL_CLIENT_LEGACY) else "aetna",
                 key="global_clone_target_client",
                 help="Lower-case client_id. Bronze/Silver/Gold schemas auto-create.",
             )
@@ -447,7 +449,7 @@ else:
     else:
         st.caption(
             "_(No clonable templates yet — all rows above are missing the pipeline component. "
-            "Deploy + publish a pipeline against `__global__` to make a row clonable.)_"
+            "Deploy + publish a pipeline against `GLOBAL_CORP` to make a row clonable.)_"
         )
 
 
@@ -561,7 +563,7 @@ def _pill(label: str, ok: bool) -> str:
 
 # Three components of a "complete global template": Silver schema + Gold
 # schema + Pipeline blob. Silver+Gold may already be published (any LIVE
-# Silver/Gold authored in DMD defaults to scope_owner='__global__'); the
+# Silver/Gold authored in DMD defaults to scope_owner='GLOBAL_CORP'); the
 # pipeline part requires deploying once + publishing to global.
 all_three_published = _has_global_silver and _has_global_gold and _has_global_pipeline
 some_published = _has_global_silver or _has_global_gold or _has_global_pipeline
@@ -587,7 +589,7 @@ elif some_published:
     subtext = (
         f"Still needed: <strong>{', '.join(missing)}</strong>. "
         f"Switch to <strong>🌍 Global Builder</strong> mode "
-        f"(URL <code>?client=__global__</code>) to finish the template "
+        f"(URL <code>?client=GLOBAL_CORP</code>) to finish the template "
         f"with one AI deploy."
     )
 else:
@@ -596,7 +598,7 @@ else:
     subtext = (
         "Author Silver+Gold (cross-tenant designs) in <strong>Data Model "
         "Designer</strong>, then run the AI pipeline build ONCE in "
-        "<strong>🌍 Global Builder</strong> (<code>?client=__global__</code>). "
+        "<strong>🌍 Global Builder</strong> (<code>?client=GLOBAL_CORP</code>). "
         "After that, all real clients clone instantly."
     )
 
@@ -1777,7 +1779,7 @@ else:
 #   1. Inserts a row into CONTROL.global_pipeline_templates (LIVE)
 #   2. Captures every artifact file (Bronze DDL, Silver dbt files,
 #      Gold dbt, Airflow DAG) into CONTROL.global_artifact_blobs
-#   3. Marks the underlying Silver+Gold designs as scope_owner='__global__'
+#   3. Marks the underlying Silver+Gold designs as scope_owner='GLOBAL_CORP'
 #      (handled separately in Data Model Designer's Publish to Global,
 #      but we trigger it here too for one-click promotion)
 #

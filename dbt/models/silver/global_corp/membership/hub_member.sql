@@ -1,15 +1,15 @@
 -- Phase 15.7 DV2 Silver — Hub
 -- Hub      : HUB_MEMBER
 -- Dataset  : membership
--- Client   : __global__
--- Source   : BRONZE___GLOBAL__.raw_membership
+-- Client   : global_corp
+-- Source   : BRONZE_GLOBAL_CORP.raw_membership
 -- Pattern  : Hub (immutable business-key registry)
 
 {{ config(
     materialized = 'incremental',
     unique_key   = 'hash_key',
     on_schema_change = 'fail',
-    tags = ['datalink', 'phase15', 'dv2', 'silver', 'hub', '__global__', 'membership']
+    tags = ['datalink', 'phase15', 'dv2', 'silver', 'hub', 'global_corp', 'membership']
 ) }}
 
 SELECT

@@ -1,6 +1,6 @@
 -- Phase 15 Pipeline Architect — Gold dbt model
--- Source : SILVER___GLOBAL__.membership_clean
--- Target : GOLD___GLOBAL__.membership
+-- Source : SILVER_GLOBAL_CORP.membership_clean
+-- Target : GOLD_GLOBAL_CORP.membership
 -- Pattern: latest-per-business-key snapshot (UM_OPERATIONAL)
 
 {{ config(
@@ -59,7 +59,7 @@ WITH ranked AS (
             PARTITION BY member_card_id, member_medicare_id, member_medicaid_id, attributed_provider_id
             ORDER BY _load_dt DESC, _record_hash DESC
         ) AS _rn
-    FROM {{ source('silver___global__', 'membership_clean') }}
+    FROM {{ source('silver_global_corp', 'membership_clean') }}
 )
 SELECT
     payer_name,
