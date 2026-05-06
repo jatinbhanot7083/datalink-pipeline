@@ -45,9 +45,12 @@ if _ENV.exists():
         os.environ.setdefault(k.strip(), v.strip().strip("'").strip('"'))
 os.environ.setdefault("DL_ENV", "dev")
 
-from datalink.adapters.factory import build_adapters  # noqa: E402
-from datalink.config.loader import load_settings  # noqa: E402
-from datalink.quality.control import CONTROL_SCHEMA  # noqa: E402
+# Direct Snowflake connector — avoids importing the full adapter factory
+# which would pull in azure-storage-blob and other deps the migration
+# doesn't need. Migrations should be lean by design.
+import snowflake.connector  # noqa: E402
+
+CONTROL_SCHEMA = os.environ.get("DL_CONTROL_SCHEMA", "CONTROL")
 
 LEGACY = "__global__"
 CANONICAL = "GLOBAL_CORP"
@@ -84,11 +87,25 @@ def _section(title: str) -> None:
     print("=" * 72)
 
 
-def _exec(wh, sql: str, *, ok_msg: str | None = None) -> bool:
+def _connect():
+    """Direct Snowflake connection from env vars. No project deps required."""
+    cfg = {
+        "account": os.environ["SNOWFLAKE_ACCOUNT"],
+        "user": os.environ["SNOWFLAKE_USER"],
+        "password": os.environ["SNOWFLAKE_PASSWORD"],
+        "warehouse": os.environ.get("SNOWFLAKE_WAREHOUSE", "COMPUTE_WH"),
+        "database": os.environ.get("SNOWFLAKE_DATABASE", "DATALINK_DEV"),
+        "role": os.environ.get("SNOWFLAKE_ROLE", "ACCOUNTADMIN"),
+        "schema": os.environ.get("SNOWFLAKE_SCHEMA", CONTROL_SCHEMA),
+    }
+    return snowflake.connector.connect(**cfg)
+
+
+def _exec(cur, sql: str, *, ok_msg: str | None = None) -> bool:
     """Execute one statement, log + swallow exceptions so the migration
     keeps making progress on the rest. Returns True if statement succeeded."""
     try:
-        wh.execute(sql)
+        cur.execute(sql)
         print(f"  [OK]   {ok_msg or sql[:80]}")
         return True
     except Exception as exc:
@@ -96,32 +113,34 @@ def _exec(wh, sql: str, *, ok_msg: str | None = None) -> bool:
         return False
 
 
-def _count(wh, sql: str) -> int:
+def _count(cur, sql: str) -> int:
     try:
-        rows = list(wh.query(sql))
-        return int(rows[0]["c"]) if rows else 0
+        cur.execute(sql)
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
     except Exception:
         return -1
 
 
 def main() -> int:
-    settings = load_settings(env=os.environ.get("DL_ENV", "dev"))
-    wh = build_adapters(settings).warehouse
-    print(f"Warehouse: {type(wh).__name__}")
     print(f"Legacy:    {LEGACY!r}")
     print(f"Canonical: {CANONICAL!r}")
+    print(f"Database:  {os.environ.get('SNOWFLAKE_DATABASE', 'DATALINK_DEV')}")
+    print(f"CONTROL:   {CONTROL_SCHEMA}")
+    conn = _connect()
+    cur = conn.cursor()
 
     # ---- 1. Metadata UPDATE — scope_owner columns ----------------------
     _section("Step 1/4 — UPDATE scope_owner columns")
     for tbl in SCOPE_OWNER_TABLES:
         before = _count(
-            wh, f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} WHERE scope_owner = '{LEGACY}'"
+            cur, f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} WHERE scope_owner = '{LEGACY}'"
         )
         if before <= 0:
             print(f"  [skip] {tbl}: 0 rows with scope_owner='{LEGACY}'")
             continue
         _exec(
-            wh,
+            cur,
             f"UPDATE {CONTROL_SCHEMA}.{tbl} "
             f"SET scope_owner = '{CANONICAL}' "
             f"WHERE scope_owner = '{LEGACY}'",
@@ -132,13 +151,13 @@ def main() -> int:
     _section("Step 2/4 — UPDATE client_id columns (template rows)")
     for tbl in CLIENT_ID_TABLES:
         before = _count(
-            wh, f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} WHERE client_id = '{LEGACY}'"
+            cur, f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} WHERE client_id = '{LEGACY}'"
         )
         if before <= 0:
             print(f"  [skip] {tbl}: 0 rows with client_id='{LEGACY}'")
             continue
         _exec(
-            wh,
+            cur,
             f"UPDATE {CONTROL_SCHEMA}.{tbl} "
             f"SET client_id = '{CANONICAL}' "
             f"WHERE client_id = '{LEGACY}'",
@@ -149,13 +168,12 @@ def main() -> int:
     for tbl in TEMPLATE_ID_TABLES:
         # Only attempt rewrite if the table + column exist.
         try:
-            sample = list(
-                wh.query(
-                    f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} "
-                    f"WHERE template_id LIKE '{LEGACY}:%'"
-                )
+            cur.execute(
+                f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} "
+                f"WHERE template_id LIKE '{LEGACY}:%'"
             )
-            n = int(sample[0]["c"]) if sample else 0
+            row = cur.fetchone()
+            n = int(row[0]) if row else 0
         except Exception:
             print(f"  [skip] {tbl}: missing or no template_id column")
             continue
@@ -163,7 +181,7 @@ def main() -> int:
             print(f"  [skip] {tbl}: no template_id starting with '{LEGACY}:'")
             continue
         _exec(
-            wh,
+            cur,
             f"UPDATE {CONTROL_SCHEMA}.{tbl} "
             f"SET template_id = REPLACE(template_id, '{LEGACY}:', '{CANONICAL}:') "
             f"WHERE template_id LIKE '{LEGACY}:%'",
@@ -175,12 +193,12 @@ def main() -> int:
     for old, new in SCHEMA_RENAMES:
         # Check if old exists, new doesn't (idempotency)
         old_exists = _count(
-            wh,
+            cur,
             f"SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.SCHEMATA "
             f"WHERE SCHEMA_NAME = '{old}'",
         )
         new_exists = _count(
-            wh,
+            cur,
             f"SELECT COUNT(*) AS c FROM INFORMATION_SCHEMA.SCHEMATA "
             f"WHERE SCHEMA_NAME = '{new}'",
         )
@@ -196,7 +214,7 @@ def main() -> int:
             )
             continue
         _exec(
-            wh,
+            cur,
             f'ALTER SCHEMA "{old}" RENAME TO "{new}"',
             ok_msg=f"{old} → {new}",
         )
@@ -205,7 +223,7 @@ def main() -> int:
     _section("Step 4/4 — Update DEFAULT 'scope_owner' to 'GLOBAL_CORP'")
     for tbl in SCOPE_OWNER_TABLES:
         _exec(
-            wh,
+            cur,
             f"ALTER TABLE {CONTROL_SCHEMA}.{tbl} "
             f"ALTER COLUMN scope_owner SET DEFAULT '{CANONICAL}'",
             ok_msg=f"{tbl}.scope_owner DEFAULT → '{CANONICAL}'",
@@ -215,34 +233,37 @@ def main() -> int:
     _section("Verification")
     for tbl in SCOPE_OWNER_TABLES:
         leg = _count(
-            wh, f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} WHERE scope_owner = '{LEGACY}'"
+            cur, f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} WHERE scope_owner = '{LEGACY}'"
         )
         can = _count(
-            wh,
+            cur,
             f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} WHERE scope_owner = '{CANONICAL}'",
         )
         print(f"  {tbl:45s} legacy={leg}  canonical={can}")
     for tbl in CLIENT_ID_TABLES:
         leg = _count(
-            wh, f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} WHERE client_id = '{LEGACY}'"
+            cur, f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} WHERE client_id = '{LEGACY}'"
         )
         can = _count(
-            wh,
+            cur,
             f"SELECT COUNT(*) AS c FROM {CONTROL_SCHEMA}.{tbl} WHERE client_id = '{CANONICAL}'",
         )
         print(f"  {tbl:45s} legacy={leg}  canonical={can}")
     print()
     print("Snowflake schemas matching either name:")
     for old, new in SCHEMA_RENAMES:
-        rows = list(
-            wh.query(
+        try:
+            cur.execute(
                 f"SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA "
                 f"WHERE SCHEMA_NAME IN ('{old}', '{new}') ORDER BY SCHEMA_NAME"
             )
-        )
-        names = [r["SCHEMA_NAME"] for r in rows] if rows else []
+            names = [r[0] for r in cur.fetchall()]
+        except Exception:
+            names = []
         print(f"  {old} / {new}: {names if names else 'NONE'}")
 
+    cur.close()
+    conn.close()
     print()
     print("Migration 17.1 complete. Next: docker compose down && docker compose up -d")
     return 0
