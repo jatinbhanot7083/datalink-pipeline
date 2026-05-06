@@ -20,12 +20,12 @@ WITH bronze AS (
 )
 SELECT
     hash_key,
-        TRY_CAST((COALESCE(member_card_id, member_medicare_id, member_medicaid_id)) AS VARCHAR) AS member_id,
-        TRY_CAST((member_phone) AS VARCHAR) AS phone,
-        TRY_CAST((CURRENT_TIMESTAMP()) AS TIMESTAMP) AS dw_load_date,
-        TRY_CAST((COALESCE(refresh_date, CURRENT_DATE())) AS DATE) AS dw_effective_from,
-        TRY_CAST((NULL) AS DATE) AS dw_effective_to,
-        TRY_CAST((TRUE) AS BOOLEAN) AS dw_is_current,
+        TRY_CAST(CAST((COALESCE(member_card_id, member_medicare_id, member_medicaid_id)) AS VARCHAR) AS VARCHAR) AS member_id,
+        TRY_CAST(CAST((member_phone) AS VARCHAR) AS VARCHAR) AS phone,
+        TRY_CAST(CAST((CURRENT_TIMESTAMP()) AS VARCHAR) AS TIMESTAMP) AS dw_load_date,
+        TRY_CAST(CAST((COALESCE(refresh_date, CURRENT_DATE())) AS VARCHAR) AS DATE) AS dw_effective_from,
+        TRY_CAST(CAST((NULL) AS VARCHAR) AS DATE) AS dw_effective_to,
+        TRY_CAST(CAST((TRUE) AS VARCHAR) AS BOOLEAN) AS dw_is_current,
     _load_dt,
     _record_source,
     _batch_id,

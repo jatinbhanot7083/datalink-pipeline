@@ -36,6 +36,10 @@ models:
       +schema: gold_um
       +materialized: table
       um_operational:
+        # Phase 17.2: legacy UM Operational gold models reference hubs/sats
+        # that were retired in Phase 16. Disabled until rewired to DV2 or
+        # explicitly resurrected. Files preserved for git history.
+        +enabled: false
         +tags: ["gold", "um_operational"]
 
 seeds:

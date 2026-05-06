@@ -59,7 +59,7 @@ WITH ranked AS (
             PARTITION BY member_card_id, member_medicare_id, member_medicaid_id, attributed_provider_id
             ORDER BY _load_dt DESC, _record_hash DESC
         ) AS _rn
-    FROM {{ source('silver_global_corp', 'membership_clean') }}
+    FROM {{ source('silver', 'membership_clean') }}
 )
 SELECT
     payer_name,

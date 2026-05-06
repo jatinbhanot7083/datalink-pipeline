@@ -1,6 +1,35 @@
 version: 2
 
 sources:
+  # Phase 17.2: parameterized 'silver' source (parallel to 'bronze' below).
+  # Schema resolves at parse-time via the `client_id` dbt var, so the same
+  # source declaration serves every tenant + GLOBAL_CORP.
+  #   var client_id == 'default'      → 'SILVER'
+  #   var client_id == 'GLOBAL_CORP'  → 'SILVER_GLOBAL_CORP'
+  #   var client_id == 'aetna'        → 'SILVER_AETNA'
+  - name: silver
+    description: "Cleansed + DV2 layer (hubs/sats + legacy denormalized)."
+    schema: "{% if var('client_id', 'default') == 'default' %}SILVER{% else %}SILVER_{{ var('client_id') | upper }}{% endif %}"
+    tables:
+      - name: membership_clean
+        description: "Legacy denormalized Silver — Phase 15 pattern. Kept for Gold compatibility during DV2 transition."
+      - name: hub_member
+        description: "Phase 17 DV2 hub — unique member business key registry."
+      - name: sat_member_demographics
+        description: "Phase 17 DV2 satellite — demographic attributes."
+      - name: sat_member_address
+        description: "Phase 17 DV2 satellite — address."
+      - name: sat_member_contact
+        description: "Phase 17 DV2 satellite — contact."
+      - name: sat_member_coverage
+        description: "Phase 17 DV2 satellite — coverage."
+      - name: sat_member_eligibility
+        description: "Phase 17 DV2 satellite — eligibility window."
+      - name: sat_member_plan
+        description: "Phase 17 DV2 satellite — plan attribution."
+      - name: sat_member_provider_attribution
+        description: "Phase 17 DV2 satellite — provider attribution."
+
   - name: bronze
     description: "Raw ingestion layer (written by datalink.pipeline.bronze)."
     # Phase 6 multi-tenant: schema name resolved at parse time via the

@@ -296,7 +296,14 @@ def _render_sat_dbt(
         m = mappings_by_gold_col.get(c.gold_column_name)
         sql_expr = m.transform_sql if m else c.gold_column_name
         sql_type = _LOGICAL_TO_SQL.get(c.logical_type.upper(), "VARCHAR")
-        select_lines.append(f"        TRY_CAST(({sql_expr}) AS {sql_type}) AS {c.gold_column_name}")
+        # Phase 17.2 — bridge through VARCHAR so TRY_CAST works across all
+        # Snowflake source types (TIMESTAMP_LTZ → TIMESTAMP_NTZ direct cast
+        # is forbidden; same for many NUMBER → VARCHAR conversions). The
+        # intermediate CAST AS VARCHAR is always supported.
+        select_lines.append(
+            f"        TRY_CAST(CAST(({sql_expr}) AS VARCHAR) AS {sql_type}) "
+            f"AS {c.gold_column_name}"
+        )
         diff_inputs.append(f"COALESCE(CAST(({sql_expr}) AS VARCHAR), '')")
 
     hash_diff_expr = (
