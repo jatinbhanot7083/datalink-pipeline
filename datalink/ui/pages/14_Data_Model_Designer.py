@@ -337,7 +337,7 @@ def _color_status(val: str) -> str:
 
 with st.expander(
     f"📊 Drill into all {bronze_count} datasets — Bronze / Silver / Gold readiness",
-    expanded=False,
+    expanded=True,
 ):
     if not bronze_datasets:
         st.warning(
@@ -662,7 +662,7 @@ elif layer.startswith("🥈"):
                     }
                 )
             st.dataframe(pd.DataFrame(tables_rows), use_container_width=True, hide_index=True)
-        with st.expander(f"🧬 Silver columns ({len(schema['columns'])})", expanded=False):
+        with st.expander(f"🧬 Silver columns ({len(schema['columns'])})", expanded=True):
             col_rows = []
             for c in schema["columns"]:
                 tag = ""
@@ -685,7 +685,7 @@ elif layer.startswith("🥈"):
                 )
             st.dataframe(pd.DataFrame(col_rows), use_container_width=True, hide_index=True)
         with st.expander(
-            f"🔁 Bronze → Silver mappings ({len(schema['mappings'])})", expanded=False
+            f"🔁 Bronze → Silver mappings ({len(schema['mappings'])})", expanded=True
         ):
             map_rows = []
             for m in schema["mappings"]:
@@ -711,7 +711,7 @@ elif layer.startswith("🥈"):
     # Version history
     silver_versions = [s for s in all_silver if s["dataset_code"] == selected_dataset_code]
     if silver_versions:
-        with st.expander(f"📜 Silver version history ({len(silver_versions)})", expanded=False):
+        with st.expander(f"📜 Silver version history ({len(silver_versions)})", expanded=True):
             ver_rows = []
             for s in silver_versions:
                 ver_rows.append(
@@ -1525,7 +1525,7 @@ elif layer.startswith("🥇"):
 
     # Compatibility advisor: pick two versions, show ADDITIVE/BREAKING report
     if len(_ver_rows) >= 2:
-        with st.expander("🔍 Compatibility advisor (compare two Gold versions)", expanded=False):
+        with st.expander("🔍 Compatibility advisor (compare two Gold versions)", expanded=True):
             adv_c1, adv_c2 = st.columns(2)
             ver_options = [r["version"] for r in _ver_rows]
             with adv_c1:
@@ -1569,7 +1569,7 @@ elif layer.startswith("🥇"):
     # Legacy Gold version history (Phase 15.x — kept for audit)
     gold_versions = [g for g in all_gold if g["dataset_code"] == selected_dataset_code]
     if gold_versions:
-        with st.expander(f"📜 Gold version history ({len(gold_versions)})", expanded=False):
+        with st.expander(f"📜 Gold version history ({len(gold_versions)})", expanded=True):
             ver_rows = []
             for g in gold_versions:
                 ver_rows.append(
@@ -1794,7 +1794,7 @@ elif layer.startswith("🥇"):
             st.dataframe(pd.DataFrame(col_rows), use_container_width=True, hide_index=True)
         with st.expander(
             f"Bronze→Gold mappings ({len(gold_proposal.get('bronze_to_gold_mappings', []))})",
-            expanded=False,
+            expanded=True,
         ):
             map_rows = []
             for m in gold_proposal.get("bronze_to_gold_mappings", []):

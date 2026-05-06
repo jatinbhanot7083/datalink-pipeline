@@ -300,7 +300,7 @@ with col4:
     )
 
 
-with st.expander("📋 Browse catalog — 33 datasets, click to inspect", expanded=False):
+with st.expander("📋 Browse catalog — 33 datasets, click to inspect", expanded=True):
     if not catalog_datasets:
         st.warning(
             "Catalog is empty. Run "
@@ -843,7 +843,7 @@ if prereqs["missing"]:
         """,
         unsafe_allow_html=True,
     )
-    with st.expander("📝 Step-by-step next-steps", expanded=False):
+    with st.expander("📝 Step-by-step next-steps", expanded=True):
         for step in prereqs["next_steps"]:
             st.markdown(f"- {step}")
 
@@ -1397,7 +1397,7 @@ elif gold_status == "MISSING_RECOMMEND_DESIGN":
 st.markdown("### 📄 Artifact previews")
 
 if proposal.get("bronze_ddl_overflow"):
-    with st.expander("🥉 Bronze DDL (with `_extra` safety column)", expanded=False):
+    with st.expander("🥉 Bronze DDL (with `_extra` safety column)", expanded=True):
         st.code(str(proposal["bronze_ddl_overflow"]), language="sql")
         st.info(
             "The `_extra VARIANT` column captures any unexpected "
@@ -1407,25 +1407,25 @@ if proposal.get("bronze_ddl_overflow"):
             "below."
         )
 
-with st.expander("🥇 Gold DDL", expanded=False):
+with st.expander("🥇 Gold DDL", expanded=True):
     st.code(str(proposal["gold_ddl"]), language="sql")
 
 if silver_models:
-    with st.expander(f"🥈 Silver DV2 dbt models ({len(silver_models)} files)", expanded=False):
+    with st.expander(f"🥈 Silver DV2 dbt models ({len(silver_models)} files)", expanded=True):
         for filename, sql in silver_models.items():
             st.markdown(f"**`{filename}`**")
             st.code(sql, language="sql")
 else:
-    with st.expander("🥈 Silver dbt model (legacy 1:1 cast)", expanded=False):
+    with st.expander("🥈 Silver dbt model (legacy 1:1 cast)", expanded=True):
         st.code(str(proposal.get("silver_dbt_sql") or ""), language="sql")
 
-with st.expander("🥇 Gold dbt model", expanded=False):
+with st.expander("🥇 Gold dbt model", expanded=True):
     st.code(str(proposal["gold_dbt_sql"]), language="sql")
 
-with st.expander("🪂 Airflow DAG", expanded=False):
+with st.expander("🪂 Airflow DAG", expanded=True):
     st.code(str(proposal["airflow_dag_py"]), language="python")
 
-with st.expander("✅ GX expectation suite", expanded=False):
+with st.expander("✅ GX expectation suite", expanded=True):
     suite = proposal["gx_suite"]
     st.markdown(
         f"**Suite name:** `{suite.get('suite_name')}`  \n"
