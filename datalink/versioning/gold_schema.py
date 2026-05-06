@@ -138,6 +138,20 @@ class CompatibilityReport:
         )
 
 
+def _ci_get(row: dict[str, Any], key: str, default: Any = None) -> Any:
+    """Case-insensitive dict lookup. Snowflake returns UPPERCASE keys; some
+    project adapters lowercase them. Try both."""
+    if key in row:
+        return row[key]
+    upper = key.upper()
+    if upper in row:
+        return row[upper]
+    lower = key.lower()
+    if lower in row:
+        return row[lower]
+    return default
+
+
 def _load_fields(warehouse: Warehouse, dataset_code: str, version: int) -> list[dict[str, Any]]:
     rows = list(
         warehouse.query(
@@ -162,8 +176,10 @@ def compute_compatibility(
     """Diff two versions of a Gold dataset's column list. Classify the change."""
     from_fields = _load_fields(warehouse, dataset_code, from_version)
     to_fields = _load_fields(warehouse, dataset_code, to_version)
-    from_by_name = {f["gold_column_name"]: f for f in from_fields}
-    to_by_name = {f["gold_column_name"]: f for f in to_fields}
+    # Case-insensitive column-name extraction — Snowflake returns UPPERCASE
+    # keys, some project adapters lowercase them. _ci_get bridges both.
+    from_by_name = {_ci_get(f, "gold_column_name"): f for f in from_fields}
+    to_by_name = {_ci_get(f, "gold_column_name"): f for f in to_fields}
 
     deltas: list[FieldDelta] = []
 
@@ -181,8 +197,8 @@ def compute_compatibility(
     # Added columns. Nullable + non-business-key → ADDITIVE; otherwise BREAKING.
     for name in to_by_name.keys() - from_by_name.keys():
         f = to_by_name[name]
-        is_bk = bool(f.get("is_business_key"))
-        nullable = bool(f.get("nullable"))
+        is_bk = bool(_ci_get(f, "is_business_key"))
+        nullable = bool(_ci_get(f, "nullable"))
         if is_bk:
             cls = BREAKING
             detail = f"new business-key column {name} — affects hash_key derivation"
@@ -191,7 +207,7 @@ def compute_compatibility(
             detail = f"new NOT NULL column {name} with no default — back-fill required"
         else:
             cls = ADDITIVE
-            detail = f"new nullable column {name} ({f.get('logical_type')})"
+            detail = f"new nullable column {name} ({_ci_get(f, 'logical_type')})"
         deltas.append(
             FieldDelta(
                 column_name=name, change_type="ADDED", detail=detail, classification=cls
@@ -202,12 +218,12 @@ def compute_compatibility(
     for name in from_by_name.keys() & to_by_name.keys():
         old = from_by_name[name]
         new = to_by_name[name]
-        old_type = str(old.get("logical_type") or "")
-        new_type = str(new.get("logical_type") or "")
-        old_null = bool(old.get("nullable"))
-        new_null = bool(new.get("nullable"))
-        old_bk = bool(old.get("is_business_key"))
-        new_bk = bool(new.get("is_business_key"))
+        old_type = str(_ci_get(old, "logical_type") or "")
+        new_type = str(_ci_get(new, "logical_type") or "")
+        old_null = bool(_ci_get(old, "nullable"))
+        new_null = bool(_ci_get(new, "nullable"))
+        old_bk = bool(_ci_get(old, "is_business_key"))
+        new_bk = bool(_ci_get(new, "is_business_key"))
 
         if old_bk != new_bk:
             deltas.append(
