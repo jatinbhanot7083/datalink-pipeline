@@ -633,11 +633,26 @@ def bronze_land_task(
         # PUT
         cur.execute(f"PUT 'file://{psv_path}' @{schema}.{stage} AUTO_COMPRESS=FALSE OVERWRITE=TRUE")
         cur.fetchall()
-        # COPY INTO (positional column mapping + audit cols)
-        load_dt_iso = "CURRENT_TIMESTAMP()"  # SQL-side timestamp
-        # Discover actual column list from INFORMATION_SCHEMA. Filter audit cols
-        # (which start with underscore) in Python — LIKE underscore-escaping is
-        # finicky across backends.
+        # COPY INTO with Phase 17.2 overflow capture.
+        #
+        # Algorithm:
+        #   1. Read PSV header → list of vendor-supplied column names.
+        #   2. Read INFORMATION_SCHEMA → table's canonical biz cols + check
+        #      for the `_extra` overflow column (renamed from
+        #      `_variant_overflow` in 17.2; we accept either).
+        #   3. Match PSV cols to table biz cols case-insensitively.
+        #   4. PSV cols NOT in table → overflow. Build OBJECT_CONSTRUCT()
+        #      to land them in `_extra` as JSON. Zero data loss.
+        #   5. PSV cols IN table use $N positional. Missing biz cols → NULL.
+        load_dt_iso = "CURRENT_TIMESTAMP()"
+
+        # Read PSV header to learn the vendor's column ordering.
+        with open(psv_path) as _hdr_f:
+            _header_line = _hdr_f.readline().rstrip("\n").rstrip("\r")
+        psv_cols = [c.strip() for c in _header_line.split("|")]
+        psv_lower = [c.lower() for c in psv_cols]
+
+        # Discover canonical table cols.
         cur.execute(
             "SELECT column_name FROM INFORMATION_SCHEMA.COLUMNS "
             "WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s "
@@ -646,19 +661,71 @@ def bronze_land_task(
         )
         all_cols = [r[0] for r in cur.fetchall()]
         biz_cols = [c for c in all_cols if not c.startswith("_")]
-        n_biz = len(biz_cols)
-        positional = ", ".join(f"${i + 1}" for i in range(n_biz))
+        # Accept either canonical name (Phase 17.2 _extra OR legacy _variant_overflow).
+        if "_EXTRA" in (c.upper() for c in all_cols):
+            extra_col_name = "_extra"
+        elif "_VARIANT_OVERFLOW" in (c.upper() for c in all_cols):
+            extra_col_name = "_variant_overflow"
+        else:
+            extra_col_name = None  # Old table predating 15.7 — overflow disabled.
+
+        # Per-biz-column position lookup. None = not in PSV → load NULL.
+        biz_select_parts: list[str] = []
+        for bc in biz_cols:
+            if bc.lower() in psv_lower:
+                pos = psv_lower.index(bc.lower()) + 1  # COPY positions are 1-indexed
+                biz_select_parts.append(f"${pos}")
+            else:
+                biz_select_parts.append("NULL")
         biz_col_list = ", ".join(c.lower() for c in biz_cols)
-        audit_cols = (
-            "_load_dt, _source_file, _batch_id, _record_source, _load_type, _file_row_number"
-        )
+
+        # Overflow capture: any PSV col not in biz_cols becomes a key in _extra.
+        biz_lower_set = {c.lower() for c in biz_cols}
+        overflow_pairs: list[str] = []
+        for vendor_col in psv_cols:
+            if vendor_col.lower() in biz_lower_set:
+                continue
+            pos = psv_lower.index(vendor_col.lower()) + 1
+            # Single-quote the key to keep Snowflake happy with hyphens etc.
+            overflow_pairs.append(f"'{vendor_col}', ${pos}")
+
+        if extra_col_name and overflow_pairs:
+            extra_expr = f"OBJECT_CONSTRUCT({', '.join(overflow_pairs)})"
+            target_cols = (
+                f"{biz_col_list}, {extra_col_name}, "
+                f"_load_dt, _source_file, _batch_id, _record_source, _load_type, _file_row_number"
+            )
+            select_expr = (
+                f"{', '.join(biz_select_parts)}, {extra_expr}, "
+                f"{load_dt_iso}, '{psv_path.name}', '{batch_id}', "
+                f"'{client_id}', 'FULL', METADATA$FILE_ROW_NUMBER"
+            )
+        else:
+            # No overflow column or no overflow keys — original simple form.
+            target_cols = (
+                f"{biz_col_list}, "
+                f"_load_dt, _source_file, _batch_id, _record_source, _load_type, _file_row_number"
+            )
+            select_expr = (
+                f"{', '.join(biz_select_parts)}, "
+                f"{load_dt_iso}, '{psv_path.name}', '{batch_id}', "
+                f"'{client_id}', 'FULL', METADATA$FILE_ROW_NUMBER"
+            )
+
         copy_sql = (
-            f"COPY INTO {schema}.{table} ({biz_col_list}, {audit_cols}) "
-            f"FROM ( SELECT {positional}, "
-            f"{load_dt_iso}, '{psv_path.name}', '{batch_id}', "
-            f"'{client_id}', 'FULL', METADATA$FILE_ROW_NUMBER "
+            f"COPY INTO {schema}.{table} ({target_cols}) "
+            f"FROM ( SELECT {select_expr} "
             f"FROM @{schema}.{stage}/{psv_path.name} ) "
             f"ON_ERROR = 'ABORT_STATEMENT'"
+        )
+        _log.info(
+            "phase17.bronze_land_task.overflow_plan",
+            client_id=client_id,
+            dataset_code=dataset_code,
+            n_biz_cols_in_table=len(biz_cols),
+            n_psv_cols=len(psv_cols),
+            n_overflow_keys=len(overflow_pairs),
+            extra_col=extra_col_name,
         )
         cur.execute(copy_sql)
         copy_rows = cur.fetchall()

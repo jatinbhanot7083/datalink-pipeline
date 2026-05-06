@@ -693,7 +693,7 @@ def propose_pipeline(
             silver_pattern=silver_pattern,
             proposed_silver_shape=proposed_shape,
         )
-        # Bronze DDL with _variant_overflow
+        # Bronze DDL with _extra
         bronze_ddl = build_bronze_ddl_with_overflow(
             client_id=client_id,
             dataset_code=dataset_code,
@@ -858,7 +858,7 @@ def approve_and_deploy(
 
     artifact_paths: dict[str, str] = {}
 
-    # --- 0. Bronze DDL with _variant_overflow (Phase 15.7) ------------------
+    # --- 0. Bronze DDL with _extra (Phase 15.7) ------------------
     bronze_ddl_text = proposal.get("bronze_ddl_overflow")
     if bronze_ddl_text:
         bronze_ddl_path = (
@@ -872,7 +872,7 @@ def approve_and_deploy(
         bronze_ddl_path.parent.mkdir(parents=True, exist_ok=True)
         bronze_ddl_path.write_text(
             _format_artifact_header(
-                kind="Bronze DDL (with _variant_overflow)",
+                kind="Bronze DDL (with _extra)",
                 client_id=client_id,
                 dataset_code=dataset_code,
                 instance_id=instance_id,

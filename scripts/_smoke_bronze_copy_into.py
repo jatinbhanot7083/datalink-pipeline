@@ -141,7 +141,7 @@ def main() -> int:
 
         # 5) COPY INTO with audit columns
         # The 41 business columns from the PSV map positionally; the 8 audit cols
-        # (_variant_overflow, _load_dt, _source_file, _batch_id, _record_source,
+        # (_extra, _load_dt, _source_file, _batch_id, _record_source,
         # _load_type, _file_row_number, _record_hash) get populated via column
         # selection from $1..$41 + computed values.
         print(f"[4/5] COPY INTO {SCHEMA}.{TABLE} FROM @{STAGE} ...")

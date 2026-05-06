@@ -1397,10 +1397,10 @@ elif gold_status == "MISSING_RECOMMEND_DESIGN":
 st.markdown("### 📄 Artifact previews")
 
 if proposal.get("bronze_ddl_overflow"):
-    with st.expander("🥉 Bronze DDL (with `_variant_overflow` safety column)", expanded=False):
+    with st.expander("🥉 Bronze DDL (with `_extra` safety column)", expanded=False):
         st.code(str(proposal["bronze_ddl_overflow"]), language="sql")
         st.info(
-            "The `_variant_overflow VARIANT` column captures any unexpected "
+            "The `_extra VARIANT` column captures any unexpected "
             "vendor-supplied columns as JSON. Silver and Gold transforms "
             "IGNORE it — overflow data NEVER propagates to operational "
             "databases without an explicit handshake. Pending review queue "
@@ -1903,7 +1903,7 @@ else:
     st.warning(
         f"⚠️ **{len(pending_overflow)} unexpected column(s)** seen in "
         f"incoming Bronze batches that are NOT in the agreed contract. "
-        f"Data is preserved in `_variant_overflow` but BLOCKED from "
+        f"Data is preserved in `_extra` but BLOCKED from "
         f"reaching downstream operational DBs until you handshake."
     )
     overflow_rows = []

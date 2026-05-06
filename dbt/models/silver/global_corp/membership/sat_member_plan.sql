@@ -36,7 +36,9 @@ SELECT
     _load_dt,
     _record_source,
     _batch_id,
-    SHA2_HEX(CONCAT_WS('|', COALESCE(CAST((COALESCE(member_card_id, member_medicare_id, member_medicaid_id)) AS VARCHAR), ''), COALESCE(CAST((payer_name) AS VARCHAR), ''), COALESCE(CAST((UPPER(member_line_of_business)) AS VARCHAR), ''), COALESCE(CAST((UPPER(member_product)) AS VARCHAR), ''), COALESCE(CAST((product_description) AS VARCHAR), ''), COALESCE(CAST((member_product_begin_date) AS VARCHAR), ''), COALESCE(CAST((COALESCE(CAST(plan_benenfit_package_id AS TEXT), plan_benefit_package_id)) AS VARCHAR), ''), COALESCE(CAST((plan_benefit_package_name) AS VARCHAR), ''), COALESCE(CAST((segment_id_plan_benefit_package) AS VARCHAR), ''), COALESCE(CAST((CURRENT_TIMESTAMP()) AS VARCHAR), ''), COALESCE(CAST((COALESCE(refresh_date, CURRENT_DATE())) AS VARCHAR), ''), COALESCE(CAST((NULL) AS VARCHAR), ''), COALESCE(CAST((TRUE) AS VARCHAR), '')), 256) AS _hash_diff
+    SHA2_HEX(CONCAT_WS('|', COALESCE(CAST((COALESCE(member_card_id, member_medicare_id, member_medicaid_id)) AS VARCHAR), ''), COALESCE(CAST((payer_name) AS VARCHAR), ''), COALESCE(CAST((UPPER(member_line_of_business)) AS VARCHAR), ''), COALESCE(CAST((UPPER(member_product)) AS VARCHAR), ''), COALESCE(CAST((product_description) AS VARCHAR), ''), COALESCE(CAST((member_product_begin_date) AS VARCHAR), ''), COALESCE(CAST((COALESCE(CAST(plan_benenfit_package_id AS TEXT), plan_benefit_package_id)) AS VARCHAR), ''), COALESCE(CAST((plan_benefit_package_name) AS VARCHAR), ''), COALESCE(CAST((segment_id_plan_benefit_package) AS VARCHAR), ''), COALESCE(CAST((CURRENT_TIMESTAMP()) AS VARCHAR), ''), COALESCE(CAST((COALESCE(refresh_date, CURRENT_DATE())) AS VARCHAR), ''), COALESCE(CAST((NULL) AS VARCHAR), ''), COALESCE(CAST((TRUE) AS VARCHAR), '')), 256) AS _hash_diff,
+    -- Phase 17.2: vendor-overflow JSON propagated from Bronze
+    _extra AS _extensions
 FROM bronze
 WHERE member_card_id IS NOT NULL
 {% if is_incremental() %}

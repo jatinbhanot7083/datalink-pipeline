@@ -1048,7 +1048,7 @@ _DDL = [
     # ========================================================================
     # Two production-grade safety mechanisms:
     #
-    # 1. _variant_overflow column on every Bronze table — captures any
+    # 1. _extra column on every Bronze table — captures any
     #    incoming column NOT in the agreed Bronze contract as JSON. Silver
     #    and Gold transforms IGNORE the overflow column, so unexpected
     #    columns NEVER leak downstream to operational databases without

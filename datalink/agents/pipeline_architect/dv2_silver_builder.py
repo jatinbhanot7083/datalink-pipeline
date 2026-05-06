@@ -56,11 +56,14 @@ HUB_AUDIT_COLUMNS: list[tuple[str, str]] = [
 ]
 
 # Audit columns appended to Satellites (descriptive — change-tracking via hash_diff).
+# Phase 17.2: _extensions VARIANT carries client-specific overflow JSON
+# propagated from Bronze._extra. Default NULL for clients that don't need it.
 SAT_AUDIT_COLUMNS: list[tuple[str, str]] = [
     ("_load_dt", "TIMESTAMP"),
     ("_record_source", "VARCHAR"),
     ("_hash_diff", "VARCHAR"),  # SHA-256 of the descriptive payload
     ("_batch_id", "VARCHAR"),
+    ("_extensions", "VARIANT"),  # Phase 17.2: client-specific overflow JSON (nullable)
 ]
 
 # Audit columns appended to Links (relationship lineage).
@@ -332,7 +335,11 @@ SELECT
     _load_dt,
     _record_source,
     _batch_id,
-    {hash_diff_expr} AS _hash_diff
+    {hash_diff_expr} AS _hash_diff,
+    -- Phase 17.2: propagate vendor-overflow JSON from Bronze. Default
+    -- behaviour is pass-through; clients who want to filter or rename
+    -- specific keys should override this dbt model.
+    _extra AS _extensions
 FROM bronze
 WHERE {where_str}
 {{% if is_incremental() %}}
@@ -609,7 +616,7 @@ def build_dv2_silver_models(
 
 
 # ---------------------------------------------------------------------------
-# Bronze DDL — adds the _variant_overflow column convention (Phase 15.7).
+# Bronze DDL — adds the _extra column convention (Phase 17.2; was _variant_overflow in 15.7).
 # ---------------------------------------------------------------------------
 
 
@@ -629,8 +636,8 @@ def build_bronze_ddl_with_overflow(
         data legitimately has blanks (Medicaid-only members have no Medicare
         ID, etc.). NOT NULL belongs in GX expectations, not in Bronze
         constraints. Forcing NOT NULL there made COPY INTO fail at run-time.
-      * Adds the mandatory ``_variant_overflow VARIANT`` column for capturing
-        unexpected vendor-supplied columns (Phase 15.7 contract).
+      * Adds the mandatory ``_extra VARIANT`` column for capturing unexpected
+        vendor-supplied columns (Phase 17.2 — renamed from _variant_overflow).
     """
     from datalink.agents.pipeline_architect._ddl_format import (
         ColumnDef,
@@ -659,11 +666,12 @@ def build_bronze_ddl_with_overflow(
         )
 
     overflow_col = ColumnDef(
-        name="_variant_overflow",
+        name="_extra",
         sql_type="VARIANT",
         nullable=True,
         comment=(
-            "JSON of unexpected columns; never propagates to Silver/Gold without HITL handshake"
+            "Phase 17.2 — JSON of vendor columns not in canonical Bronze catalog. "
+            "Auto-populated by COPY INTO. Propagates to Silver Sat._extensions."
         ),
     )
 

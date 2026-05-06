@@ -737,16 +737,16 @@ from datalink.agents.pipeline_architect.dv2_silver_builder import (  # noqa: E40
     build_dv2_silver_models,
 )
 
-# 10a. Bronze DDL with _variant_overflow
+# 10a. Bronze DDL with _extra
 ddl = build_bronze_ddl_with_overflow(
     client_id="aetna",
     dataset_code="membership",
     bronze_fields=catalog_fields,
 )
-if "_variant_overflow" in ddl and "VARIANT" in ddl:
-    passes("build_bronze_ddl_with_overflow includes _variant_overflow VARIANT")
+if "_extra" in ddl and "VARIANT" in ddl:
+    passes("build_bronze_ddl_with_overflow includes _extra VARIANT")
 else:
-    fails("Bronze DDL overflow", "missing _variant_overflow column")
+    fails("Bronze DDL overflow", "missing _extra column")
 
 # 10b. DV2 Silver builder produces Hubs/Sats given a Gold column spec
 test_gold_cols = [

@@ -14,7 +14,7 @@ Public API:
   * ``persist_proposal``       — writes proposal as a DRAFT row in
     CONTROL.client_pipeline_instances.
   * ``approve_and_deploy``     — emits artifacts (Bronze DDL with
-    _variant_overflow, Gold DDL, Silver DV2 dbt models, Gold dbt, Airflow
+    _extra, Gold DDL, Silver DV2 dbt models, Gold dbt, Airflow
     DAG, GX suite) and flips status to LIVE.
 
 Phase 15.7 additions:

@@ -34,7 +34,9 @@ SELECT
     _load_dt,
     _record_source,
     _batch_id,
-    SHA2_HEX(CONCAT_WS('|', COALESCE(CAST((COALESCE(member_card_id, member_medicare_id, member_medicaid_id)) AS VARCHAR), ''), COALESCE(CAST((UPPER(member_active_status)) AS VARCHAR), ''), COALESCE(CAST((UPPER(member_relationship_code)) AS VARCHAR), ''), COALESCE(CAST((member_medicaid_indicator) AS VARCHAR), ''), COALESCE(CAST((member_medicaid_dual_eligibility_indicator) AS VARCHAR), ''), COALESCE(CAST((member_dual_eligibility_begin_date) AS VARCHAR), ''), COALESCE(CAST((member_dual_eligibility_end_date) AS VARCHAR), ''), COALESCE(CAST((CURRENT_TIMESTAMP()) AS VARCHAR), ''), COALESCE(CAST((COALESCE(refresh_date, CURRENT_DATE())) AS VARCHAR), ''), COALESCE(CAST((NULL) AS VARCHAR), ''), COALESCE(CAST((TRUE) AS VARCHAR), '')), 256) AS _hash_diff
+    SHA2_HEX(CONCAT_WS('|', COALESCE(CAST((COALESCE(member_card_id, member_medicare_id, member_medicaid_id)) AS VARCHAR), ''), COALESCE(CAST((UPPER(member_active_status)) AS VARCHAR), ''), COALESCE(CAST((UPPER(member_relationship_code)) AS VARCHAR), ''), COALESCE(CAST((member_medicaid_indicator) AS VARCHAR), ''), COALESCE(CAST((member_medicaid_dual_eligibility_indicator) AS VARCHAR), ''), COALESCE(CAST((member_dual_eligibility_begin_date) AS VARCHAR), ''), COALESCE(CAST((member_dual_eligibility_end_date) AS VARCHAR), ''), COALESCE(CAST((CURRENT_TIMESTAMP()) AS VARCHAR), ''), COALESCE(CAST((COALESCE(refresh_date, CURRENT_DATE())) AS VARCHAR), ''), COALESCE(CAST((NULL) AS VARCHAR), ''), COALESCE(CAST((TRUE) AS VARCHAR), '')), 256) AS _hash_diff,
+    -- Phase 17.2: vendor-overflow JSON propagated from Bronze
+    _extra AS _extensions
 FROM bronze
 WHERE member_card_id IS NOT NULL
 {% if is_incremental() %}

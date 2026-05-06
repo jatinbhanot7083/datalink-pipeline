@@ -60,7 +60,7 @@ def main() -> int:
             ColumnDef(name="member_birth_date", sql_type="DATE", nullable=True, comment="[PII]"),
         ],
         overflow_column=ColumnDef(
-            name="_variant_overflow",
+            name="_extra",
             sql_type="VARIANT",
             nullable=True,
             comment="JSON of unexpected cols",
@@ -148,7 +148,7 @@ def main() -> int:
                 ColumnDef(name="b", sql_type="DATE", comment="[PHI]"),
                 ColumnDef(name="c", sql_type="INTEGER"),
             ],
-            overflow_column=ColumnDef(name="_variant_overflow", sql_type="VARIANT"),
+            overflow_column=ColumnDef(name="_extra", sql_type="VARIANT"),
             audit_columns=[ColumnDef(name="_load_dt", sql_type="TIMESTAMP")],
         )
         sqlglot.parse(sql, dialect="snowflake")
