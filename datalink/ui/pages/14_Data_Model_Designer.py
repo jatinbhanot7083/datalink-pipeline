@@ -364,112 +364,127 @@ st.markdown("## 📋 Schema Inventory")
 st.caption(
     "Every authored Silver + Gold schema across all clients and statuses. "
     "Click a row to act on it — promote / archive / view / edit. "
-    "Filters below narrow the view; defaults show everything."
+    "Filters narrow the view; defaults show everything."
 )
 
-# Filter row — All-by-default per user spec.
-_inv_f1, _inv_f2, _inv_f3, _inv_f4 = st.columns([1, 1, 1, 2])
-with _inv_f1:
-    _inv_layer_filter = st.selectbox(
-        "Layer", ["All", "Silver", "Gold"], key="inv_layer_filter"
-    )
-with _inv_f2:
-    _inv_status_filter = st.selectbox(
-        "Status",
-        ["All", "DRAFT", "PENDING_REVIEW", "APPROVED", "LIVE", "ARCHIVED", "REJECTED"],
-        key="inv_status_filter",
-    )
-with _inv_f3:
-    _inv_scope_filter = st.selectbox(
-        "Scope",
-        ["All", "GLOBAL_CORP", "Client-scoped only"],
-        key="inv_scope_filter",
-    )
-with _inv_f4:
-    st.caption(
-        "**Why this is here:** so you never lose track of a draft you authored. "
-        "Every row, every status, one grid."
-    )
 
-# Pull rows. Two queries (Silver + Gold) — UNION-friendly normalize.
-with _warehouse(readonly=True) as _wh_inv:
-    try:
-        _silver_inv = list(
-            _wh_inv.query(
-                f"""
-                SELECT silver_dataset_id   AS id,
-                       'Silver'             AS layer,
-                       dataset_code,
-                       version,
-                       silver_pattern       AS spec,
-                       status,
-                       scope_owner,
-                       created_by,
-                       created_at,
-                       approved_by,
-                       approved_at,
-                       archived_at
-                  FROM {CONTROL_SCHEMA}.global_silver_schema_datasets
-                """
+# Phase 17.5.1 — wrap the entire inventory section in @st.fragment so a
+# row-click only re-runs THIS section (not the whole page). The medallion
+# tiles, drill-down readiness table, and Gold Versioning Dashboard all
+# render once on page load and don't get re-fired on every click.
+#
+# Inventory query is cached for 8s — repeated reads on quick re-clicks
+# hit the cache, not Snowflake.
+@st.cache_data(ttl=8, show_spinner=False)
+def _inventory_fetch_rows() -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Read Silver + Gold inventory in two queries. Returns (silver, gold)."""
+    with _warehouse(readonly=True) as wh:
+        try:
+            silver = list(
+                wh.query(
+                    f"""
+                    SELECT silver_dataset_id   AS id,
+                           'Silver'             AS layer,
+                           dataset_code,
+                           version,
+                           silver_pattern       AS spec,
+                           status,
+                           scope_owner,
+                           created_by,
+                           created_at,
+                           approved_by,
+                           approved_at,
+                           archived_at
+                      FROM {CONTROL_SCHEMA}.global_silver_schema_datasets
+                    """
+                )
             )
-        )
-    except Exception as _exc:
-        _silver_inv = []
-        st.caption(f"_(Silver inventory query failed: {_exc})_")
-    try:
-        _gold_inv = list(
-            _wh_inv.query(
-                f"""
-                SELECT gold_dataset_id    AS id,
-                       'Gold'              AS layer,
-                       dataset_code,
-                       version,
-                       gold_anchor         AS spec,
-                       status,
-                       scope_owner,
-                       created_by,
-                       created_at,
-                       approved_by,
-                       approved_at,
-                       archived_at
-                  FROM {CONTROL_SCHEMA}.global_gold_schema_datasets
-                """
+        except Exception:
+            silver = []
+        try:
+            gold = list(
+                wh.query(
+                    f"""
+                    SELECT gold_dataset_id     AS id,
+                           'Gold'               AS layer,
+                           dataset_code,
+                           version,
+                           gold_anchor          AS spec,
+                           status,
+                           scope_owner,
+                           created_by,
+                           created_at,
+                           approved_by,
+                           approved_at,
+                           archived_at
+                      FROM {CONTROL_SCHEMA}.global_gold_schema_datasets
+                    """
+                )
             )
+        except Exception:
+            gold = []
+    return silver, gold
+
+
+@st.fragment
+def _render_schema_inventory() -> None:
+    """Schema inventory grid + action panel. Self-contained — st.fragment
+    isolates re-runs to this function so row-click selections don't drag
+    the whole page through another Snowflake round-trip."""
+    # Filter row — All-by-default per user spec.
+    _inv_f1, _inv_f2, _inv_f3, _inv_f4 = st.columns([1, 1, 1, 2])
+    with _inv_f1:
+        _inv_layer_filter = st.selectbox(
+            "Layer", ["All", "Silver", "Gold"], key="inv_layer_filter"
         )
-    except Exception as _exc:
-        _gold_inv = []
-        st.caption(f"_(Gold inventory query failed: {_exc})_")
+    with _inv_f2:
+        _inv_status_filter = st.selectbox(
+            "Status",
+            ["All", "DRAFT", "PENDING_REVIEW", "APPROVED", "LIVE", "ARCHIVED", "REJECTED"],
+            key="inv_status_filter",
+        )
+    with _inv_f3:
+        _inv_scope_filter = st.selectbox(
+            "Scope",
+            ["All", "GLOBAL_CORP", "Client-scoped only"],
+            key="inv_scope_filter",
+        )
+    with _inv_f4:
+        st.caption(
+            "**Why this is here:** so you never lose track of a draft you "
+            "authored. Every row, every status, one grid. Row clicks re-run "
+            "ONLY this section — page is otherwise frozen for performance."
+        )
 
-_all_inv_rows = list(_silver_inv) + list(_gold_inv)
-# Newest-first.
-_all_inv_rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    _silver_inv, _gold_inv = _inventory_fetch_rows()
+    _all_inv_rows = list(_silver_inv) + list(_gold_inv)
+    _all_inv_rows.sort(key=lambda r: str(r.get("created_at") or ""), reverse=True)
+    # Apply filters in-memory (cheap — no Snowflake round-trip).
+    def _row_passes(r: dict[str, Any]) -> bool:
+        if _inv_layer_filter != "All" and r.get("layer") != _inv_layer_filter:
+            return False
+        if _inv_status_filter != "All" and str(r.get("status")) != _inv_status_filter:
+            return False
+        if _inv_scope_filter == "GLOBAL_CORP" and str(r.get("scope_owner")) not in (
+            "GLOBAL_CORP",
+            "__global__",
+        ):
+            return False
+        return not (
+            _inv_scope_filter == "Client-scoped only"
+            and str(r.get("scope_owner")) in ("GLOBAL_CORP", "__global__")
+        )
 
-# Apply filters
-def _row_passes(r: dict[str, Any]) -> bool:
-    if _inv_layer_filter != "All" and r.get("layer") != _inv_layer_filter:
-        return False
-    if _inv_status_filter != "All" and str(r.get("status")) != _inv_status_filter:
-        return False
-    if _inv_scope_filter == "GLOBAL_CORP" and str(r.get("scope_owner")) not in (
-        "GLOBAL_CORP",
-        "__global__",  # accept legacy literal during transition
-    ):
-        return False
-    return not (
-        _inv_scope_filter == "Client-scoped only"
-        and str(r.get("scope_owner")) in ("GLOBAL_CORP", "__global__")
-    )
+    _filtered_inv = [r for r in _all_inv_rows if _row_passes(r)]
 
+    if not _filtered_inv:
+        st.info(
+            "📭 No schemas match the current filters. Author one in the layer-specific "
+            "sections below (Silver / Gold tabs) — it'll appear here automatically."
+        )
+        return
 
-_filtered_inv = [r for r in _all_inv_rows if _row_passes(r)]
-
-if not _filtered_inv:
-    st.info(
-        "📭 No schemas match the current filters.  Author one in the layer-specific "
-        "sections below (Silver / Gold tabs) — it'll appear here automatically."
-    )
-else:
-    # Build display table (no id column shown — kept aside for action panel).
+    # Build display table (id column hidden — kept aside for action panel).
     def _status_pill(s: str | None) -> str:
         return {
             "DRAFT": "📝 DRAFT",
@@ -492,7 +507,11 @@ else:
                 "Scope": str(r.get("scope_owner") or "—"),
                 "Created by": str(r.get("created_by") or "—"),
                 "Created": str(r.get("created_at") or "")[:19],
-                "Approved": str(r.get("approved_at") or "—")[:19] if r.get("approved_at") else "—",
+                "Approved": (
+                    str(r.get("approved_at") or "—")[:19]
+                    if r.get("approved_at")
+                    else "—"
+                ),
             }
         )
 
@@ -501,202 +520,202 @@ else:
         _inv_df,
         use_container_width=True,
         hide_index=True,
-        on_select="rerun",
+        on_select="rerun",  # confined to fragment via @st.fragment decorator
         selection_mode="single-row",
         height=320,
         key="schema_inventory_grid",
     )
 
-    # Action panel — appears when a row is selected
     _sel_idx_list = _selection.selection.get("rows", []) if _selection else []
-    if _sel_idx_list:
-        _sel_idx = _sel_idx_list[0]
-        _sel = _filtered_inv[_sel_idx]
+    if not _sel_idx_list:
+        st.caption("_(Click any row above to see action buttons.)_")
+        return
 
-        st.markdown(
-            f"### Actions for **{_sel['layer']} · {_sel['dataset_code']} · "
-            f"v{_sel['version']}** — current status: {_status_pill(_sel.get('status'))}"
+    _sel_idx = _sel_idx_list[0]
+    _sel = _filtered_inv[_sel_idx]
+
+    st.markdown(
+        f"### Actions for **{_sel['layer']} · {_sel['dataset_code']} · "
+        f"v{_sel['version']}** — current status: {_status_pill(_sel.get('status'))}"
+    )
+
+    _next_status = {
+        "DRAFT": "PENDING_REVIEW",
+        "PENDING_REVIEW": "APPROVED",
+        "APPROVED": "LIVE",
+    }.get(str(_sel.get("status")))
+
+    _ac1, _ac2, _ac3, _ac4, _ac5 = st.columns([1.2, 1.4, 1, 1, 4])
+
+    with _ac1:
+        _view_clicked = st.button(
+            "👁️  View columns",
+            use_container_width=True,
+            key="inv_act_view",
+            help="Show all columns + types + PII/PHI flags for this version.",
         )
 
-        # Map current status → next promotion target.
-        _next_status = {
-            "DRAFT": "PENDING_REVIEW",
-            "PENDING_REVIEW": "APPROVED",
-            "APPROVED": "LIVE",
-        }.get(str(_sel.get("status")))
-
-        _ac1, _ac2, _ac3, _ac4, _ac5 = st.columns([1.2, 1.4, 1, 1, 4])
-
-        # Action 1 — View columns drill-down
-        with _ac1:
-            _view_clicked = st.button(
-                "👁️  View columns",
+    with _ac2:
+        if _next_status:
+            _promote_clicked = st.button(
+                f"⬆️  Promote → {_next_status}",
                 use_container_width=True,
-                key="inv_act_view",
-                help="Show all columns + types + PII/PHI flags for this version.",
+                type="primary",
+                key="inv_act_promote",
+                help=f"Advance from {_sel.get('status')} to {_next_status}.",
+            )
+        else:
+            _promote_clicked = False
+            st.button(
+                "⬆️  Promote",
+                use_container_width=True,
+                disabled=True,
+                help=f"Cannot promote from {_sel.get('status')} (terminal state).",
+                key="inv_act_promote_disabled",
             )
 
-        # Action 2 — Promote to next status
-        with _ac2:
-            if _next_status:
-                _promote_clicked = st.button(
-                    f"⬆️  Promote → {_next_status}",
-                    use_container_width=True,
-                    type="primary",
-                    key="inv_act_promote",
-                    help=f"Advance from {_sel.get('status')} to {_next_status}.",
+    with _ac3:
+        if str(_sel.get("status")) != "ARCHIVED":
+            _archive_clicked = st.button(
+                "🗄️  Archive",
+                use_container_width=True,
+                key="inv_act_archive",
+                help="Mark as ARCHIVED. Audit row preserved. Soft delete.",
+            )
+        else:
+            _archive_clicked = False
+            st.button(
+                "🗄️  Archive",
+                use_container_width=True,
+                disabled=True,
+                key="inv_act_archive_disabled",
+            )
+
+    with _ac4:
+        _layer_param = "silver" if _sel["layer"] == "Silver" else "gold"
+        _edit_href = (
+            f"/Data_Model_Designer?dataset={_sel['dataset_code']}"
+            f"&layer={_layer_param}"
+        )
+        st.markdown(
+            f'<a href="{_edit_href}" target="_self" '
+            f'style="display:block;background:#1d4ed8;color:#fff;'
+            f"padding:.45rem .5rem;border-radius:6px;text-decoration:none;"
+            f'text-align:center;font-weight:600;font-size:.88rem;">'
+            f"✏️ Edit</a>",
+            unsafe_allow_html=True,
+        )
+
+    # ── Action handlers ─────────────────────────────────────────────────
+    if _promote_clicked and _next_status:
+        _table = (
+            "global_silver_schema_datasets"
+            if _sel["layer"] == "Silver"
+            else "global_gold_schema_datasets"
+        )
+        _id_col = (
+            "silver_dataset_id" if _sel["layer"] == "Silver" else "gold_dataset_id"
+        )
+        _set_clauses = [f"status = '{_next_status}'"]
+        if _next_status == "APPROVED":
+            _set_clauses.append("approved_at = CURRENT_TIMESTAMP()")
+            _set_clauses.append("approved_by = 'ui:inventory'")
+        try:
+            with _warehouse(readonly=False) as _wh_op:
+                _wh_op.execute(
+                    f"UPDATE {CONTROL_SCHEMA}.{_table} "
+                    f"SET {', '.join(_set_clauses)} "
+                    f"WHERE {_id_col} = $id",
+                    {"id": str(_sel["id"])},
                 )
-            else:
-                _promote_clicked = False
-                st.button(
-                    "⬆️  Promote",
-                    use_container_width=True,
-                    disabled=True,
-                    help=f"Cannot promote from {_sel.get('status')} (terminal state).",
-                    key="inv_act_promote_disabled",
+            _inventory_fetch_rows.clear()  # bust cache so next read sees new status
+            st.toast(f"✅ Promoted to {_next_status}", icon="🚀")
+            st.rerun(scope="fragment")
+        except Exception as _exc:
+            st.error(f"Promotion failed: {_exc}")
+
+    if _archive_clicked:
+        _table = (
+            "global_silver_schema_datasets"
+            if _sel["layer"] == "Silver"
+            else "global_gold_schema_datasets"
+        )
+        _id_col = (
+            "silver_dataset_id" if _sel["layer"] == "Silver" else "gold_dataset_id"
+        )
+        try:
+            with _warehouse(readonly=False) as _wh_op:
+                _wh_op.execute(
+                    f"UPDATE {CONTROL_SCHEMA}.{_table} "
+                    f"SET status = 'ARCHIVED', "
+                    f"    archived_at = CURRENT_TIMESTAMP() "
+                    f"WHERE {_id_col} = $id",
+                    {"id": str(_sel["id"])},
                 )
+            _inventory_fetch_rows.clear()
+            st.toast(f"🗄️ Archived {_sel['layer']} v{_sel['version']}", icon="✅")
+            st.rerun(scope="fragment")
+        except Exception as _exc:
+            st.error(f"Archive failed: {_exc}")
 
-        # Action 3 — Archive
-        with _ac3:
-            if str(_sel.get("status")) != "ARCHIVED":
-                _archive_clicked = st.button(
-                    "🗄️  Archive",
-                    use_container_width=True,
-                    key="inv_act_archive",
-                    help="Mark as ARCHIVED.  Audit row preserved.  Soft delete.",
-                )
-            else:
-                _archive_clicked = False
-                st.button(
-                    "🗄️  Archive",
-                    use_container_width=True,
-                    disabled=True,
-                    key="inv_act_archive_disabled",
-                )
-
-        # Action 4 — Edit (deep-link to authoring view)
-        with _ac4:
-            _layer_param = "silver" if _sel["layer"] == "Silver" else "gold"
-            _edit_href = (
-                f"/Data_Model_Designer?dataset={_sel['dataset_code']}"
-                f"&layer={_layer_param}"
-            )
-            st.markdown(
-                f'<a href="{_edit_href}" target="_self" '
-                f'style="display:block;background:#1d4ed8;color:#fff;'
-                f"padding:.45rem .5rem;border-radius:6px;text-decoration:none;"
-                f'text-align:center;font-weight:600;font-size:.88rem;">'
-                f"✏️ Edit</a>",
-                unsafe_allow_html=True,
-            )
-
-        # ── Action handlers ─────────────────────────────────────────────────
-        if _promote_clicked and _next_status:
-            _table = (
-                "global_silver_schema_datasets"
-                if _sel["layer"] == "Silver"
-                else "global_gold_schema_datasets"
-            )
-            _id_col = (
-                "silver_dataset_id" if _sel["layer"] == "Silver" else "gold_dataset_id"
-            )
-            _set_clauses = [f"status = '{_next_status}'"]
-            if _next_status == "APPROVED":
-                _set_clauses.append("approved_at = CURRENT_TIMESTAMP()")
-                _set_clauses.append("approved_by = 'ui:inventory'")
-            try:
-                with _warehouse(readonly=False) as _wh_op:
-                    _wh_op.execute(
-                        f"UPDATE {CONTROL_SCHEMA}.{_table} "
-                        f"SET {', '.join(_set_clauses)} "
-                        f"WHERE {_id_col} = $id",
-                        {"id": str(_sel["id"])},
-                    )
-                st.toast(
-                    f"✅ Promoted to {_next_status}",
-                    icon="🚀",
-                )
-                st.rerun()
-            except Exception as _exc:
-                st.error(f"Promotion failed: {_exc}")
-
-        if _archive_clicked:
-            _table = (
-                "global_silver_schema_datasets"
-                if _sel["layer"] == "Silver"
-                else "global_gold_schema_datasets"
-            )
-            _id_col = (
-                "silver_dataset_id" if _sel["layer"] == "Silver" else "gold_dataset_id"
-            )
-            try:
-                with _warehouse(readonly=False) as _wh_op:
-                    _wh_op.execute(
-                        f"UPDATE {CONTROL_SCHEMA}.{_table} "
-                        f"SET status = 'ARCHIVED', "
-                        f"    archived_at = CURRENT_TIMESTAMP() "
-                        f"WHERE {_id_col} = $id",
-                        {"id": str(_sel["id"])},
-                    )
-                st.toast(f"🗄️ Archived {_sel['layer']} v{_sel['version']}", icon="✅")
-                st.rerun()
-            except Exception as _exc:
-                st.error(f"Archive failed: {_exc}")
-
-        if _view_clicked:
-            # Inline columns drill-down
-            try:
-                with _warehouse(readonly=True) as _wh_cols:
-                    if _sel["layer"] == "Silver":
-                        _col_rows = list(
-                            _wh_cols.query(
-                                f"SELECT column_order, gold_column_name AS column_name, "
-                                f"       logical_type, nullable, is_business_key, "
-                                f"       is_pii, is_phi, description "
-                                f"FROM {CONTROL_SCHEMA}.global_silver_schema_columns "
-                                f"WHERE silver_dataset_id = $id "
-                                f"ORDER BY column_order",
-                                {"id": str(_sel["id"])},
-                            )
+    if _view_clicked:
+        try:
+            with _warehouse(readonly=True) as _wh_cols:
+                if _sel["layer"] == "Silver":
+                    _col_rows = list(
+                        _wh_cols.query(
+                            f"SELECT column_order, gold_column_name AS column_name, "
+                            f"       logical_type, nullable, is_business_key, "
+                            f"       is_pii, is_phi, description "
+                            f"FROM {CONTROL_SCHEMA}.global_silver_schema_columns "
+                            f"WHERE silver_dataset_id = $id "
+                            f"ORDER BY column_order",
+                            {"id": str(_sel["id"])},
                         )
-                    else:
-                        _col_rows = list(
-                            _wh_cols.query(
-                                f"SELECT column_order, gold_column_name AS column_name, "
-                                f"       logical_type, nullable, is_business_key, "
-                                f"       is_pii, is_phi, description "
-                                f"FROM {CONTROL_SCHEMA}.global_gold_schema_fields "
-                                f"WHERE gold_dataset_id = $id "
-                                f"ORDER BY column_order",
-                                {"id": str(_sel["id"])},
-                            )
-                        )
-                if _col_rows:
-                    _col_view = [
-                        {
-                            "#": c.get("column_order"),
-                            "Column": c.get("column_name"),
-                            "Type": c.get("logical_type"),
-                            "Null?": "✓" if c.get("nullable") else "—",
-                            "BK": "🔑" if c.get("is_business_key") else "",
-                            "PII": "🔒" if c.get("is_pii") else "",
-                            "PHI": "🩺" if c.get("is_phi") else "",
-                            "Description": (c.get("description") or "")[:80],
-                        }
-                        for c in _col_rows
-                    ]
-                    st.markdown(f"##### 📋 Columns ({len(_col_rows)})")
-                    st.dataframe(
-                        pd.DataFrame(_col_view),
-                        use_container_width=True,
-                        hide_index=True,
                     )
                 else:
-                    st.info("No columns registered for this version.")
-            except Exception as _exc:
-                st.error(f"Could not load columns: {_exc}")
-    else:
-        st.caption("_(Click any row above to see action buttons.)_")
+                    _col_rows = list(
+                        _wh_cols.query(
+                            f"SELECT column_order, gold_column_name AS column_name, "
+                            f"       logical_type, nullable, is_business_key, "
+                            f"       is_pii, is_phi, description "
+                            f"FROM {CONTROL_SCHEMA}.global_gold_schema_fields "
+                            f"WHERE gold_dataset_id = $id "
+                            f"ORDER BY column_order",
+                            {"id": str(_sel["id"])},
+                        )
+                    )
+            if _col_rows:
+                _col_view = [
+                    {
+                        "#": c.get("column_order"),
+                        "Column": c.get("column_name"),
+                        "Type": c.get("logical_type"),
+                        "Null?": "✓" if c.get("nullable") else "—",
+                        "BK": "🔑" if c.get("is_business_key") else "",
+                        "PII": "🔒" if c.get("is_pii") else "",
+                        "PHI": "🩺" if c.get("is_phi") else "",
+                        "Description": (c.get("description") or "")[:80],
+                    }
+                    for c in _col_rows
+                ]
+                st.markdown(f"##### 📋 Columns ({len(_col_rows)})")
+                st.dataframe(
+                    pd.DataFrame(_col_view),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.info("No columns registered for this version.")
+        except Exception as _exc:
+            st.error(f"Could not load columns: {_exc}")
+
+
+# Render the inventory fragment. Inside the fragment, row-clicks +
+# action-button clicks reflow ONLY this section — the medallion KPIs,
+# drill-down readiness, Gold Versioning Dashboard, etc. above and below
+# do NOT re-fire any Snowflake queries.
+_render_schema_inventory()
 
 
 # ═════════════════════════════════════════════════════════════════════════════
