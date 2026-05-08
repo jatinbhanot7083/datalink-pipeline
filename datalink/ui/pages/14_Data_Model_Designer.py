@@ -545,7 +545,7 @@ def _render_schema_inventory() -> None:
         "APPROVED": "LIVE",
     }.get(str(_sel.get("status")))
 
-    _ac1, _ac2, _ac3, _ac4, _ac5 = st.columns([1.2, 1.4, 1, 1, 4])
+    _ac1, _ac2, _ac3, _ac4, _ac5 = st.columns([1.2, 1.4, 1, 1, 1.2])
 
     with _ac1:
         _view_clicked = st.button(
@@ -604,6 +604,24 @@ def _render_schema_inventory() -> None:
             f'text-align:center;font-weight:600;font-size:.88rem;">'
             f"✏️ Edit</a>",
             unsafe_allow_html=True,
+        )
+
+    with _ac5:
+        # Clone is enabled for any non-terminal source row.
+        # Industry pattern: clone-from-template skips LLM cost; this is THE
+        # primary way new clients get a Silver/Gold without re-authoring.
+        _clone_eligible = str(_sel.get("status")) not in ("ARCHIVED", "REJECTED")
+        _clone_clicked = st.button(
+            "📦  Clone to client",
+            use_container_width=True,
+            disabled=not _clone_eligible,
+            key="inv_act_clone",
+            help=(
+                "Create a NEW DRAFT row scoped to a target client, "
+                "copying all columns/tables/mappings. Zero LLM cost."
+                if _clone_eligible
+                else f"Cannot clone from {_sel.get('status')}."
+            ),
         )
 
     # ── Action handlers ─────────────────────────────────────────────────
@@ -709,6 +727,259 @@ def _render_schema_inventory() -> None:
                 st.info("No columns registered for this version.")
         except Exception as _exc:
             st.error(f"Could not load columns: {_exc}")
+
+    # ── Clone-to-client handler ─────────────────────────────────────────
+    # When user clicks 📦 Clone, stash that intent in session_state so the
+    # form persists across the toast-driven fragment rerun.
+    _clone_form_key = f"__inv_clone_form_open_{_sel['id']}"
+    if _clone_clicked:
+        st.session_state[_clone_form_key] = True
+
+    if st.session_state.get(_clone_form_key):
+        st.markdown("---")
+        st.markdown(
+            f"##### 📦 Clone {_sel['layer']} `{_sel['dataset_code']}` "
+            f"v{_sel['version']} → target client"
+        )
+        with st.form(key=f"clone_form_{_sel['id']}"):
+            _cf1, _cf2 = st.columns([2, 1])
+            with _cf1:
+                _target_client = st.text_input(
+                    "Target client_id",
+                    placeholder="e.g. aetna, bcbs, humana",
+                    help="Lowercase, no spaces. Will become scope_owner on "
+                    "the new DRAFT row.",
+                )
+            with _cf2:
+                _confirm_clone = st.form_submit_button(
+                    "📦 Clone now",
+                    type="primary",
+                    use_container_width=True,
+                )
+            _cancel_clone = st.form_submit_button(
+                "Cancel",
+                use_container_width=True,
+            )
+
+        if _cancel_clone:
+            st.session_state.pop(_clone_form_key, None)
+            st.rerun(scope="fragment")
+
+        if _confirm_clone:
+            _t = (_target_client or "").strip().lower()
+            if not _t:
+                st.error("Target client_id is required.")
+            elif _t in ("global_corp", "__global__"):
+                st.error("Target cannot be GLOBAL_CORP — pick a real client.")
+            else:
+                # Layer-specific clone: copies header row + all child rows
+                # under fresh UUIDs so the new client gets an independent
+                # DRAFT to edit.
+                try:
+                    import uuid
+
+                    with _warehouse(readonly=False) as _wh_clone:
+                        if _sel["layer"] == "Silver":
+                            new_silver_id = str(uuid.uuid4())
+                            # 1. Header row — start at v1 under target client.
+                            _wh_clone.execute(
+                                f"INSERT INTO {CONTROL_SCHEMA}.global_silver_schema_datasets "
+                                f"(silver_dataset_id, dataset_code, silver_pattern, "
+                                f" version, status, silver_anchor, source, scope_owner, "
+                                f" forked_from_global_version, "
+                                f" notes, created_by, created_at) "
+                                f"SELECT $newid, dataset_code, silver_pattern, "
+                                f"       1, 'DRAFT', silver_anchor, 'CLONE', $owner, "
+                                f"       version, "
+                                f"       'Cloned from ' || scope_owner || ' v' || version || "
+                                f"           ' on ' || CAST(CURRENT_TIMESTAMP() AS VARCHAR), "
+                                f"       $by, CURRENT_TIMESTAMP() "
+                                f"FROM {CONTROL_SCHEMA}.global_silver_schema_datasets "
+                                f"WHERE silver_dataset_id = $srcid",
+                                {
+                                    "newid": new_silver_id,
+                                    "owner": _t,
+                                    "by": "ui:inventory:clone",
+                                    "srcid": str(_sel["id"]),
+                                },
+                            )
+
+                            # 2. Tables — remap silver_table_id → new UUID
+                            _src_tables = list(
+                                _wh_clone.query(
+                                    f"SELECT * FROM {CONTROL_SCHEMA}.global_silver_schema_tables "
+                                    f"WHERE silver_dataset_id = $sid",
+                                    {"sid": str(_sel["id"])},
+                                )
+                            )
+                            _table_remap: dict[str, str] = {}
+                            for t in _src_tables:
+                                old_tid = str(
+                                    t.get("silver_table_id") or t.get("SILVER_TABLE_ID")
+                                )
+                                new_tid = str(uuid.uuid4())
+                                _table_remap[old_tid] = new_tid
+                                _wh_clone.execute(
+                                    f"INSERT INTO {CONTROL_SCHEMA}.global_silver_schema_tables "
+                                    f"(silver_table_id, silver_dataset_id, dataset_code, "
+                                    f" table_name, table_kind, parent_silver_table_id, "
+                                    f" business_keys_json, linked_hub_ids_json, table_order, "
+                                    f" description, created_at) "
+                                    f"VALUES ($tid, $sid, $ds, $tn, $tk, $ptid, "
+                                    f"        $bk, $lh, $ord, $desc, CURRENT_TIMESTAMP())",
+                                    {
+                                        "tid": new_tid,
+                                        "sid": new_silver_id,
+                                        "ds": t.get("dataset_code") or t.get("DATASET_CODE"),
+                                        "tn": t.get("table_name") or t.get("TABLE_NAME"),
+                                        "tk": t.get("table_kind") or t.get("TABLE_KIND"),
+                                        "ptid": t.get("parent_silver_table_id")
+                                        or t.get("PARENT_SILVER_TABLE_ID"),
+                                        "bk": t.get("business_keys_json")
+                                        or t.get("BUSINESS_KEYS_JSON"),
+                                        "lh": t.get("linked_hub_ids_json")
+                                        or t.get("LINKED_HUB_IDS_JSON"),
+                                        "ord": t.get("table_order") or t.get("TABLE_ORDER"),
+                                        "desc": t.get("description") or t.get("DESCRIPTION"),
+                                    },
+                                )
+
+                            # 3. Columns — remap silver_column_id, point to new silver_table_id
+                            _src_cols = list(
+                                _wh_clone.query(
+                                    f"SELECT * FROM {CONTROL_SCHEMA}.global_silver_schema_columns "
+                                    f"WHERE silver_dataset_id = $sid",
+                                    {"sid": str(_sel["id"])},
+                                )
+                            )
+                            _col_remap: dict[str, str] = {}
+                            for c in _src_cols:
+                                old_cid = str(
+                                    c.get("silver_column_id") or c.get("SILVER_COLUMN_ID")
+                                )
+                                new_cid = str(uuid.uuid4())
+                                _col_remap[old_cid] = new_cid
+                                old_tid = str(
+                                    c.get("silver_table_id") or c.get("SILVER_TABLE_ID")
+                                )
+                                _wh_clone.execute(
+                                    f"INSERT INTO {CONTROL_SCHEMA}.global_silver_schema_columns "
+                                    f"(silver_column_id, silver_table_id, silver_dataset_id, "
+                                    f" column_order, column_name, logical_type, nullable, "
+                                    f" is_business_key, is_hash_key, is_hash_diff, is_pii, "
+                                    f" is_phi, description, registered_at) "
+                                    f"VALUES ($cid, $tid, $sid, $ord, $name, $type, $null, "
+                                    f"        $bk, $hk, $hd, $pii, $phi, $desc, "
+                                    f"        CURRENT_TIMESTAMP())",
+                                    {
+                                        "cid": new_cid,
+                                        "tid": _table_remap.get(old_tid, old_tid),
+                                        "sid": new_silver_id,
+                                        "ord": c.get("column_order") or c.get("COLUMN_ORDER"),
+                                        "name": c.get("column_name") or c.get("COLUMN_NAME"),
+                                        "type": c.get("logical_type") or c.get("LOGICAL_TYPE"),
+                                        "null": c.get("nullable") or c.get("NULLABLE"),
+                                        "bk": c.get("is_business_key")
+                                        or c.get("IS_BUSINESS_KEY"),
+                                        "hk": c.get("is_hash_key") or c.get("IS_HASH_KEY"),
+                                        "hd": c.get("is_hash_diff") or c.get("IS_HASH_DIFF"),
+                                        "pii": c.get("is_pii") or c.get("IS_PII"),
+                                        "phi": c.get("is_phi") or c.get("IS_PHI"),
+                                        "desc": c.get("description") or c.get("DESCRIPTION"),
+                                    },
+                                )
+
+                            # 4. Bronze→Silver mappings — point to new silver_column_id
+                            _src_maps = list(
+                                _wh_clone.query(
+                                    f"SELECT * FROM {CONTROL_SCHEMA}.bronze_to_silver_mappings "
+                                    f"WHERE silver_dataset_id = $sid",
+                                    {"sid": str(_sel["id"])},
+                                )
+                            )
+                            for m in _src_maps:
+                                old_mid_col = str(
+                                    m.get("silver_column_id") or m.get("SILVER_COLUMN_ID")
+                                )
+                                _wh_clone.execute(
+                                    f"INSERT INTO {CONTROL_SCHEMA}.bronze_to_silver_mappings "
+                                    f"(mapping_id, silver_column_id, silver_dataset_id, "
+                                    f" silver_table_name, silver_column_name, "
+                                    f" bronze_source_columns, transform_kind, transform_sql, "
+                                    f" rationale, confidence, created_by, created_at) "
+                                    f"VALUES ($mid, $cid, $sid, $tn, $cn, $bsc, $tk, $sql, "
+                                    f"        $rat, $conf, $by, CURRENT_TIMESTAMP())",
+                                    {
+                                        "mid": str(uuid.uuid4()),
+                                        "cid": _col_remap.get(old_mid_col, old_mid_col),
+                                        "sid": new_silver_id,
+                                        "tn": m.get("silver_table_name")
+                                        or m.get("SILVER_TABLE_NAME"),
+                                        "cn": m.get("silver_column_name")
+                                        or m.get("SILVER_COLUMN_NAME"),
+                                        "bsc": m.get("bronze_source_columns")
+                                        or m.get("BRONZE_SOURCE_COLUMNS"),
+                                        "tk": m.get("transform_kind")
+                                        or m.get("TRANSFORM_KIND"),
+                                        "sql": m.get("transform_sql")
+                                        or m.get("TRANSFORM_SQL"),
+                                        "rat": m.get("rationale") or m.get("RATIONALE"),
+                                        "conf": m.get("confidence") or m.get("CONFIDENCE"),
+                                        "by": "ui:inventory:clone",
+                                    },
+                                )
+
+                        else:
+                            # Gold layer clone — header + fields only.
+                            new_gold_id = str(uuid.uuid4())
+                            _wh_clone.execute(
+                                f"INSERT INTO {CONTROL_SCHEMA}.global_gold_schema_datasets "
+                                f"(gold_dataset_id, dataset_code, gold_table_name, "
+                                f" version, status, gold_anchor, source, scope_owner, "
+                                f" forked_from_global_version, notes, "
+                                f" created_by, created_at) "
+                                f"SELECT $newid, dataset_code, gold_table_name, "
+                                f"       1, 'DRAFT', gold_anchor, 'CLONE', $owner, "
+                                f"       version, "
+                                f"       'Cloned from ' || scope_owner || ' v' || version || "
+                                f"           ' on ' || CAST(CURRENT_TIMESTAMP() AS VARCHAR), "
+                                f"       $by, CURRENT_TIMESTAMP() "
+                                f"FROM {CONTROL_SCHEMA}.global_gold_schema_datasets "
+                                f"WHERE gold_dataset_id = $srcid",
+                                {
+                                    "newid": new_gold_id,
+                                    "owner": _t,
+                                    "by": "ui:inventory:clone",
+                                    "srcid": str(_sel["id"]),
+                                },
+                            )
+                            # Fields
+                            _wh_clone.execute(
+                                f"INSERT INTO {CONTROL_SCHEMA}.global_gold_schema_fields "
+                                f"(gold_field_id, gold_dataset_id, dataset_code, "
+                                f" column_order, gold_column_name, logical_type, "
+                                f" nullable, is_business_key, is_pii, is_phi, "
+                                f" description, anchor_reference, version, "
+                                f" registered_at) "
+                                f"SELECT UUID_STRING(), $newid, dataset_code, "
+                                f"       column_order, gold_column_name, logical_type, "
+                                f"       nullable, is_business_key, is_pii, is_phi, "
+                                f"       description, anchor_reference, 1, "
+                                f"       CURRENT_TIMESTAMP() "
+                                f"FROM {CONTROL_SCHEMA}.global_gold_schema_fields "
+                                f"WHERE gold_dataset_id = $srcid",
+                                {"newid": new_gold_id, "srcid": str(_sel["id"])},
+                            )
+
+                    _inventory_fetch_rows.clear()
+                    st.session_state.pop(_clone_form_key, None)
+                    st.toast(
+                        f"📦 Cloned {_sel['layer']} → {_t} (DRAFT v1)",
+                        icon="✅",
+                    )
+                    st.rerun(scope="fragment")
+                except Exception as _exc:
+                    st.error(f"Clone failed: {type(_exc).__name__}: {_exc}")
 
 
 # Render the inventory fragment. Inside the fragment, row-clicks +
