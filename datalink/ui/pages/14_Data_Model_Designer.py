@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -960,6 +960,666 @@ with st.expander(
         "buffers locally and submits as a batch via 🚀 Submit at the top."
     )
     _render_client_medallion_registry()
+
+
+st.markdown("---")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 17.6 — 📦 Cloning Center
+#
+# Three modes the operator demanded:
+#   1. Full Global → Client  — clone ALL global datasets to one client
+#   2. Per-dataset Global → Client — clone a single dataset
+#   3. Per-dataset Client → Client — fork from one client to another
+#
+# Guard rails enforced everywhere:
+#   * Source must be APPROVED or LIVE (never DRAFT / PENDING / ARCHIVED).
+#   * Target cannot already have a non-archived row for the layer being
+#     cloned.  Operator must archive the existing first.
+#   * Target client_id ≠ GLOBAL_CORP / __global__ (sacred direction —
+#     UI doesn't even offer client → global).
+#
+# All clone actions BUFFER to the dirty queue.  🚀 Submit at the top
+# applies them in one batched write with optimistic-concurrency check
+# on every source row.
+# ═════════════════════════════════════════════════════════════════════════════
+import uuid as _cc_uuid  # noqa: E402
+
+
+def _cc_target_client_normalized(s: str) -> str | None:
+    """Normalize + validate target client_id. Returns None if invalid."""
+    t = (s or "").strip().lower()
+    if not t:
+        return None
+    if t in ("global_corp", "__global__"):
+        return None  # sacred direction violation
+    if not all(ch.isalnum() or ch in "_-" for ch in t):
+        return None  # safety — keep client_ids identifier-friendly
+    return t
+
+
+def _cc_silver_blocks(target_client: str, dataset_code: str) -> str | None:
+    """Return a human-readable reason why we can't clone Silver to this
+    target, or None if clear."""
+    rows = _snap.silver_for(
+        scope_owner=target_client, dataset_code=dataset_code, exclude_archived=True
+    )
+    if rows:
+        statuses = ", ".join(sorted({str(r.get("status")) for r in rows}))
+        return (
+            f"Target {target_client!r} already has a non-archived Silver for "
+            f"{dataset_code!r} (status: {statuses}). Archive it first."
+        )
+    return None
+
+
+def _cc_gold_blocks(target_client: str, dataset_code: str) -> str | None:
+    rows = _snap.gold_for(
+        scope_owner=target_client, dataset_code=dataset_code, exclude_archived=True
+    )
+    if rows:
+        statuses = ", ".join(sorted({str(r.get("status")) for r in rows}))
+        return (
+            f"Target {target_client!r} already has a non-archived Gold for "
+            f"{dataset_code!r} (status: {statuses}). Archive it first."
+        )
+    return None
+
+
+def _cc_source_eligible(row: dict[str, Any] | None) -> str | None:
+    """Source must be APPROVED or LIVE. Returns block reason or None."""
+    if row is None:
+        return "no source row"
+    status = str(row.get("status") or "")
+    if status not in ("APPROVED", "LIVE"):
+        return f"source status is {status} — must be APPROVED or LIVE to clone"
+    return None
+
+
+def _cc_build_silver_applier(
+    source_silver_id: str, target_client: str
+) -> Callable[[Any], None]:
+    """Return an apply(wh) callable that runs the multi-table Silver clone."""
+
+    def apply(wh: Any) -> None:
+        new_id = str(_cc_uuid.uuid4())
+        # 1. Header — start at v1 under target client.
+        wh.execute(
+            f"INSERT INTO {CONTROL_SCHEMA}.global_silver_schema_datasets "
+            f"(silver_dataset_id, dataset_code, silver_pattern, version, "
+            f" status, silver_anchor, source, scope_owner, "
+            f" forked_from_global_version, notes, created_by, created_at) "
+            f"SELECT $newid, dataset_code, silver_pattern, 1, 'DRAFT', "
+            f"       silver_anchor, 'CLONE', $owner, version, "
+            f"       'Cloned from ' || scope_owner || ' v' || version || "
+            f"           ' on ' || CAST(CURRENT_TIMESTAMP() AS VARCHAR), "
+            f"       $by, CURRENT_TIMESTAMP() "
+            f"FROM {CONTROL_SCHEMA}.global_silver_schema_datasets "
+            f"WHERE silver_dataset_id = $srcid",
+            {
+                "newid": new_id,
+                "owner": target_client,
+                "by": "ui:cloning_center",
+                "srcid": source_silver_id,
+            },
+        )
+        # 2. Tables — remap silver_table_id
+        src_tables = list(
+            wh.query(
+                f"SELECT * FROM {CONTROL_SCHEMA}.global_silver_schema_tables "
+                f"WHERE silver_dataset_id = $sid",
+                {"sid": source_silver_id},
+            )
+        )
+        table_remap: dict[str, str] = {}
+        for t in src_tables:
+            old_tid = str(t.get("silver_table_id") or t.get("SILVER_TABLE_ID"))
+            new_tid = str(_cc_uuid.uuid4())
+            table_remap[old_tid] = new_tid
+            wh.execute(
+                f"INSERT INTO {CONTROL_SCHEMA}.global_silver_schema_tables "
+                f"(silver_table_id, silver_dataset_id, dataset_code, "
+                f" table_name, table_kind, parent_silver_table_id, "
+                f" business_keys_json, linked_hub_ids_json, table_order, "
+                f" description, created_at) "
+                f"VALUES ($tid, $sid, $ds, $tn, $tk, $ptid, $bk, $lh, $ord, "
+                f"        $desc, CURRENT_TIMESTAMP())",
+                {
+                    "tid": new_tid,
+                    "sid": new_id,
+                    "ds": t.get("dataset_code") or t.get("DATASET_CODE"),
+                    "tn": t.get("table_name") or t.get("TABLE_NAME"),
+                    "tk": t.get("table_kind") or t.get("TABLE_KIND"),
+                    "ptid": t.get("parent_silver_table_id") or t.get("PARENT_SILVER_TABLE_ID"),
+                    "bk": t.get("business_keys_json") or t.get("BUSINESS_KEYS_JSON"),
+                    "lh": t.get("linked_hub_ids_json") or t.get("LINKED_HUB_IDS_JSON"),
+                    "ord": t.get("table_order") or t.get("TABLE_ORDER"),
+                    "desc": t.get("description") or t.get("DESCRIPTION"),
+                },
+            )
+        # 3. Columns — remap silver_column_id, point to new silver_table_id
+        src_cols = list(
+            wh.query(
+                f"SELECT * FROM {CONTROL_SCHEMA}.global_silver_schema_columns "
+                f"WHERE silver_dataset_id = $sid",
+                {"sid": source_silver_id},
+            )
+        )
+        col_remap: dict[str, str] = {}
+        for c in src_cols:
+            old_cid = str(c.get("silver_column_id") or c.get("SILVER_COLUMN_ID"))
+            new_cid = str(_cc_uuid.uuid4())
+            col_remap[old_cid] = new_cid
+            old_tid = str(c.get("silver_table_id") or c.get("SILVER_TABLE_ID"))
+            wh.execute(
+                f"INSERT INTO {CONTROL_SCHEMA}.global_silver_schema_columns "
+                f"(silver_column_id, silver_table_id, silver_dataset_id, "
+                f" column_order, column_name, logical_type, nullable, "
+                f" is_business_key, is_hash_key, is_hash_diff, is_pii, "
+                f" is_phi, description, registered_at) "
+                f"VALUES ($cid, $tid, $sid, $ord, $name, $type, $null, "
+                f"        $bk, $hk, $hd, $pii, $phi, $desc, "
+                f"        CURRENT_TIMESTAMP())",
+                {
+                    "cid": new_cid,
+                    "tid": table_remap.get(old_tid, old_tid),
+                    "sid": new_id,
+                    "ord": c.get("column_order") or c.get("COLUMN_ORDER"),
+                    "name": c.get("column_name") or c.get("COLUMN_NAME"),
+                    "type": c.get("logical_type") or c.get("LOGICAL_TYPE"),
+                    "null": c.get("nullable") or c.get("NULLABLE"),
+                    "bk": c.get("is_business_key") or c.get("IS_BUSINESS_KEY"),
+                    "hk": c.get("is_hash_key") or c.get("IS_HASH_KEY"),
+                    "hd": c.get("is_hash_diff") or c.get("IS_HASH_DIFF"),
+                    "pii": c.get("is_pii") or c.get("IS_PII"),
+                    "phi": c.get("is_phi") or c.get("IS_PHI"),
+                    "desc": c.get("description") or c.get("DESCRIPTION"),
+                },
+            )
+        # 4. Bronze→Silver mappings
+        src_maps = list(
+            wh.query(
+                f"SELECT * FROM {CONTROL_SCHEMA}.bronze_to_silver_mappings "
+                f"WHERE silver_dataset_id = $sid",
+                {"sid": source_silver_id},
+            )
+        )
+        for m in src_maps:
+            old_mid_col = str(m.get("silver_column_id") or m.get("SILVER_COLUMN_ID"))
+            wh.execute(
+                f"INSERT INTO {CONTROL_SCHEMA}.bronze_to_silver_mappings "
+                f"(mapping_id, silver_column_id, silver_dataset_id, "
+                f" silver_table_name, silver_column_name, "
+                f" bronze_source_columns, transform_kind, transform_sql, "
+                f" rationale, confidence, created_by, created_at) "
+                f"VALUES ($mid, $cid, $sid, $tn, $cn, $bsc, $tk, $sql, "
+                f"        $rat, $conf, $by, CURRENT_TIMESTAMP())",
+                {
+                    "mid": str(_cc_uuid.uuid4()),
+                    "cid": col_remap.get(old_mid_col, old_mid_col),
+                    "sid": new_id,
+                    "tn": m.get("silver_table_name") or m.get("SILVER_TABLE_NAME"),
+                    "cn": m.get("silver_column_name") or m.get("SILVER_COLUMN_NAME"),
+                    "bsc": m.get("bronze_source_columns") or m.get("BRONZE_SOURCE_COLUMNS"),
+                    "tk": m.get("transform_kind") or m.get("TRANSFORM_KIND"),
+                    "sql": m.get("transform_sql") or m.get("TRANSFORM_SQL"),
+                    "rat": m.get("rationale") or m.get("RATIONALE"),
+                    "conf": m.get("confidence") or m.get("CONFIDENCE"),
+                    "by": "ui:cloning_center",
+                },
+            )
+
+    return apply
+
+
+def _cc_build_gold_applier(
+    source_gold_id: str, target_client: str
+) -> Callable[[Any], None]:
+    """Apply(wh) for Gold clone — simpler, just header + fields."""
+
+    def apply(wh: Any) -> None:
+        new_id = str(_cc_uuid.uuid4())
+        wh.execute(
+            f"INSERT INTO {CONTROL_SCHEMA}.global_gold_schema_datasets "
+            f"(gold_dataset_id, dataset_code, gold_table_name, version, "
+            f" status, gold_anchor, source, scope_owner, "
+            f" forked_from_global_version, notes, created_by, created_at) "
+            f"SELECT $newid, dataset_code, gold_table_name, 1, 'DRAFT', "
+            f"       gold_anchor, 'CLONE', $owner, version, "
+            f"       'Cloned from ' || scope_owner || ' v' || version || "
+            f"           ' on ' || CAST(CURRENT_TIMESTAMP() AS VARCHAR), "
+            f"       $by, CURRENT_TIMESTAMP() "
+            f"FROM {CONTROL_SCHEMA}.global_gold_schema_datasets "
+            f"WHERE gold_dataset_id = $srcid",
+            {
+                "newid": new_id,
+                "owner": target_client,
+                "by": "ui:cloning_center",
+                "srcid": source_gold_id,
+            },
+        )
+        wh.execute(
+            f"INSERT INTO {CONTROL_SCHEMA}.global_gold_schema_fields "
+            f"(gold_field_id, gold_dataset_id, dataset_code, column_order, "
+            f" gold_column_name, logical_type, nullable, is_business_key, "
+            f" is_pii, is_phi, description, anchor_reference, version, "
+            f" registered_at) "
+            f"SELECT UUID_STRING(), $newid, dataset_code, column_order, "
+            f"       gold_column_name, logical_type, nullable, "
+            f"       is_business_key, is_pii, is_phi, description, "
+            f"       anchor_reference, 1, CURRENT_TIMESTAMP() "
+            f"FROM {CONTROL_SCHEMA}.global_gold_schema_fields "
+            f"WHERE gold_dataset_id = $srcid",
+            {"newid": new_id, "srcid": source_gold_id},
+        )
+
+    return apply
+
+
+@st.fragment
+def _render_cloning_center() -> None:
+    """The 3-mode clone surface. All actions buffer; nothing writes here."""
+    # Mode selector — radio buttons keep all 3 forms inline.
+    _mode = st.radio(
+        "Clone mode",
+        options=[
+            "📦 Full Global → Client (all datasets)",
+            "📦 Per-dataset · Global → Client",
+            "📦 Per-dataset · Client → Client",
+        ],
+        index=0,
+        horizontal=True,
+        key="cc_mode",
+    )
+
+    # ── Mode A — Full Global → Client (all datasets) ────────────────────
+    if _mode.startswith("📦 Full Global"):
+        st.markdown(
+            "Clone every published Global Silver + Gold to a single new "
+            "client in one shot.  Datasets the target already has (in any "
+            "non-archived state) are SKIPPED, not overwritten."
+        )
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            _full_target = st.text_input(
+                "Target client_id",
+                placeholder="e.g. aetna, bcbs, humana",
+                key="cc_full_target",
+            )
+        with col2:
+            st.write("")  # vertical alignment
+            _full_go = st.button(
+                "📦 Plan + buffer clones",
+                type="primary",
+                use_container_width=True,
+                disabled=not _full_target,
+                key="cc_full_go",
+            )
+
+        if _full_go:
+            target = _cc_target_client_normalized(_full_target)
+            if not target:
+                st.error(
+                    "Invalid target. Use lowercase alphanumeric/underscores. "
+                    "GLOBAL_CORP / __global__ are forbidden as targets."
+                )
+            else:
+                # For every Global Silver + Gold (LIVE or APPROVED), if the
+                # target doesn't already have it, buffer a clone.
+                planned: list[str] = []
+                skipped: list[str] = []
+                for src in _g_silver:
+                    src_status = str(src.get("status"))
+                    if src_status not in ("APPROVED", "LIVE"):
+                        continue
+                    ds = str(src.get("dataset_code"))
+                    if _cc_silver_blocks(target, ds):
+                        skipped.append(f"Silver {ds} (target already has it)")
+                        continue
+                    src_id = str(src.get("silver_dataset_id"))
+                    _dmd_top.stash_edit(
+                        kind="clone_silver",
+                        entity_id=src_id,
+                        payload={
+                            "apply": _cc_build_silver_applier(src_id, target),
+                            "target_client": target,
+                            "dataset_code": ds,
+                        },
+                        base_version=int(src.get("version") or 0),
+                        base_status=src_status,
+                    )
+                    planned.append(f"Silver {ds} v{src.get('version')}")
+                for src in _g_gold:
+                    src_status = str(src.get("status"))
+                    if src_status not in ("APPROVED", "LIVE"):
+                        continue
+                    ds = str(src.get("dataset_code"))
+                    if _cc_gold_blocks(target, ds):
+                        skipped.append(f"Gold {ds} (target already has it)")
+                        continue
+                    src_id = str(src.get("gold_dataset_id"))
+                    _dmd_top.stash_edit(
+                        kind="clone_gold",
+                        entity_id=src_id,
+                        payload={
+                            "apply": _cc_build_gold_applier(src_id, target),
+                            "target_client": target,
+                            "dataset_code": ds,
+                        },
+                        base_version=int(src.get("version") or 0),
+                        base_status=src_status,
+                    )
+                    planned.append(f"Gold {ds} v{src.get('version')}")
+                if planned:
+                    st.success(
+                        f"✏️ Buffered **{len(planned)} clone"
+                        f"{'s' if len(planned) != 1 else ''}** for target "
+                        f"`{target}`.  Click 🚀 Submit at the top to apply."
+                    )
+                    with st.expander(
+                        f"Planned ({len(planned)})", expanded=False
+                    ):
+                        for p in planned:
+                            st.markdown(f"  - {p}")
+                if skipped:
+                    with st.expander(
+                        f"Skipped ({len(skipped)})", expanded=False
+                    ):
+                        for s in skipped:
+                            st.markdown(f"  - {s}")
+                if not planned and not skipped:
+                    st.info(
+                        "Nothing to clone. No APPROVED / LIVE Global "
+                        "schemas exist yet — author + promote a Global "
+                        "Silver/Gold first."
+                    )
+
+    # ── Mode B — Per-dataset Global → Client ─────────────────────────────
+    elif _mode.startswith("📦 Per-dataset · Global"):
+        st.markdown(
+            "Clone ONE dataset's Global Silver + Gold to a single client.  "
+            "Source must be APPROVED or LIVE.  Either layer alone is "
+            "buffered if the other doesn't qualify."
+        )
+        col1, col2, col3 = st.columns([2, 2, 1])
+        with col1:
+            # Eligible Global datasets — those with at least one
+            # APPROVED/LIVE Silver OR Gold
+            ds_set = sorted(
+                {
+                    str(s.get("dataset_code"))
+                    for s in _g_silver + _g_gold
+                    if str(s.get("status")) in ("APPROVED", "LIVE")
+                }
+            )
+            _gd_dataset = st.selectbox(
+                "Dataset (Global APPROVED/LIVE)",
+                options=ds_set,
+                index=0 if ds_set else None,
+                placeholder="No eligible datasets" if not ds_set else "Pick…",
+                key="cc_gd_dataset",
+            )
+        with col2:
+            _gd_target = st.text_input(
+                "Target client_id",
+                placeholder="e.g. aetna",
+                key="cc_gd_target",
+            )
+        with col3:
+            st.write("")
+            _gd_go = st.button(
+                "📦 Buffer",
+                type="primary",
+                use_container_width=True,
+                disabled=not (_gd_dataset and _gd_target),
+                key="cc_gd_go",
+            )
+
+        if _gd_go:
+            target = _cc_target_client_normalized(_gd_target)
+            if not target:
+                st.error(
+                    "Invalid target. Use lowercase alphanumeric/underscores. "
+                    "GLOBAL_CORP / __global__ forbidden."
+                )
+            else:
+                ds = str(_gd_dataset)
+                buffered = []
+                blockers = []
+
+                # Silver
+                _src_silver_rows = [
+                    s
+                    for s in _g_silver
+                    if str(s.get("dataset_code")) == ds
+                    and str(s.get("status")) in ("APPROVED", "LIVE")
+                ]
+                # pick highest-version
+                _src_silver = max(
+                    _src_silver_rows, key=lambda r: int(r.get("version") or 0)
+                ) if _src_silver_rows else None
+                if _src_silver:
+                    blk = _cc_silver_blocks(target, ds)
+                    if blk:
+                        blockers.append(f"Silver: {blk}")
+                    else:
+                        sid = str(_src_silver.get("silver_dataset_id"))
+                        _dmd_top.stash_edit(
+                            kind="clone_silver",
+                            entity_id=sid,
+                            payload={
+                                "apply": _cc_build_silver_applier(sid, target),
+                                "target_client": target,
+                                "dataset_code": ds,
+                            },
+                            base_version=int(_src_silver.get("version") or 0),
+                            base_status=str(_src_silver.get("status")),
+                        )
+                        buffered.append(
+                            f"Silver v{_src_silver.get('version')} "
+                            f"({_src_silver.get('status')})"
+                        )
+
+                # Gold
+                _src_gold_rows = [
+                    g
+                    for g in _g_gold
+                    if str(g.get("dataset_code")) == ds
+                    and str(g.get("status")) in ("APPROVED", "LIVE")
+                ]
+                _src_gold = max(
+                    _src_gold_rows, key=lambda r: int(r.get("version") or 0)
+                ) if _src_gold_rows else None
+                if _src_gold:
+                    blk = _cc_gold_blocks(target, ds)
+                    if blk:
+                        blockers.append(f"Gold: {blk}")
+                    else:
+                        gid = str(_src_gold.get("gold_dataset_id"))
+                        _dmd_top.stash_edit(
+                            kind="clone_gold",
+                            entity_id=gid,
+                            payload={
+                                "apply": _cc_build_gold_applier(gid, target),
+                                "target_client": target,
+                                "dataset_code": ds,
+                            },
+                            base_version=int(_src_gold.get("version") or 0),
+                            base_status=str(_src_gold.get("status")),
+                        )
+                        buffered.append(
+                            f"Gold v{_src_gold.get('version')} "
+                            f"({_src_gold.get('status')})"
+                        )
+
+                if buffered:
+                    st.success(
+                        f"✏️ Buffered: {' + '.join(buffered)} for "
+                        f"`{target}`/`{ds}`. Submit at the top to apply."
+                    )
+                if blockers:
+                    st.warning("\n".join(f"⚠️ {b}" for b in blockers))
+                if not buffered and not blockers:
+                    st.info(
+                        f"No APPROVED/LIVE Global Silver or Gold for "
+                        f"`{ds}` — promote one first."
+                    )
+
+    # ── Mode C — Per-dataset Client → Client ─────────────────────────────
+    else:
+        st.markdown(
+            "Fork from one client's Silver/Gold to another client.  Both "
+            "ends are real clients (never GLOBAL_CORP — that's sacred)."
+        )
+        if not _snap.distinct_clients:
+            st.info(
+                "📭 No real clients have authored anything yet. Use Mode A "
+                "or B to seed a client from Global first."
+            )
+        else:
+            col1, col2, col3 = st.columns([1.2, 1.5, 1.2])
+            with col1:
+                _cc_src_client = st.selectbox(
+                    "Source client",
+                    options=_snap.distinct_clients,
+                    index=0,
+                    key="cc_cc_src_client",
+                )
+            with col2:
+                # Datasets where the source client has at least one
+                # APPROVED/LIVE Silver OR Gold
+                _src_silver_for = [
+                    s
+                    for s in _snap.silver_schemas
+                    if str(s.get("scope_owner")) == _cc_src_client
+                    and str(s.get("status")) in ("APPROVED", "LIVE")
+                ]
+                _src_gold_for = [
+                    g
+                    for g in _snap.gold_schemas
+                    if str(g.get("scope_owner")) == _cc_src_client
+                    and str(g.get("status")) in ("APPROVED", "LIVE")
+                ]
+                _ds_options = sorted(
+                    {
+                        str(r.get("dataset_code"))
+                        for r in _src_silver_for + _src_gold_for
+                    }
+                )
+                _cc_dataset = st.selectbox(
+                    "Dataset (APPROVED/LIVE in source)",
+                    options=_ds_options,
+                    index=0 if _ds_options else None,
+                    placeholder="No eligible datasets"
+                    if not _ds_options
+                    else "Pick…",
+                    key="cc_cc_dataset",
+                )
+            with col3:
+                _cc_tgt_client = st.text_input(
+                    "Target client_id",
+                    placeholder="e.g. bcbs",
+                    key="cc_cc_target",
+                )
+            _cc_go = st.button(
+                "📦 Buffer client → client clone",
+                type="primary",
+                disabled=not (
+                    _cc_src_client and _cc_dataset and _cc_tgt_client
+                ),
+                key="cc_cc_go",
+            )
+
+            if _cc_go:
+                target = _cc_target_client_normalized(_cc_tgt_client)
+                if not target:
+                    st.error(
+                        "Invalid target. Lowercase alphanum/underscore only; "
+                        "never GLOBAL_CORP / __global__."
+                    )
+                elif target == _cc_src_client:
+                    st.error(
+                        "Source and target are the same client — pick a "
+                        "different target or use Promote/Archive instead."
+                    )
+                else:
+                    ds = str(_cc_dataset)
+                    buffered = []
+                    blockers = []
+
+                    _src_s = [
+                        s for s in _src_silver_for if str(s.get("dataset_code")) == ds
+                    ]
+                    _src_s_pick = max(
+                        _src_s, key=lambda r: int(r.get("version") or 0)
+                    ) if _src_s else None
+                    if _src_s_pick:
+                        blk = _cc_silver_blocks(target, ds)
+                        if blk:
+                            blockers.append(f"Silver: {blk}")
+                        else:
+                            sid = str(_src_s_pick.get("silver_dataset_id"))
+                            _dmd_top.stash_edit(
+                                kind="clone_silver",
+                                entity_id=sid,
+                                payload={
+                                    "apply": _cc_build_silver_applier(sid, target),
+                                    "target_client": target,
+                                    "dataset_code": ds,
+                                },
+                                base_version=int(_src_s_pick.get("version") or 0),
+                                base_status=str(_src_s_pick.get("status")),
+                            )
+                            buffered.append("Silver")
+
+                    _src_g = [
+                        g for g in _src_gold_for if str(g.get("dataset_code")) == ds
+                    ]
+                    _src_g_pick = max(
+                        _src_g, key=lambda r: int(r.get("version") or 0)
+                    ) if _src_g else None
+                    if _src_g_pick:
+                        blk = _cc_gold_blocks(target, ds)
+                        if blk:
+                            blockers.append(f"Gold: {blk}")
+                        else:
+                            gid = str(_src_g_pick.get("gold_dataset_id"))
+                            _dmd_top.stash_edit(
+                                kind="clone_gold",
+                                entity_id=gid,
+                                payload={
+                                    "apply": _cc_build_gold_applier(gid, target),
+                                    "target_client": target,
+                                    "dataset_code": ds,
+                                },
+                                base_version=int(_src_g_pick.get("version") or 0),
+                                base_status=str(_src_g_pick.get("status")),
+                            )
+                            buffered.append("Gold")
+
+                    if buffered:
+                        st.success(
+                            f"✏️ Buffered: {' + '.join(buffered)} clone "
+                            f"`{_cc_src_client}` → `{target}` for `{ds}`. "
+                            f"Submit at the top to apply."
+                        )
+                    if blockers:
+                        st.warning("\n".join(f"⚠️ {b}" for b in blockers))
+                    if not buffered and not blockers:
+                        st.info(
+                            f"No eligible source rows. Pick a different "
+                            f"dataset or check {_cc_src_client}'s schemas."
+                        )
+
+
+with st.expander("📦 Cloning Center", expanded=True):
+    st.caption(
+        "Industry-standard clone-from-template flow.  All clones buffer "
+        "locally and apply via 🚀 Submit at the top — concurrency-checked "
+        "per source row.  Client → Global is forbidden (Global is sacred)."
+    )
+    _render_cloning_center()
 
 
 st.markdown("---")
