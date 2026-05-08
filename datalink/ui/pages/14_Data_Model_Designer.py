@@ -1233,19 +1233,25 @@ def _render_cloning_center() -> None:
         key="cc_mode",
     )
 
-    # ── Mode A — Full Global → Client (all datasets) ────────────────────
+    # ── Mode A — Full Global → Multiple Clients (all datasets) ──────────
     if _mode.startswith("📦 Full Global"):
         st.markdown(
-            "Clone every published Global Silver + Gold to a single new "
-            "client in one shot.  Datasets the target already has (in any "
-            "non-archived state) are SKIPPED, not overwritten."
+            "Clone every published Global Silver + Gold to one OR many target "
+            "clients.  Datasets a target already has (in any non-archived "
+            "state) are SKIPPED for that target, never overwritten."
         )
-        col1, col2 = st.columns([2, 1])
+        col1, col2 = st.columns([3, 1])
         with col1:
-            _full_target = st.text_input(
-                "Target client_id",
-                placeholder="e.g. aetna, bcbs, humana",
-                key="cc_full_target",
+            _full_targets = st.multiselect(
+                "Target clients (pick existing or type new + Enter)",
+                options=_snap.distinct_clients,
+                default=[],
+                key="cc_full_targets",
+                placeholder="aetna · bcbs · humana · (type to add new)",
+                accept_new_options=True,
+                help="Multi-select. Pick existing clients OR type a new "
+                "client_id and press Enter — same guard rails apply per "
+                "target.",
             )
         with col2:
             st.write("")  # vertical alignment
@@ -1253,84 +1259,124 @@ def _render_cloning_center() -> None:
                 "📦 Plan + buffer clones",
                 type="primary",
                 use_container_width=True,
-                disabled=not _full_target,
+                disabled=not _full_targets,
                 key="cc_full_go",
             )
 
         if _full_go:
-            target = _cc_target_client_normalized(_full_target)
-            if not target:
+            normalized: list[str] = []
+            invalid: list[str] = []
+            for t in _full_targets:
+                norm = _cc_target_client_normalized(t)
+                if norm is None:
+                    invalid.append(t)
+                else:
+                    normalized.append(norm)
+            if invalid:
                 st.error(
-                    "Invalid target. Use lowercase alphanumeric/underscores. "
-                    "GLOBAL_CORP / __global__ are forbidden as targets."
+                    f"Invalid target client_id(s): "
+                    f"{', '.join(repr(v) for v in invalid)}.  Lowercase "
+                    f"alphanumeric / underscore / hyphen only.  "
+                    f"GLOBAL_CORP and __global__ are forbidden."
                 )
+            elif not normalized:
+                st.error("Pick at least one valid target.")
             else:
-                # For every Global Silver + Gold (LIVE or APPROVED), if the
-                # target doesn't already have it, buffer a clone.
-                planned: list[str] = []
-                skipped: list[str] = []
-                for src in _g_silver:
-                    src_status = str(src.get("status"))
-                    if src_status not in ("APPROVED", "LIVE"):
-                        continue
-                    ds = str(src.get("dataset_code"))
-                    if _cc_silver_blocks(target, ds):
-                        skipped.append(f"Silver {ds} (target already has it)")
-                        continue
-                    src_id = str(src.get("silver_dataset_id"))
-                    _dmd_top.stash_edit(
-                        kind="clone_silver",
-                        entity_id=src_id,
-                        payload={
-                            "apply": _cc_build_silver_applier(src_id, target),
-                            "target_client": target,
-                            "dataset_code": ds,
-                        },
-                        base_version=int(src.get("version") or 0),
-                        base_status=src_status,
+                # Per-target planning.  Each target gets its own block of
+                # buffered clones (only for datasets it doesn't already have).
+                planned_by_target: dict[str, list[str]] = {}
+                skipped_by_target: dict[str, list[str]] = {}
+                for target in normalized:
+                    planned_by_target.setdefault(target, [])
+                    skipped_by_target.setdefault(target, [])
+                    for src in _g_silver:
+                        src_status = str(src.get("status"))
+                        if src_status not in ("APPROVED", "LIVE"):
+                            continue
+                        ds = str(src.get("dataset_code"))
+                        if _cc_silver_blocks(target, ds):
+                            skipped_by_target[target].append(
+                                f"Silver {ds} (already exists)"
+                            )
+                            continue
+                        src_id = str(src.get("silver_dataset_id"))
+                        _dmd_top.stash_edit(
+                            kind="clone_silver",
+                            # Composite entity_id so the same source can be
+                            # cloned to many targets in one buffer.
+                            entity_id=f"{src_id}::{target}",
+                            payload={
+                                "apply": _cc_build_silver_applier(src_id, target),
+                                "target_client": target,
+                                "dataset_code": ds,
+                                "source_silver_id": src_id,
+                            },
+                            base_version=int(src.get("version") or 0),
+                            base_status=src_status,
+                        )
+                        planned_by_target[target].append(
+                            f"Silver {ds} v{src.get('version')}"
+                        )
+                    for src in _g_gold:
+                        src_status = str(src.get("status"))
+                        if src_status not in ("APPROVED", "LIVE"):
+                            continue
+                        ds = str(src.get("dataset_code"))
+                        if _cc_gold_blocks(target, ds):
+                            skipped_by_target[target].append(
+                                f"Gold {ds} (already exists)"
+                            )
+                            continue
+                        src_id = str(src.get("gold_dataset_id"))
+                        _dmd_top.stash_edit(
+                            kind="clone_gold",
+                            entity_id=f"{src_id}::{target}",
+                            payload={
+                                "apply": _cc_build_gold_applier(src_id, target),
+                                "target_client": target,
+                                "dataset_code": ds,
+                                "source_gold_id": src_id,
+                            },
+                            base_version=int(src.get("version") or 0),
+                            base_status=src_status,
+                        )
+                        planned_by_target[target].append(
+                            f"Gold {ds} v{src.get('version')}"
+                        )
+                total_planned = sum(len(v) for v in planned_by_target.values())
+                total_skipped = sum(len(v) for v in skipped_by_target.values())
+                if total_planned > 0:
+                    n_targets_with_plan = sum(
+                        1 for v in planned_by_target.values() if v
                     )
-                    planned.append(f"Silver {ds} v{src.get('version')}")
-                for src in _g_gold:
-                    src_status = str(src.get("status"))
-                    if src_status not in ("APPROVED", "LIVE"):
-                        continue
-                    ds = str(src.get("dataset_code"))
-                    if _cc_gold_blocks(target, ds):
-                        skipped.append(f"Gold {ds} (target already has it)")
-                        continue
-                    src_id = str(src.get("gold_dataset_id"))
-                    _dmd_top.stash_edit(
-                        kind="clone_gold",
-                        entity_id=src_id,
-                        payload={
-                            "apply": _cc_build_gold_applier(src_id, target),
-                            "target_client": target,
-                            "dataset_code": ds,
-                        },
-                        base_version=int(src.get("version") or 0),
-                        base_status=src_status,
-                    )
-                    planned.append(f"Gold {ds} v{src.get('version')}")
-                if planned:
                     st.success(
-                        f"✏️ Buffered **{len(planned)} clone"
-                        f"{'s' if len(planned) != 1 else ''}** for target "
-                        f"`{target}`.  Click 🚀 Submit at the top to apply."
+                        f"✏️ Buffered **{total_planned} clone"
+                        f"{'s' if total_planned != 1 else ''}** across "
+                        f"**{n_targets_with_plan} target"
+                        f"{'s' if n_targets_with_plan != 1 else ''}**.  "
+                        f"Click 🚀 Submit at the top to apply."
                     )
+                # Per-target breakdown
+                for target in normalized:
+                    plan_n = len(planned_by_target.get(target, []))
+                    skip_n = len(skipped_by_target.get(target, []))
+                    if plan_n == 0 and skip_n == 0:
+                        continue
                     with st.expander(
-                        f"Planned ({len(planned)})", expanded=False
+                        f"`{target}` — planned {plan_n}, skipped {skip_n}",
+                        expanded=False,
                     ):
-                        for p in planned:
-                            st.markdown(f"  - {p}")
-                if skipped:
-                    with st.expander(
-                        f"Skipped ({len(skipped)})", expanded=False
-                    ):
-                        for s in skipped:
-                            st.markdown(f"  - {s}")
-                if not planned and not skipped:
+                        if planned_by_target[target]:
+                            st.caption("**Buffered for clone:**")
+                            for p in planned_by_target[target]:
+                                st.markdown(f"  - {p}")
+                        if skipped_by_target[target]:
+                            st.caption("**Skipped:**")
+                            for s in skipped_by_target[target]:
+                                st.markdown(f"  - {s}")
+                if total_planned == 0 and total_skipped == 0:
                     st.info(
-                        "Nothing to clone. No APPROVED / LIVE Global "
+                        "Nothing to clone.  No APPROVED / LIVE Global "
                         "schemas exist yet — author + promote a Global "
                         "Silver/Gold first."
                     )
@@ -1342,10 +1388,8 @@ def _render_cloning_center() -> None:
             "Source must be APPROVED or LIVE.  Either layer alone is "
             "buffered if the other doesn't qualify."
         )
-        col1, col2, col3 = st.columns([2, 2, 1])
+        col1, col2, col3 = st.columns([2, 3, 1])
         with col1:
-            # Eligible Global datasets — those with at least one
-            # APPROVED/LIVE Silver OR Gold
             ds_set = sorted(
                 {
                     str(s.get("dataset_code"))
@@ -1361,10 +1405,15 @@ def _render_cloning_center() -> None:
                 key="cc_gd_dataset",
             )
         with col2:
-            _gd_target = st.text_input(
-                "Target client_id",
-                placeholder="e.g. aetna",
-                key="cc_gd_target",
+            _gd_targets = st.multiselect(
+                "Target clients (pick existing or type new + Enter)",
+                options=_snap.distinct_clients,
+                default=[],
+                key="cc_gd_targets",
+                placeholder="aetna · bcbs · (type to add new)",
+                accept_new_options=True,
+                help="Multi-select. Each target gets its own buffered "
+                "clone — guard rails apply per target.",
             )
         with col3:
             st.write("")
@@ -1372,56 +1421,40 @@ def _render_cloning_center() -> None:
                 "📦 Buffer",
                 type="primary",
                 use_container_width=True,
-                disabled=not (_gd_dataset and _gd_target),
+                disabled=not (_gd_dataset and _gd_targets),
                 key="cc_gd_go",
             )
 
         if _gd_go:
-            target = _cc_target_client_normalized(_gd_target)
-            if not target:
+            normalized: list[str] = []
+            invalid: list[str] = []
+            for t in _gd_targets:
+                norm = _cc_target_client_normalized(t)
+                if norm is None:
+                    invalid.append(t)
+                else:
+                    normalized.append(norm)
+            if invalid:
                 st.error(
-                    "Invalid target. Use lowercase alphanumeric/underscores. "
-                    "GLOBAL_CORP / __global__ forbidden."
+                    f"Invalid target client_id(s): "
+                    f"{', '.join(repr(v) for v in invalid)}. Lowercase "
+                    f"alphanumeric / underscore / hyphen only."
                 )
+            elif not normalized:
+                st.error("Pick at least one valid target.")
             else:
                 ds = str(_gd_dataset)
-                buffered = []
-                blockers = []
 
-                # Silver
+                # Find best Silver + Gold sources for this dataset
                 _src_silver_rows = [
                     s
                     for s in _g_silver
                     if str(s.get("dataset_code")) == ds
                     and str(s.get("status")) in ("APPROVED", "LIVE")
                 ]
-                # pick highest-version
                 _src_silver = max(
                     _src_silver_rows, key=lambda r: int(r.get("version") or 0)
                 ) if _src_silver_rows else None
-                if _src_silver:
-                    blk = _cc_silver_blocks(target, ds)
-                    if blk:
-                        blockers.append(f"Silver: {blk}")
-                    else:
-                        sid = str(_src_silver.get("silver_dataset_id"))
-                        _dmd_top.stash_edit(
-                            kind="clone_silver",
-                            entity_id=sid,
-                            payload={
-                                "apply": _cc_build_silver_applier(sid, target),
-                                "target_client": target,
-                                "dataset_code": ds,
-                            },
-                            base_version=int(_src_silver.get("version") or 0),
-                            base_status=str(_src_silver.get("status")),
-                        )
-                        buffered.append(
-                            f"Silver v{_src_silver.get('version')} "
-                            f"({_src_silver.get('status')})"
-                        )
-
-                # Gold
                 _src_gold_rows = [
                     g
                     for g in _g_gold
@@ -1431,40 +1464,98 @@ def _render_cloning_center() -> None:
                 _src_gold = max(
                     _src_gold_rows, key=lambda r: int(r.get("version") or 0)
                 ) if _src_gold_rows else None
-                if _src_gold:
-                    blk = _cc_gold_blocks(target, ds)
-                    if blk:
-                        blockers.append(f"Gold: {blk}")
-                    else:
-                        gid = str(_src_gold.get("gold_dataset_id"))
-                        _dmd_top.stash_edit(
-                            kind="clone_gold",
-                            entity_id=gid,
-                            payload={
-                                "apply": _cc_build_gold_applier(gid, target),
-                                "target_client": target,
-                                "dataset_code": ds,
-                            },
-                            base_version=int(_src_gold.get("version") or 0),
-                            base_status=str(_src_gold.get("status")),
-                        )
-                        buffered.append(
-                            f"Gold v{_src_gold.get('version')} "
-                            f"({_src_gold.get('status')})"
-                        )
 
-                if buffered:
-                    st.success(
-                        f"✏️ Buffered: {' + '.join(buffered)} for "
-                        f"`{target}`/`{ds}`. Submit at the top to apply."
-                    )
-                if blockers:
-                    st.warning("\n".join(f"⚠️ {b}" for b in blockers))
-                if not buffered and not blockers:
+                if not _src_silver and not _src_gold:
                     st.info(
                         f"No APPROVED/LIVE Global Silver or Gold for "
                         f"`{ds}` — promote one first."
                     )
+                else:
+                    buffered_by_target: dict[str, list[str]] = {}
+                    blocked_by_target: dict[str, list[str]] = {}
+                    for target in normalized:
+                        buffered_by_target.setdefault(target, [])
+                        blocked_by_target.setdefault(target, [])
+
+                        if _src_silver:
+                            blk = _cc_silver_blocks(target, ds)
+                            if blk:
+                                blocked_by_target[target].append(
+                                    f"Silver — {blk}"
+                                )
+                            else:
+                                sid = str(_src_silver.get("silver_dataset_id"))
+                                _dmd_top.stash_edit(
+                                    kind="clone_silver",
+                                    entity_id=f"{sid}::{target}",
+                                    payload={
+                                        "apply": _cc_build_silver_applier(sid, target),
+                                        "target_client": target,
+                                        "dataset_code": ds,
+                                        "source_silver_id": sid,
+                                    },
+                                    base_version=int(_src_silver.get("version") or 0),
+                                    base_status=str(_src_silver.get("status")),
+                                )
+                                buffered_by_target[target].append(
+                                    f"Silver v{_src_silver.get('version')}"
+                                )
+
+                        if _src_gold:
+                            blk = _cc_gold_blocks(target, ds)
+                            if blk:
+                                blocked_by_target[target].append(
+                                    f"Gold — {blk}"
+                                )
+                            else:
+                                gid = str(_src_gold.get("gold_dataset_id"))
+                                _dmd_top.stash_edit(
+                                    kind="clone_gold",
+                                    entity_id=f"{gid}::{target}",
+                                    payload={
+                                        "apply": _cc_build_gold_applier(gid, target),
+                                        "target_client": target,
+                                        "dataset_code": ds,
+                                        "source_gold_id": gid,
+                                    },
+                                    base_version=int(_src_gold.get("version") or 0),
+                                    base_status=str(_src_gold.get("status")),
+                                )
+                                buffered_by_target[target].append(
+                                    f"Gold v{_src_gold.get('version')}"
+                                )
+
+                    total_planned = sum(
+                        len(v) for v in buffered_by_target.values()
+                    )
+                    if total_planned > 0:
+                        n_targets = sum(
+                            1 for v in buffered_by_target.values() if v
+                        )
+                        st.success(
+                            f"✏️ Buffered **{total_planned} clone"
+                            f"{'s' if total_planned != 1 else ''}** "
+                            f"across **{n_targets} target"
+                            f"{'s' if n_targets != 1 else ''}** for `{ds}`. "
+                            f"Submit at the top to apply."
+                        )
+                    for target in normalized:
+                        plan_n = len(buffered_by_target.get(target, []))
+                        block_n = len(blocked_by_target.get(target, []))
+                        if plan_n == 0 and block_n == 0:
+                            continue
+                        with st.expander(
+                            f"`{target}` — buffered {plan_n}, blocked {block_n}",
+                            expanded=False,
+                        ):
+                            if buffered_by_target[target]:
+                                st.caption("**Buffered:**")
+                                for b in buffered_by_target[target]:
+                                    st.markdown(f"  - {b}")
+                            if blocked_by_target[target]:
+                                st.caption("**Blocked:**")
+                                for b in blocked_by_target[target]:
+                                    st.markdown(f"  - {b}")
 
     # ── Mode C — Per-dataset Client → Client ─────────────────────────────
     else:
@@ -1517,100 +1608,178 @@ def _render_cloning_center() -> None:
                     key="cc_cc_dataset",
                 )
             with col3:
-                _cc_tgt_client = st.text_input(
-                    "Target client_id",
-                    placeholder="e.g. bcbs",
-                    key="cc_cc_target",
+                _cc_tgt_options = [
+                    c for c in _snap.distinct_clients if c != _cc_src_client
+                ]
+                _cc_tgt_clients = st.multiselect(
+                    "Target clients (pick existing or type new + Enter)",
+                    options=_cc_tgt_options,
+                    default=[],
+                    key="cc_cc_targets",
+                    placeholder="bcbs · humana · (type to add new)",
+                    accept_new_options=True,
+                    help="Multi-select.  Source client is excluded from "
+                    "options.  Type a new client_id and press Enter to "
+                    "add a brand-new tenant.",
                 )
             _cc_go = st.button(
-                "📦 Buffer client → client clone",
+                "📦 Buffer client → client clone(s)",
                 type="primary",
                 disabled=not (
-                    _cc_src_client and _cc_dataset and _cc_tgt_client
+                    _cc_src_client and _cc_dataset and _cc_tgt_clients
                 ),
                 key="cc_cc_go",
             )
 
             if _cc_go:
-                target = _cc_target_client_normalized(_cc_tgt_client)
-                if not target:
+                normalized: list[str] = []
+                invalid: list[str] = []
+                for t in _cc_tgt_clients:
+                    norm = _cc_target_client_normalized(t)
+                    if norm is None:
+                        invalid.append(t)
+                    elif norm == _cc_src_client:
+                        invalid.append(f"{t} (= source)")
+                    else:
+                        normalized.append(norm)
+                if invalid:
                     st.error(
-                        "Invalid target. Lowercase alphanum/underscore only; "
-                        "never GLOBAL_CORP / __global__."
+                        f"Invalid target client_id(s): "
+                        f"{', '.join(repr(v) for v in invalid)}.  Lowercase "
+                        f"alphanumeric / underscore / hyphen only; never "
+                        f"GLOBAL_CORP / __global__; never the source itself."
                     )
-                elif target == _cc_src_client:
-                    st.error(
-                        "Source and target are the same client — pick a "
-                        "different target or use Promote/Archive instead."
-                    )
+                elif not normalized:
+                    st.error("Pick at least one valid target.")
                 else:
                     ds = str(_cc_dataset)
-                    buffered = []
-                    blockers = []
 
                     _src_s = [
-                        s for s in _src_silver_for if str(s.get("dataset_code")) == ds
+                        s
+                        for s in _src_silver_for
+                        if str(s.get("dataset_code")) == ds
                     ]
                     _src_s_pick = max(
                         _src_s, key=lambda r: int(r.get("version") or 0)
                     ) if _src_s else None
-                    if _src_s_pick:
-                        blk = _cc_silver_blocks(target, ds)
-                        if blk:
-                            blockers.append(f"Silver: {blk}")
-                        else:
-                            sid = str(_src_s_pick.get("silver_dataset_id"))
-                            _dmd_top.stash_edit(
-                                kind="clone_silver",
-                                entity_id=sid,
-                                payload={
-                                    "apply": _cc_build_silver_applier(sid, target),
-                                    "target_client": target,
-                                    "dataset_code": ds,
-                                },
-                                base_version=int(_src_s_pick.get("version") or 0),
-                                base_status=str(_src_s_pick.get("status")),
-                            )
-                            buffered.append("Silver")
-
                     _src_g = [
-                        g for g in _src_gold_for if str(g.get("dataset_code")) == ds
+                        g
+                        for g in _src_gold_for
+                        if str(g.get("dataset_code")) == ds
                     ]
                     _src_g_pick = max(
                         _src_g, key=lambda r: int(r.get("version") or 0)
                     ) if _src_g else None
-                    if _src_g_pick:
-                        blk = _cc_gold_blocks(target, ds)
-                        if blk:
-                            blockers.append(f"Gold: {blk}")
-                        else:
-                            gid = str(_src_g_pick.get("gold_dataset_id"))
-                            _dmd_top.stash_edit(
-                                kind="clone_gold",
-                                entity_id=gid,
-                                payload={
-                                    "apply": _cc_build_gold_applier(gid, target),
-                                    "target_client": target,
-                                    "dataset_code": ds,
-                                },
-                                base_version=int(_src_g_pick.get("version") or 0),
-                                base_status=str(_src_g_pick.get("status")),
-                            )
-                            buffered.append("Gold")
 
-                    if buffered:
-                        st.success(
-                            f"✏️ Buffered: {' + '.join(buffered)} clone "
-                            f"`{_cc_src_client}` → `{target}` for `{ds}`. "
-                            f"Submit at the top to apply."
-                        )
-                    if blockers:
-                        st.warning("\n".join(f"⚠️ {b}" for b in blockers))
-                    if not buffered and not blockers:
+                    if not _src_s_pick and not _src_g_pick:
                         st.info(
-                            f"No eligible source rows. Pick a different "
-                            f"dataset or check {_cc_src_client}'s schemas."
+                            f"No eligible source rows for `{ds}` under "
+                            f"`{_cc_src_client}`."
                         )
+                    else:
+                        buffered_by_target: dict[str, list[str]] = {}
+                        blocked_by_target: dict[str, list[str]] = {}
+                        for target in normalized:
+                            buffered_by_target.setdefault(target, [])
+                            blocked_by_target.setdefault(target, [])
+
+                            if _src_s_pick:
+                                blk = _cc_silver_blocks(target, ds)
+                                if blk:
+                                    blocked_by_target[target].append(
+                                        f"Silver — {blk}"
+                                    )
+                                else:
+                                    sid = str(
+                                        _src_s_pick.get("silver_dataset_id")
+                                    )
+                                    _dmd_top.stash_edit(
+                                        kind="clone_silver",
+                                        entity_id=f"{sid}::{target}",
+                                        payload={
+                                            "apply": _cc_build_silver_applier(
+                                                sid, target
+                                            ),
+                                            "target_client": target,
+                                            "dataset_code": ds,
+                                            "source_silver_id": sid,
+                                        },
+                                        base_version=int(
+                                            _src_s_pick.get("version") or 0
+                                        ),
+                                        base_status=str(
+                                            _src_s_pick.get("status")
+                                        ),
+                                    )
+                                    buffered_by_target[target].append(
+                                        f"Silver v{_src_s_pick.get('version')}"
+                                    )
+
+                            if _src_g_pick:
+                                blk = _cc_gold_blocks(target, ds)
+                                if blk:
+                                    blocked_by_target[target].append(
+                                        f"Gold — {blk}"
+                                    )
+                                else:
+                                    gid = str(
+                                        _src_g_pick.get("gold_dataset_id")
+                                    )
+                                    _dmd_top.stash_edit(
+                                        kind="clone_gold",
+                                        entity_id=f"{gid}::{target}",
+                                        payload={
+                                            "apply": _cc_build_gold_applier(
+                                                gid, target
+                                            ),
+                                            "target_client": target,
+                                            "dataset_code": ds,
+                                            "source_gold_id": gid,
+                                        },
+                                        base_version=int(
+                                            _src_g_pick.get("version") or 0
+                                        ),
+                                        base_status=str(
+                                            _src_g_pick.get("status")
+                                        ),
+                                    )
+                                    buffered_by_target[target].append(
+                                        f"Gold v{_src_g_pick.get('version')}"
+                                    )
+
+                        total_planned = sum(
+                            len(v) for v in buffered_by_target.values()
+                        )
+                        if total_planned > 0:
+                            n_targets = sum(
+                                1 for v in buffered_by_target.values() if v
+                            )
+                            st.success(
+                                f"✏️ Buffered **{total_planned} clone"
+                                f"{'s' if total_planned != 1 else ''}** "
+                                f"`{_cc_src_client}` → "
+                                f"**{n_targets} target"
+                                f"{'s' if n_targets != 1 else ''}** for "
+                                f"`{ds}`. Submit at the top to apply."
+                            )
+                        for target in normalized:
+                            plan_n = len(buffered_by_target.get(target, []))
+                            block_n = len(blocked_by_target.get(target, []))
+                            if plan_n == 0 and block_n == 0:
+                                continue
+                            with st.expander(
+                                f"`{target}` — buffered {plan_n}, "
+                                f"blocked {block_n}",
+                                expanded=False,
+                            ):
+                                if buffered_by_target[target]:
+                                    st.caption("**Buffered:**")
+                                    for b in buffered_by_target[target]:
+                                        st.markdown(f"  - {b}")
+                                if blocked_by_target[target]:
+                                    st.caption("**Blocked:**")
+                                    for b in blocked_by_target[target]:
+                                        st.markdown(f"  - {b}")
 
 
 with st.expander("📦 Cloning Center", expanded=True):
