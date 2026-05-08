@@ -233,69 +233,79 @@ all_gold = _cached_gold_rows()
 
 
 # ---------------------------------------------------------------------------
-# Medallion Registry Status — 4 tiles + drill-down expander
+# Phase 17.6 — Global Medallion Registry Status (GLOBAL_CORP scope only).
+# Per-client status lives in the Client Medallion Registry section below.
 # ---------------------------------------------------------------------------
 
-st.markdown("## 🏗 Medallion Registry Status")
+# Pull the page-wide snapshot once.  Every section below operates on this
+# in-memory cache — zero Snowflake calls until the operator clicks
+# 🚀 Submit changes (Phase 17.6 batched-submit pattern) or 🔄 Refresh.
+from datalink.ui import _dmd_data as _dmd  # noqa: E402
 
-bronze_count = len(bronze_datasets)
-silver_live_count = sum(1 for s in all_silver if s.get("status") == "LIVE")
-silver_draft_count = sum(1 for s in all_silver if s.get("status") in ("DRAFT", "PENDING_REVIEW"))
-gold_live_count = sum(1 for g in all_gold if g.get("status") == "LIVE")
-gold_draft_count = sum(1 for g in all_gold if g.get("status") in ("DRAFT", "PENDING_REVIEW"))
+_snap = _dmd.get_snapshot()
 
-c1, c2, c3, c4 = st.columns(4)
+# Global counts — only schemas whose scope_owner is GLOBAL_CORP (or legacy
+# __global__ during the 17.1 transition).
+def _is_global_scope(s: dict[str, Any]) -> bool:
+    return str(s.get("scope_owner") or "") in ("GLOBAL_CORP", "__global__")
+
+
+_g_silver = [s for s in _snap.silver_schemas if _is_global_scope(s)]
+_g_gold = [g for g in _snap.gold_schemas if _is_global_scope(g)]
+
+st.markdown("## 🌍 Global Medallion Registry Status")
+st.caption(
+    "Canonical templates that real clients clone from — zero LLM cost. "
+    "Counts and drill-down below are GLOBAL_CORP-scoped only."
+)
+
+bronze_count = len(_snap.bronze_datasets)
+g_silver_live_count = sum(1 for s in _g_silver if s.get("status") == "LIVE")
+g_silver_draft_count = sum(
+    1 for s in _g_silver if s.get("status") in ("DRAFT", "PENDING_REVIEW")
+)
+g_gold_live_count = sum(1 for g in _g_gold if g.get("status") == "LIVE")
+g_gold_draft_count = sum(
+    1 for g in _g_gold if g.get("status") in ("DRAFT", "PENDING_REVIEW")
+)
+
+c1, c2, c3 = st.columns(3)
 c1.markdown(
     f'<div class="gd-card"><div class="gd-stat-emoji">🥉</div>'
     f'<div class="gd-stat">{bronze_count}</div>'
-    f'<div class="gd-stat-label">Bronze datasets available</div></div>',
+    f'<div class="gd-stat-label">Global Bronze datasets</div></div>',
     unsafe_allow_html=True,
 )
 silver_draft_html = (
-    f"<small style='color:{_AMBER};font-size:.7em'> +{silver_draft_count} draft</small>"
-    if silver_draft_count
+    f"<small style='color:{_AMBER};font-size:.7em'> +{g_silver_draft_count} draft</small>"
+    if g_silver_draft_count
     else ""
 )
 gold_draft_html = (
-    f"<small style='color:{_AMBER};font-size:.7em'> +{gold_draft_count} draft</small>"
-    if gold_draft_count
+    f"<small style='color:{_AMBER};font-size:.7em'> +{g_gold_draft_count} draft</small>"
+    if g_gold_draft_count
     else ""
 )
 c2.markdown(
     f'<div class="gd-card"><div class="gd-stat-emoji">🥈</div>'
-    f'<div class="gd-stat">{silver_live_count}{silver_draft_html}</div>'
-    f'<div class="gd-stat-label">Silver schemas LIVE</div></div>',
+    f'<div class="gd-stat">{g_silver_live_count}{silver_draft_html}</div>'
+    f'<div class="gd-stat-label">Global Silver schemas LIVE</div></div>',
     unsafe_allow_html=True,
 )
 c3.markdown(
     f'<div class="gd-card"><div class="gd-stat-emoji">🥇</div>'
-    f'<div class="gd-stat">{gold_live_count}{gold_draft_html}</div>'
-    f'<div class="gd-stat-label">Gold schemas LIVE</div></div>',
-    unsafe_allow_html=True,
-)
-distinct_clients = 0
-with _warehouse(readonly=True) as wh:
-    rows = list(
-        wh.query(
-            f"SELECT COUNT(DISTINCT client_id) AS c FROM {CONTROL_SCHEMA}.client_pipeline_instances "
-            f"WHERE status = 'LIVE'"
-        )
-    )
-    if rows:
-        distinct_clients = int(rows[0]["c"] or 0)
-c4.markdown(
-    f'<div class="gd-card"><div class="gd-stat-emoji">🤝</div>'
-    f'<div class="gd-stat">{distinct_clients}</div>'
-    f'<div class="gd-stat-label">Onboarded clients (LIVE)</div></div>',
+    f'<div class="gd-stat">{g_gold_live_count}{gold_draft_html}</div>'
+    f'<div class="gd-stat-label">Global Gold schemas LIVE</div></div>',
     unsafe_allow_html=True,
 )
 
 
-# Drill-down expander — unified colored table across all 33 datasets
+# Drill-down expander — readiness across all 33 datasets at the GLOBAL_CORP
+# layer.  Per-client readiness is in the Client Medallion Registry below.
 def _readiness_row(ds: dict[str, Any]) -> dict[str, Any]:
     code = ds["dataset_code"]
-    silver = next((s for s in all_silver if s["dataset_code"] == code), None)
-    gold = next((g for g in all_gold if g["dataset_code"] == code), None)
+    silver = next((s for s in _g_silver if s["dataset_code"] == code), None)
+    gold = next((g for g in _g_gold if g["dataset_code"] == code), None)
     used_by_raw = ds.get("used_by") or "[]"
     try:
         used_by_list = json.loads(used_by_raw) if isinstance(used_by_raw, str) else used_by_raw
@@ -338,18 +348,115 @@ def _color_status(val: str) -> str:
 
 
 with st.expander(
-    f"📊 Drill into all {bronze_count} datasets — Bronze / Silver / Gold readiness",
+    f"📊 Drill into all {bronze_count} datasets — Global Bronze / Silver / Gold readiness",
     expanded=True,
 ):
-    if not bronze_datasets:
+    if not _snap.bronze_datasets:
         st.warning(
             "Bronze catalog is empty. Run `python3 scripts/load_product_catalog.py` to seed it."
         )
     else:
-        rows = [_readiness_row(d) for d in bronze_datasets]
+        rows = [_readiness_row(d) for d in _snap.bronze_datasets]
         df = pd.DataFrame(rows)
         styled = df.style.map(_color_status, subset=["Bronze", "Silver", "Gold"])
         st.dataframe(styled, use_container_width=True, hide_index=True, height=520)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 17.6 — 🔍 Compatibility Advisor (top-level, lives under Global
+# Medallion Registry per design discussion).
+#
+# Auto-detects Global datasets that have ≥ 2 versions and surfaces
+# ADDITIVE / BREAKING diff inline.  Renders nothing when no dataset has
+# multiple versions — keeps the page quiet until it's relevant.
+# ═════════════════════════════════════════════════════════════════════════════
+
+# Group GLOBAL gold versions by dataset (snapshot already excludes archived
+# unless we ask for them — for compat we want ALL versions).
+_g_versions_by_ds: dict[str, list[dict[str, Any]]] = {}
+for r in _g_gold:
+    _g_versions_by_ds.setdefault(str(r["dataset_code"]), []).append(r)
+_compat_eligible_ds = sorted(
+    [ds for ds, vs in _g_versions_by_ds.items() if len(vs) >= 2]
+)
+
+if _compat_eligible_ds:
+    st.markdown("### 🔍 Compatibility Advisor")
+    st.caption(
+        "Compare two GLOBAL Gold versions to see ADDITIVE vs BREAKING changes "
+        "before promoting clients to a new version."
+    )
+    cc1, cc2, cc3 = st.columns([2, 1, 1])
+    with cc1:
+        _adv_ds = st.selectbox(
+            "Dataset",
+            options=_compat_eligible_ds,
+            key="compat_advisor_dataset",
+            help="Only datasets with ≥ 2 GLOBAL Gold versions appear here.",
+        )
+    _ds_versions = sorted(
+        [int(v["version"]) for v in _g_versions_by_ds[_adv_ds]], reverse=True
+    )
+    with cc2:
+        _adv_to = st.selectbox(
+            "To version",
+            options=_ds_versions,
+            index=0,
+            key="compat_advisor_to",
+        )
+    with cc3:
+        _adv_from = st.selectbox(
+            "From version",
+            options=_ds_versions,
+            index=min(1, len(_ds_versions) - 1),
+            key="compat_advisor_from",
+        )
+    if _adv_from != _adv_to:
+        from datalink.versioning import gold_schema as _gs_top
+
+        with _warehouse(readonly=True) as _wh_compat_top:
+            try:
+                _ctop_report = _gs_top.compute_compatibility(
+                    warehouse=_wh_compat_top,
+                    dataset_code=_adv_ds,
+                    from_version=int(_adv_from),
+                    to_version=int(_adv_to),
+                )
+            except Exception as _exc:
+                st.error(f"Compatibility computation failed: {_exc}")
+                _ctop_report = None
+        if _ctop_report:
+            if _ctop_report.overall == "ADDITIVE":
+                st.success(f"🟢 **ADDITIVE** — {_ctop_report.summary()}")
+            else:
+                st.error(f"🔴 **BREAKING** — {_ctop_report.summary()}")
+            if _ctop_report.deltas:
+                _ctop_view = [
+                    {
+                        "Column": d.column_name,
+                        "Change": d.change_type,
+                        "Class": d.classification,
+                        "Detail": d.detail,
+                    }
+                    for d in _ctop_report.deltas
+                ]
+                st.dataframe(
+                    pd.DataFrame(_ctop_view),
+                    use_container_width=True,
+                    hide_index=True,
+                )
+            else:
+                st.caption(
+                    "_(No column-level deltas — versions are structurally identical.)_"
+                )
+
+st.markdown("---")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 17.6 — 🤝 Client Medallion Registry Status (filling in step 4)
+# ═════════════════════════════════════════════════════════════════════════════
+# (placeholder — implementation follows in step 4 of the redesign)
 
 
 # ---------------------------------------------------------------------------
