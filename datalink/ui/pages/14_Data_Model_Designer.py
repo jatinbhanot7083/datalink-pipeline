@@ -149,6 +149,119 @@ st.markdown(
 # above never need a per-client view.
 
 
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 17.6 — 🚀 Submit Bar (sticky at the top of the page)
+#
+# Shows count of pending in-memory edits + a Submit button that batches
+# them server-side with optimistic-concurrency check.  When a conflict is
+# detected, the buffer is preserved (forced-review path per Q2 (b)).
+# ═════════════════════════════════════════════════════════════════════════════
+from datalink.ui import _dmd_data as _dmd_top  # noqa: E402
+
+
+@st.fragment
+def _render_submit_bar() -> None:
+    """Sticky-feeling submit + discard pair.  Lives in its own fragment so
+    a click here does NOT re-fire any of the page's grid queries."""
+    pending = _dmd_top.dirty_count()
+    if pending == 0:
+        st.caption(
+            "💤 No pending edits. Edits made in the grids below buffer here "
+            "and submit as a batch when you click the green button."
+        )
+        return
+
+    bar1, bar2, bar3, bar4 = st.columns([3, 1.2, 1.2, 1.4])
+    with bar1:
+        st.markdown(
+            f"<div style='padding:.4rem .6rem;background:#fef3c7;"
+            f"border-left:4px solid {_AMBER};border-radius:6px;'>"
+            f"<strong>✏️ {pending} unsaved edit{'s' if pending != 1 else ''}</strong> "
+            f"buffered locally — nothing has reached Snowflake yet.</div>",
+            unsafe_allow_html=True,
+        )
+    with bar2:
+        if st.button(
+            "🚀 Submit changes",
+            type="primary",
+            use_container_width=True,
+            help="Apply every buffered edit. Optimistic-concurrency checked "
+            "per row — conflicts force a review modal.",
+            key="submit_bar_submit",
+        ):
+            report = _dmd_top.submit_all()
+            if report.all_clean:
+                st.toast(
+                    f"✅ {report.applied_count} edit"
+                    f"{'s' if report.applied_count != 1 else ''} applied.",
+                    icon="🚀",
+                )
+                st.rerun()  # whole page rerender — fresh snapshot
+            else:
+                # Stash report for the conflict review modal further down the
+                # page (rendered when a conflict exists).
+                st.session_state["__dmd_last_report__"] = report
+                st.rerun()  # show the conflict review surface
+    with bar3:
+        if st.button(
+            "🗑️ Discard all",
+            use_container_width=True,
+            help="Drop every buffered edit without writing.",
+            key="submit_bar_discard",
+        ):
+            n = _dmd_top.discard_edits()
+            st.toast(f"🗑️ Discarded {n} edit{'s' if n != 1 else ''}.", icon="✅")
+            st.rerun(scope="fragment")
+    with bar4:
+        st.caption(f"Snapshot loaded: `{_snap.loaded_at[:19]}`")
+
+
+_render_submit_bar()
+
+
+# Phase 17.6 — Conflict review surface.  When submit_all() returns conflicts
+# (another user edited the same row), we don't auto-merge.  We show the
+# operator a per-conflict diff and force them to discard or override.
+_last_report = st.session_state.get("__dmd_last_report__")
+if _last_report is not None and not getattr(_last_report, "all_clean", True):
+    st.error(
+        f"⚠️ Submit completed with **{_last_report.conflict_count} conflict"
+        f"{'s' if _last_report.conflict_count != 1 else ''}** and "
+        f"**{_last_report.error_count} error"
+        f"{'s' if _last_report.error_count != 1 else ''}**. "
+        f"{_last_report.applied_count} clean edit"
+        f"{'s' if _last_report.applied_count != 1 else ''} applied."
+    )
+    with st.expander("🔍 Forced review — every per-row outcome", expanded=True):
+        for o in _last_report.outcomes:
+            icon = {
+                "applied": "✅",
+                "conflict": "⚠️",
+                "error": "❌",
+            }.get(o.status, "•")
+            st.markdown(
+                f"{icon} **{o.kind}** · `{o.entity_id[:8]}…` · "
+                f"_{o.status}_ — {o.detail or '(no detail)'}"
+            )
+        cb1, cb2 = st.columns([1, 4])
+        with cb1:
+            if st.button(
+                "Dismiss & re-edit",
+                key="dismiss_report",
+                help="Clear this report; the buffer stays so you can rework "
+                "the conflicting rows.",
+            ):
+                st.session_state.pop("__dmd_last_report__", None)
+                st.rerun()
+        with cb2:
+            st.caption(
+                "_Conflicting edits remained in the buffer.  Inspect the "
+                "current state in the grid below; re-author your change "
+                "knowing the server is now ahead of your snapshot._"
+            )
+    st.markdown("---")
+
+
 # ---------------------------------------------------------------------------
 # Bootstrap CONTROL tables
 # ---------------------------------------------------------------------------
@@ -454,9 +567,402 @@ st.markdown("---")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Phase 17.6 — 🤝 Client Medallion Registry Status (filling in step 4)
+# Phase 17.6 — 🤝 Client Medallion Registry Status
+#
+# One row per (client, dataset) tuple where the client has authored anything.
+# Clients with zero non-archived schemas are HIDDEN.  Sortable.  Filterable
+# by client.  Collapsible top-level expander.  Row click → action panel
+# below with status promote / archive / view buttons that BUFFER edits to
+# the dirty queue (no direct writes — the Submit Bar at the top batches).
+#
+# Wrapped in @st.fragment so all interactions stay scoped.  Zero Snowflake
+# round-trips after the initial snapshot fetch.
 # ═════════════════════════════════════════════════════════════════════════════
-# (placeholder — implementation follows in step 4 of the redesign)
+
+
+@st.fragment
+def _render_client_medallion_registry() -> None:
+    # Build per-(client, dataset) cells from the snapshot.  We exclude the
+    # GLOBAL_CORP scope — that's the canonical-template view above.
+    _client_cells: dict[tuple[str, str], dict[str, Any]] = {}
+
+    for s in _snap.silver_schemas:
+        scope = str(s.get("scope_owner") or "")
+        if scope in ("GLOBAL_CORP", "__global__", ""):
+            continue
+        if str(s.get("status")) == "ARCHIVED":
+            continue
+        key = (scope, str(s.get("dataset_code")))
+        cell = _client_cells.setdefault(
+            key,
+            {
+                "client_id": scope,
+                "dataset_code": key[1],
+                "silver": None,
+                "gold": None,
+            },
+        )
+        # Take the LATEST non-archived silver row for this cell.
+        if (cell["silver"] is None) or (
+            int(s.get("version") or 0) > int(cell["silver"].get("version") or 0)
+        ):
+            cell["silver"] = s
+
+    for g in _snap.gold_schemas:
+        scope = str(g.get("scope_owner") or "")
+        if scope in ("GLOBAL_CORP", "__global__", ""):
+            continue
+        if str(g.get("status")) == "ARCHIVED":
+            continue
+        key = (scope, str(g.get("dataset_code")))
+        cell = _client_cells.setdefault(
+            key,
+            {
+                "client_id": scope,
+                "dataset_code": key[1],
+                "silver": None,
+                "gold": None,
+            },
+        )
+        if (cell["gold"] is None) or (
+            int(g.get("version") or 0) > int(cell["gold"].get("version") or 0)
+        ):
+            cell["gold"] = g
+
+    if not _client_cells:
+        st.info(
+            "📭 No client-scoped schemas yet. Once you clone a Global "
+            "template to a client (or author client-specific Silver/Gold), "
+            "rows will appear here."
+        )
+        return
+
+    # Filter + sort row.
+    f1, f2, f3 = st.columns([2, 1.3, 1])
+    _all_clients_in_grid = sorted({key[0] for key in _client_cells})
+    with f1:
+        _filter_clients = st.multiselect(
+            "Filter by client",
+            options=_all_clients_in_grid,
+            default=[],
+            placeholder="All clients (default)",
+            key="cmr_filter_clients",
+        )
+    with f2:
+        _filter_reach = st.selectbox(
+            "Filter by reach",
+            options=[
+                "All",
+                "🟢 All levels (Silver + Gold LIVE)",
+                "🟡 Up to Silver (Silver LIVE)",
+                "🟠 In progress (any DRAFT/PENDING)",
+            ],
+            index=0,
+            key="cmr_filter_reach",
+        )
+    with f3:
+        _sort_by = st.selectbox(
+            "Sort by",
+            options=["Client", "Dataset", "Reach", "Latest activity"],
+            index=0,
+            key="cmr_sort_by",
+        )
+
+    # Compute reach + status pills per cell.
+    def _status_pill(s: str | None) -> str:
+        return {
+            "DRAFT": "📝 DRAFT",
+            "PENDING_REVIEW": "🟡 PENDING",
+            "APPROVED": "✅ APPROVED",
+            "LIVE": "🟢 LIVE",
+            "REJECTED": "🔴 REJECTED",
+        }.get(str(s or ""), "—")
+
+    def _reach(cell: dict[str, Any]) -> str:
+        s = cell.get("silver")
+        g = cell.get("gold")
+        s_status = str((s or {}).get("status") or "")
+        g_status = str((g or {}).get("status") or "")
+        if s_status == "LIVE" and g_status == "LIVE":
+            return "🟢 All levels"
+        if s_status == "LIVE":
+            return "🟡 Up to Silver"
+        if s_status or g_status:
+            return "🟠 In progress"
+        return "—"
+
+    _rows = []
+    for cell in _client_cells.values():
+        s = cell.get("silver")
+        g = cell.get("gold")
+        # Buffered indicator — show a 🚧 if any pending edit targets this cell.
+        s_id = str((s or {}).get("silver_dataset_id") or "")
+        g_id = str((g or {}).get("gold_dataset_id") or "")
+        buffered_flags = []
+        for k in ("silver_status", "silver_archive"):
+            if s_id and _dmd_top.is_buffered(k, s_id):
+                buffered_flags.append("🚧 Silver")
+                break
+        for k in ("gold_status", "gold_archive"):
+            if g_id and _dmd_top.is_buffered(k, g_id):
+                buffered_flags.append("🚧 Gold")
+                break
+        latest = max(
+            str((s or {}).get("created_at") or ""),
+            str((g or {}).get("created_at") or ""),
+        )[:19]
+        _rows.append(
+            {
+                "Client": cell["client_id"],
+                "Dataset": cell["dataset_code"],
+                "🥉 Bronze": "✓ Catalog",
+                "🥈 Silver": (
+                    f"{_status_pill((s or {}).get('status'))} v{(s or {}).get('version', '—')}"
+                    if s
+                    else "—"
+                ),
+                "🥇 Gold": (
+                    f"{_status_pill((g or {}).get('status'))} v{(g or {}).get('version', '—')}"
+                    if g
+                    else "—"
+                ),
+                "Reach": _reach(cell),
+                "Pending": " · ".join(buffered_flags) or "",
+                "Latest activity": latest,
+                # hidden — used by selection handler
+                "__client_id": cell["client_id"],
+                "__dataset_code": cell["dataset_code"],
+                "__silver_id": s_id,
+                "__gold_id": g_id,
+            }
+        )
+
+    # Apply filters
+    if _filter_clients:
+        _rows = [r for r in _rows if r["Client"] in _filter_clients]
+    if _filter_reach != "All":
+        _rows = [
+            r
+            for r in _rows
+            if r["Reach"]
+            == _filter_reach.split(" (")[0]  # match the emoji+label prefix
+        ]
+
+    # Apply sort
+    sort_key_map = {
+        "Client": lambda r: (r["Client"], r["Dataset"]),
+        "Dataset": lambda r: (r["Dataset"], r["Client"]),
+        "Reach": lambda r: (r["Reach"], r["Client"]),
+        "Latest activity": lambda r: (r["Latest activity"] or "", r["Client"]),
+    }
+    _rows.sort(key=sort_key_map.get(_sort_by, sort_key_map["Client"]))
+
+    if not _rows:
+        st.caption(
+            "_(No rows match the current filters.  Adjust filter chips above.)_"
+        )
+        return
+
+    # Display table — drop hidden columns
+    _disp_cols = [
+        "Client",
+        "Dataset",
+        "🥉 Bronze",
+        "🥈 Silver",
+        "🥇 Gold",
+        "Reach",
+        "Pending",
+        "Latest activity",
+    ]
+    _df = pd.DataFrame([{c: r[c] for c in _disp_cols} for r in _rows])
+
+    _sel = st.dataframe(
+        _df,
+        use_container_width=True,
+        hide_index=True,
+        on_select="rerun",
+        selection_mode="single-row",
+        height=320,
+        key="cmr_grid",
+    )
+    _sel_idx_list = _sel.selection.get("rows", []) if _sel else []
+    if not _sel_idx_list:
+        st.caption("_(Click any row above to see action buttons.)_")
+        return
+
+    _sel_row = _rows[_sel_idx_list[0]]
+    _silver = next(
+        (
+            s
+            for s in _snap.silver_schemas
+            if str(s.get("silver_dataset_id")) == _sel_row["__silver_id"]
+        ),
+        None,
+    )
+    _gold = next(
+        (
+            g
+            for g in _snap.gold_schemas
+            if str(g.get("gold_dataset_id")) == _sel_row["__gold_id"]
+        ),
+        None,
+    )
+
+    st.markdown(
+        f"### Actions for **{_sel_row['Client']} / {_sel_row['Dataset']}**"
+    )
+
+    # Two columns: Silver action panel + Gold action panel
+    s_col, g_col = st.columns(2)
+
+    def _layer_action_panel(layer: str, row: dict[str, Any] | None) -> None:
+        layer_emoji = "🥈" if layer == "Silver" else "🥇"
+        st.markdown(f"##### {layer_emoji} {layer}")
+        if row is None:
+            st.caption(f"_(No {layer} authored yet for this client.)_")
+            return
+        status = str(row.get("status") or "")
+        st.caption(
+            f"v{row.get('version')} · {_status_pill(status)} · "
+            f"created by `{row.get('created_by') or '—'}` · "
+            f"{str(row.get('created_at') or '')[:19]}"
+        )
+
+        next_status = {
+            "DRAFT": "PENDING_REVIEW",
+            "PENDING_REVIEW": "APPROVED",
+            "APPROVED": "LIVE",
+        }.get(status)
+
+        kind_status = "silver_status" if layer == "Silver" else "gold_status"
+        kind_archive = "silver_archive" if layer == "Silver" else "gold_archive"
+        entity_id = str(
+            row.get("silver_dataset_id" if layer == "Silver" else "gold_dataset_id")
+        )
+
+        ac1, ac2, ac3 = st.columns([1.5, 1, 1])
+        with ac1:
+            if next_status:
+                if st.button(
+                    f"⬆️ Promote → {next_status}",
+                    use_container_width=True,
+                    type="primary",
+                    key=f"cmr_promote_{layer}_{entity_id}",
+                    help="Buffers the change. Click 🚀 Submit at the top to apply.",
+                ):
+                    _dmd_top.stash_edit(
+                        kind=kind_status,
+                        entity_id=entity_id,
+                        payload={
+                            "new_status": next_status,
+                            "actor": "ui:client_medallion",
+                        },
+                        base_version=int(row.get("version") or 0),
+                        base_status=status,
+                    )
+                    st.toast(
+                        f"✏️ Buffered {layer} → {next_status}", icon="📝"
+                    )
+                    st.rerun(scope="fragment")
+            else:
+                st.button(
+                    "⬆️ Promote",
+                    use_container_width=True,
+                    disabled=True,
+                    key=f"cmr_promote_{layer}_disabled",
+                    help=f"{status} is terminal — cannot promote further.",
+                )
+        with ac2:
+            if status != "ARCHIVED" and st.button(
+                "🗄️ Archive",
+                use_container_width=True,
+                key=f"cmr_archive_{layer}_{entity_id}",
+                help="Buffers the archive. Soft-delete; row preserved for audit.",
+            ):
+                _dmd_top.stash_edit(
+                    kind=kind_archive,
+                    entity_id=entity_id,
+                    payload={"actor": "ui:client_medallion"},
+                    base_version=int(row.get("version") or 0),
+                    base_status=status,
+                )
+                st.toast(f"✏️ Buffered Archive {layer}", icon="🗄️")
+                st.rerun(scope="fragment")
+        with ac3:
+            cols_dict = (
+                _snap.silver_columns_by_dataset.get(entity_id, [])
+                if layer == "Silver"
+                else _snap.gold_fields_by_dataset.get(entity_id, [])
+            )
+            with st.popover(
+                f"👁️ Columns ({len(cols_dict)})",
+                use_container_width=True,
+            ):
+                if not cols_dict:
+                    st.info(f"No columns registered for this {layer} version.")
+                else:
+                    _cv = [
+                        {
+                            "#": c.get("column_order"),
+                            "Column": c.get("gold_column_name") or c.get("column_name"),
+                            "Type": c.get("logical_type"),
+                            "Null": "✓" if c.get("nullable") else "—",
+                            "BK": "🔑" if c.get("is_business_key") else "",
+                            "PII": "🔒" if c.get("is_pii") else "",
+                            "PHI": "🩺" if c.get("is_phi") else "",
+                        }
+                        for c in cols_dict
+                    ]
+                    st.dataframe(
+                        pd.DataFrame(_cv), use_container_width=True, hide_index=True
+                    )
+
+        # Buffered-edit indicator + cancel
+        for k in (kind_status, kind_archive):
+            if _dmd_top.is_buffered(k, entity_id):
+                st.markdown(
+                    f"<div style='padding:.3rem .5rem;background:#fef3c7;"
+                    f"border-radius:5px;font-size:.85rem;'>"
+                    f"🚧 <strong>Pending edit</strong> on this {layer} — "
+                    f"submit at the top to apply.</div>",
+                    unsafe_allow_html=True,
+                )
+
+    with s_col:
+        _layer_action_panel("Silver", _silver)
+    with g_col:
+        _layer_action_panel("Gold", _gold)
+
+    # Edit deep-link spans both layers
+    st.markdown("")
+    edit_href = (
+        f"/Data_Model_Designer?dataset={_sel_row['__dataset_code']}"
+        f"&client={_sel_row['__client_id']}"
+    )
+    st.markdown(
+        f'<a href="{edit_href}" target="_self" '
+        f'style="display:inline-block;background:#1d4ed8;color:#fff;'
+        f"padding:.45rem .9rem;border-radius:6px;text-decoration:none;"
+        f'font-weight:600;">✏️ Edit in authoring view</a>',
+        unsafe_allow_html=True,
+    )
+
+
+# Top-level collapsible — user wanted "expand and collapse" on this section.
+with st.expander(
+    "🤝 Client Medallion Registry Status",
+    expanded=True,
+):
+    st.caption(
+        "Per-client schema state across all datasets where the client "
+        "has authored anything.  Clients with no authored content are "
+        "hidden.  Filter, sort, and click rows to act — every action "
+        "buffers locally and submits as a batch via 🚀 Submit at the top."
+    )
+    _render_client_medallion_registry()
+
+
+st.markdown("---")
 
 
 # ---------------------------------------------------------------------------
