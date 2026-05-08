@@ -338,11 +338,11 @@ def persist_silver_proposal(
           (silver_dataset_id, dataset_code, silver_pattern, version, status,
            silver_anchor, source, import_format, is_overkill_flag,
            ai_proposal_json, ai_rationale, ai_token_count, ai_latency_ms,
-           notes, created_by, created_at, submitted_at)
+           notes, created_by, created_at, submitted_at, scope_owner)
         VALUES ($id, $ds, $pat, $v, $st,
                 $a, $src, $fmt, FALSE,
                 $aj, $ar, $tok, $lat,
-                $notes, $by, $ts, $subts)
+                $notes, $by, $ts, $subts, 'GLOBAL_CORP')
         """,
         {
             "id": silver_dataset_id,
@@ -618,11 +618,11 @@ def revert_silver_schema(
           (silver_dataset_id, dataset_code, silver_pattern, version, status,
            silver_anchor, source, import_format, is_overkill_flag,
            ai_proposal_json, ai_rationale, notes,
-           created_by, created_at, approved_by, approved_at)
+           created_by, created_at, approved_by, approved_at, scope_owner)
         VALUES ($id, $ds, $pat, $v, 'LIVE',
                 $a, 'REVERT', $fmt, $ovk,
                 $aj, $ar, $notes,
-                $by, $ts, $by, $ts)
+                $by, $ts, $by, $ts, 'GLOBAL_CORP')
         """,
         {
             "id": new_silver_dataset_id,

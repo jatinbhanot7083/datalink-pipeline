@@ -397,14 +397,14 @@ with _warehouse(readonly=True) as _wh_inv:
         _silver_inv = list(
             _wh_inv.query(
                 f"""
-                SELECT silver_dataset_id  AS id,
-                       'Silver'           AS layer,
+                SELECT silver_dataset_id   AS id,
+                       'Silver'             AS layer,
                        dataset_code,
                        version,
-                       pattern            AS spec,
+                       silver_pattern       AS spec,
                        status,
                        scope_owner,
-                       designed_by        AS created_by,
+                       created_by,
                        created_at,
                        approved_by,
                        approved_at,
@@ -450,7 +450,10 @@ def _row_passes(r: dict[str, Any]) -> bool:
         return False
     if _inv_status_filter != "All" and str(r.get("status")) != _inv_status_filter:
         return False
-    if _inv_scope_filter == "GLOBAL_CORP" and str(r.get("scope_owner")) != "GLOBAL_CORP":
+    if _inv_scope_filter == "GLOBAL_CORP" and str(r.get("scope_owner")) not in (
+        "GLOBAL_CORP",
+        "__global__",  # accept legacy literal during transition
+    ):
         return False
     return not (
         _inv_scope_filter == "Client-scoped only"

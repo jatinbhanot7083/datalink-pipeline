@@ -383,11 +383,11 @@ def persist_proposal(
           (gold_dataset_id, dataset_code, gold_table_name, version, status,
            gold_anchor, source, import_format, ai_proposal_json, ai_rationale,
            ai_token_count, ai_latency_ms, notes,
-           created_by, created_at, submitted_at)
+           created_by, created_at, submitted_at, scope_owner)
         VALUES ($id, $ds, $tn, $v, $st,
                 $a, $src, $fmt, $aj, $ar,
                 $tok, $lat, $notes,
-                $by, $ts, $subts)
+                $by, $ts, $subts, 'GLOBAL_CORP')
         """,
         {
             "id": gold_dataset_id,
