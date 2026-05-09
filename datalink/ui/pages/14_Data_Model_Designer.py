@@ -213,7 +213,13 @@ def _render_submit_bar() -> None:
             st.toast(f"🗑️ Discarded {n} edit{'s' if n != 1 else ''}.", icon="✅")
             st.rerun(scope="fragment")
     with bar4:
-        st.caption(f"Snapshot loaded: `{_snap.loaded_at[:19]}`")
+        # Don't reach for the page-scoped `_snap` here — this fragment
+        # runs ABOVE where `_snap` is defined, and on a fragment-only
+        # rerun the module-level binding may not exist yet.  Pull a
+        # cached snapshot of our own (cheap — it's the same @st.cache_data
+        # entry the rest of the page reads).
+        _bar_snap = _dmd_top.get_snapshot()
+        st.caption(f"Snapshot loaded: `{_bar_snap.loaded_at[:19]}`")
 
 
 _render_submit_bar()
