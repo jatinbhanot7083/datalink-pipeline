@@ -1380,6 +1380,40 @@ def _checkbox_multiselect(
     return list(selected)
 
 
+def _cc_inline_submit_button(*, key: str) -> None:
+    """Compact inline Submit button — sits beside the mode's Plan+Buffer
+    primary button.  Shows the live pending count.  Single click applies
+    every buffered edit."""
+    pending = _dmd_top.dirty_count()
+    label = (
+        f"🚀 Submit {pending}" if pending else "🚀 Submit"
+    )
+    if st.button(
+        label,
+        type="primary",
+        use_container_width=True,
+        disabled=pending == 0,
+        key=key,
+        help=(
+            f"Apply all {pending} buffered edit{'s' if pending != 1 else ''} "
+            f"with optimistic-concurrency check."
+            if pending
+            else "Buffer at least one clone (left) before submitting."
+        ),
+    ):
+        report = _dmd_top.submit_all()
+        if report.all_clean:
+            st.toast(
+                f"✅ {report.applied_count} clone"
+                f"{'s' if report.applied_count != 1 else ''} applied.",
+                icon="🚀",
+            )
+            st.rerun()
+        else:
+            st.session_state["__dmd_last_report__"] = report
+            st.rerun()
+
+
 @st.fragment
 def _render_cloning_center() -> None:
     """The 3-mode clone surface. All actions buffer; nothing writes here."""
@@ -1403,7 +1437,7 @@ def _render_cloning_center() -> None:
             "clients.  Datasets a target already has (in any non-archived "
             "state) are SKIPPED for that target, never overwritten."
         )
-        col1, col2 = st.columns([3, 1])
+        col1, col2, col3 = st.columns([3, 1.3, 1.1])
         with col1:
             _full_targets = _checkbox_multiselect(
                 label="Target clients",
@@ -1414,11 +1448,14 @@ def _render_cloning_center() -> None:
             st.write("")  # vertical alignment
             _full_go = st.button(
                 "📦 Plan + buffer clones",
-                type="primary",
+                type="secondary",
                 use_container_width=True,
                 disabled=not _full_targets,
                 key="cc_full_go",
             )
+        with col3:
+            st.write("")
+            _cc_inline_submit_button(key="cc_full_submit")
 
         if _full_go:
             normalized: list[str] = []
@@ -1545,7 +1582,7 @@ def _render_cloning_center() -> None:
             "Source must be APPROVED or LIVE.  Either layer alone is "
             "buffered if the other doesn't qualify."
         )
-        col1, col2, col3 = st.columns([2, 3, 1])
+        col1, col2, col3, col4 = st.columns([2, 3, 1.1, 1.1])
         with col1:
             ds_set = sorted(
                 {
@@ -1571,11 +1608,14 @@ def _render_cloning_center() -> None:
             st.write("")
             _gd_go = st.button(
                 "📦 Buffer",
-                type="primary",
+                type="secondary",
                 use_container_width=True,
                 disabled=not (_gd_dataset and _gd_targets),
                 key="cc_gd_go",
             )
+        with col4:
+            st.write("")
+            _cc_inline_submit_button(key="cc_gd_submit")
 
         if _gd_go:
             normalized: list[str] = []
@@ -1769,14 +1809,19 @@ def _render_cloning_center() -> None:
                     key="cc_cc",
                     exclude=[_cc_src_client] if _cc_src_client else None,
                 )
-            _cc_go = st.button(
-                "📦 Buffer client → client clone(s)",
-                type="primary",
-                disabled=not (
-                    _cc_src_client and _cc_dataset and _cc_tgt_clients
-                ),
-                key="cc_cc_go",
-            )
+            cc_act_a, cc_act_b = st.columns([2, 1])
+            with cc_act_a:
+                _cc_go = st.button(
+                    "📦 Buffer client → client clone(s)",
+                    type="secondary",
+                    use_container_width=True,
+                    disabled=not (
+                        _cc_src_client and _cc_dataset and _cc_tgt_clients
+                    ),
+                    key="cc_cc_go",
+                )
+            with cc_act_b:
+                _cc_inline_submit_button(key="cc_cc_submit")
 
             if _cc_go:
                 normalized: list[str] = []
