@@ -1238,9 +1238,26 @@ def _checkbox_multiselect(
     state_key = f"__cms_{key}__"
     if state_key not in st.session_state:
         st.session_state[state_key] = []
-    selected: list[str] = list(st.session_state[state_key])
 
     eff_options = [o for o in options if not exclude or o not in exclude]
+
+    # Source-of-truth selection: derived from per-checkbox session_state
+    # keys (for known options) + the custom-added clients we stash in
+    # state_key.  Computed BEFORE rendering anything so button disabled-
+    # states always reflect the live selection.
+    selected: list[str] = [
+        opt
+        for opt in eff_options
+        if st.session_state.get(f"{key}_cb_{opt}", False)
+    ]
+    selected += [
+        s
+        for s in st.session_state.get(state_key, [])
+        if s not in eff_options
+    ]
+    # Mirror back to state_key so other code that reads it sees the
+    # current truth.
+    st.session_state[state_key] = list(selected)
 
     btn_label = (
         f"☑️ {label} — {len(selected)} selected" if selected else f"☑️ {label}"
@@ -1252,11 +1269,18 @@ def _checkbox_multiselect(
         # checkboxes from their stale session-state values and the
         # reconcile loop below silently undoes the bulk action.
         qa1, qa2, _ = st.columns([1, 1, 2])
+        # 'Select all' enables when at least one option is unselected.
+        all_selected = (
+            bool(eff_options)
+            and all(opt in selected for opt in eff_options)
+        )
+        # 'Clear' enables when ANY item is selected (existing or custom).
+        any_selected = bool(selected)
         if qa1.button(
             "Select all",
             key=f"{key}_selall",
             use_container_width=True,
-            disabled=not eff_options,
+            disabled=not eff_options or all_selected,
         ):
             for opt in eff_options:
                 st.session_state[f"{key}_cb_{opt}"] = True
@@ -1267,7 +1291,7 @@ def _checkbox_multiselect(
             "Clear",
             key=f"{key}_clr",
             use_container_width=True,
-            disabled=not selected,
+            disabled=not any_selected,
         ):
             for opt in eff_options:
                 st.session_state[f"{key}_cb_{opt}"] = False
