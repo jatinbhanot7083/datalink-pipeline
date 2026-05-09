@@ -246,26 +246,55 @@ def _fetch_snapshot_uncached() -> Snapshot:
             gid = str(f_row.get("gold_dataset_id"))
             snap.gold_fields_by_dataset.setdefault(gid, []).append(f_row)
 
-        # 6. Distinct clients — derived from scope_owner column on silver/gold,
-        # excluding the global pseudo-client. Future: could read from
-        # client_pipeline_instances too if more comprehensive list needed.
+        # 6. Distinct clients — three-source UNION so the dropdown always has
+        # SOMETHING to show, even on a fresh Snowflake account that hasn't
+        # onboarded anyone yet:
+        #   (a) scope_owner on existing silver/gold rows
+        #   (b) client_id on existing pipeline_instances rows
+        #   (c) seed list from data/generated/ — the canonical demo roster
+        #       that ships with the repo
+        # Always excludes the GLOBAL_CORP pseudo-client + 'default' (legacy
+        # single-tenant marker).
         clients: set[str] = set()
         for s in snap.silver_schemas:
             so = str(s.get("scope_owner") or "")
-            if so and so not in ("GLOBAL_CORP", "__global__"):
+            if so and so not in ("GLOBAL_CORP", "__global__", "default"):
                 clients.add(so)
         for g in snap.gold_schemas:
             so = str(g.get("scope_owner") or "")
-            if so and so not in ("GLOBAL_CORP", "__global__"):
+            if so and so not in ("GLOBAL_CORP", "__global__", "default"):
                 clients.add(so)
         try:
             for r in wh.query(
                 f"SELECT DISTINCT client_id FROM {CONTROL_SCHEMA}.client_pipeline_instances "
-                f"WHERE client_id NOT IN ('GLOBAL_CORP','__global__')"
+                f"WHERE client_id NOT IN ('GLOBAL_CORP','__global__','default')"
             ):
-                clients.add(str(r.get("client_id")))
+                cid = str(r.get("client_id") or "")
+                if cid:
+                    clients.add(cid)
         except Exception:
             pass
+        # Seed list from data/generated/ — survives a fresh DB.
+        try:
+            from pathlib import Path
+
+            _data_gen = (
+                Path(__file__).resolve().parents[2] / "data" / "generated"
+            )
+            if _data_gen.is_dir():
+                for child in _data_gen.iterdir():
+                    if not child.is_dir():
+                        continue
+                    nm = child.name.lower()
+                    if nm in ("global_corp", "__global__", "default"):
+                        continue
+                    clients.add(nm)
+        except Exception:
+            pass
+        # Always include 'aetna' as the documented baseline tenant the
+        # demos / smoke tests reference, even if its data folder hasn't
+        # been generated yet.
+        clients.add("aetna")
         snap.distinct_clients = sorted(clients)
 
     snap.loaded_at = datetime.now(UTC).isoformat()
