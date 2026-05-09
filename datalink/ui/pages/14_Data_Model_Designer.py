@@ -423,8 +423,23 @@ c3.markdown(
 # layer.  Per-client readiness is in the Client Medallion Registry below.
 def _readiness_row(ds: dict[str, Any]) -> dict[str, Any]:
     code = ds["dataset_code"]
-    silver = next((s for s in _g_silver if s["dataset_code"] == code), None)
-    gold = next((g for g in _g_gold if g["dataset_code"] == code), None)
+    silvers = [s for s in _g_silver if s["dataset_code"] == code]
+    golds = [g for g in _g_gold if g["dataset_code"] == code]
+    silver = silvers[0] if silvers else None
+    gold = golds[0] if golds else None
+
+    # Anchor column — gather every distinct anchor seen across non-archived
+    # Silver + Gold rows for this dataset under GLOBAL_CORP.  Multiple
+    # anchors → comma-joined.  Reflects the current (anchor-aware) slot model.
+    _anchor_set: set[str] = set()
+    for s in silvers:
+        if str(s.get("status") or "") != "ARCHIVED":
+            _anchor_set.add(str(s.get("silver_anchor") or "—"))
+    for g in golds:
+        if str(g.get("status") or "") != "ARCHIVED":
+            _anchor_set.add(str(g.get("gold_anchor") or "—"))
+    anchor_label = ", ".join(sorted(_anchor_set)) if _anchor_set else "—"
+
     used_by_raw = ds.get("used_by") or "[]"
     try:
         used_by_list = json.loads(used_by_raw) if isinstance(used_by_raw, str) else used_by_raw
@@ -434,6 +449,7 @@ def _readiness_row(ds: dict[str, Any]) -> dict[str, Any]:
         "Dataset": ds["display_name"],
         "Code": code,
         "Category": ds.get("category") or "—",
+        "Anchor": anchor_label,
         "Bronze": "✓ LIVE",
         "Silver": (
             f"✓ LIVE ({silver['silver_pattern']} v{silver['version']})"
@@ -607,9 +623,11 @@ st.markdown("---")
 
 @st.fragment
 def _render_client_medallion_registry() -> None:
-    # Build per-(client, dataset) cells from the snapshot.  We exclude the
+    # Build per-(client, dataset, anchor) cells from the snapshot.  Anchor is
+    # part of the key now — Membership/CATALOG and Membership/FHIR are
+    # independent slots that show as SEPARATE rows.  We exclude the
     # GLOBAL_CORP scope — that's the canonical-template view above.
-    _client_cells: dict[tuple[str, str], dict[str, Any]] = {}
+    _client_cells: dict[tuple[str, str, str], dict[str, Any]] = {}
 
     for s in _snap.silver_schemas:
         scope = str(s.get("scope_owner") or "")
@@ -617,12 +635,14 @@ def _render_client_medallion_registry() -> None:
             continue
         if str(s.get("status")) == "ARCHIVED":
             continue
-        key = (scope, str(s.get("dataset_code")))
+        anchor_v = str(s.get("silver_anchor") or "—")
+        key = (scope, str(s.get("dataset_code")), anchor_v)
         cell = _client_cells.setdefault(
             key,
             {
                 "client_id": scope,
                 "dataset_code": key[1],
+                "anchor": anchor_v,
                 "silver": None,
                 "gold": None,
             },
@@ -639,12 +659,14 @@ def _render_client_medallion_registry() -> None:
             continue
         if str(g.get("status")) == "ARCHIVED":
             continue
-        key = (scope, str(g.get("dataset_code")))
+        anchor_v = str(g.get("gold_anchor") or "—")
+        key = (scope, str(g.get("dataset_code")), anchor_v)
         cell = _client_cells.setdefault(
             key,
             {
                 "client_id": scope,
                 "dataset_code": key[1],
+                "anchor": anchor_v,
                 "silver": None,
                 "gold": None,
             },
@@ -744,6 +766,7 @@ def _render_client_medallion_registry() -> None:
             {
                 "Client": cell["client_id"],
                 "Dataset": cell["dataset_code"],
+                "Anchor": cell.get("anchor") or "—",
                 "🥉 Bronze": "✓ Catalog",
                 "🥈 Silver": (
                     f"{_status_pill((s or {}).get('status'))} v{(s or {}).get('version', '—')}"
@@ -761,6 +784,7 @@ def _render_client_medallion_registry() -> None:
                 # hidden — used by selection handler
                 "__client_id": cell["client_id"],
                 "__dataset_code": cell["dataset_code"],
+                "__anchor": cell.get("anchor") or "",
                 "__silver_id": s_id,
                 "__gold_id": g_id,
             }
@@ -815,6 +839,7 @@ def _render_client_medallion_registry() -> None:
     _disp_cols = [
         "Client",
         "Dataset",
+        "Anchor",
         "🥉 Bronze",
         "🥈 Silver",
         "🥇 Gold",
