@@ -623,11 +623,11 @@ st.markdown("---")
 
 @st.fragment
 def _render_client_medallion_registry() -> None:
-    # Build per-(client, dataset, anchor) cells from the snapshot.  Anchor is
-    # part of the key now — Membership/CATALOG and Membership/FHIR are
-    # independent slots that show as SEPARATE rows.  We exclude the
-    # GLOBAL_CORP scope — that's the canonical-template view above.
-    _client_cells: dict[tuple[str, str, str], dict[str, Any]] = {}
+    # Phase 17.6 (Option B) — cells keyed by (client, dataset).  The unique
+    # authoring slot is (client, dataset); anchor is metadata that travels
+    # with the Silver/Gold rows.  We exclude the GLOBAL_CORP scope — that's
+    # the canonical-template view above.
+    _client_cells: dict[tuple[str, str], dict[str, Any]] = {}
 
     for s in _snap.silver_schemas:
         scope = str(s.get("scope_owner") or "")
@@ -635,18 +635,20 @@ def _render_client_medallion_registry() -> None:
             continue
         if str(s.get("status")) == "ARCHIVED":
             continue
-        anchor_v = str(s.get("silver_anchor") or "—")
-        key = (scope, str(s.get("dataset_code")), anchor_v)
+        key = (scope, str(s.get("dataset_code")))
         cell = _client_cells.setdefault(
             key,
             {
                 "client_id": scope,
                 "dataset_code": key[1],
-                "anchor": anchor_v,
+                "anchors": set(),  # set so multiple sources don't double-up
                 "silver": None,
                 "gold": None,
             },
         )
+        # Track every anchor seen (Silver + Gold may agree or disagree).
+        if s.get("silver_anchor"):
+            cell["anchors"].add(str(s["silver_anchor"]))
         # Take the LATEST non-archived silver row for this cell.
         if (cell["silver"] is None) or (
             int(s.get("version") or 0) > int(cell["silver"].get("version") or 0)
@@ -659,18 +661,19 @@ def _render_client_medallion_registry() -> None:
             continue
         if str(g.get("status")) == "ARCHIVED":
             continue
-        anchor_v = str(g.get("gold_anchor") or "—")
-        key = (scope, str(g.get("dataset_code")), anchor_v)
+        key = (scope, str(g.get("dataset_code")))
         cell = _client_cells.setdefault(
             key,
             {
                 "client_id": scope,
                 "dataset_code": key[1],
-                "anchor": anchor_v,
+                "anchors": set(),
                 "silver": None,
                 "gold": None,
             },
         )
+        if g.get("gold_anchor"):
+            cell["anchors"].add(str(g["gold_anchor"]))
         if (cell["gold"] is None) or (
             int(g.get("version") or 0) > int(cell["gold"].get("version") or 0)
         ):
@@ -762,11 +765,14 @@ def _render_client_medallion_registry() -> None:
             str((s or {}).get("created_at") or ""),
             str((g or {}).get("created_at") or ""),
         )[:19]
+        anchor_label = (
+            ", ".join(sorted(cell.get("anchors") or set())) or "—"
+        )
         _rows.append(
             {
                 "Client": cell["client_id"],
                 "Dataset": cell["dataset_code"],
-                "Anchor": cell.get("anchor") or "—",
+                "Anchor": anchor_label,
                 "🥉 Bronze": "✓ Catalog",
                 "🥈 Silver": (
                     f"{_status_pill((s or {}).get('status'))} v{(s or {}).get('version', '—')}"
@@ -784,7 +790,6 @@ def _render_client_medallion_registry() -> None:
                 # hidden — used by selection handler
                 "__client_id": cell["client_id"],
                 "__dataset_code": cell["dataset_code"],
-                "__anchor": cell.get("anchor") or "",
                 "__silver_id": s_id,
                 "__gold_id": g_id,
             }
@@ -1616,26 +1621,21 @@ with col_client:
     )
 
 
-# Anchor-aware authoring check.  A (client, dataset, anchor) tuple is
-# 'fully authored' when both Silver AND Gold non-archived rows exist for it
-# UNDER THAT ANCHOR.  Same dataset can be (re-)authored under a DIFFERENT
-# anchor — e.g. Membership/CATALOG vs Membership/FHIR are independent.
-def _has_full_authoring_under_anchor(
-    scope_owner: str, ds_code: str, anchor_value: str
-) -> bool:
+# Phase 17.6 (Option B — industry-grade) — anchor is a DESCRIPTIVE tag on
+# Silver/Gold (which standard the layer was modeled against), NOT a slot
+# multiplier.  The unique authoring slot is (client, dataset).  Once a
+# (client, dataset) has full Silver+Gold non-archived rows, no further
+# Silver/Gold authoring is allowed for it — additional vendor formats are
+# absorbed at the Bronze layer (BRONZE_<CLIENT>.RAW_<DATASET>_<ANCHOR>),
+# all converging into the SAME Silver hubs/sats and Gold contract.
+def _has_full_authoring(scope_owner: str, ds_code: str) -> bool:
     silver_rows = _snap.silver_for(
         scope_owner=scope_owner, dataset_code=ds_code, exclude_archived=True
-    )
-    silver_match = any(
-        str(r.get("silver_anchor") or "") == anchor_value for r in silver_rows
     )
     gold_rows = _snap.gold_for(
         scope_owner=scope_owner, dataset_code=ds_code, exclude_archived=True
     )
-    gold_match = any(
-        str(r.get("gold_anchor") or "") == anchor_value for r in gold_rows
-    )
-    return silver_match and gold_match
+    return bool(silver_rows) and bool(gold_rows)
 
 
 with col_anchor:
@@ -1692,14 +1692,18 @@ with col_ds:
         )
         selected_dataset = None
     else:
-        # Filter: only datasets that haven't been fully authored under THIS
-        # (client, anchor) tuple.  Same dataset still appears for a DIFFERENT
-        # anchor — they're independent authoring slots.
+        # Filter: only datasets that haven't been fully authored for THIS
+        # (client, dataset) tuple.  Per Option B (industry pattern) the
+        # anchor is the modeling-source standard for the new Silver+Gold,
+        # NOT a slot multiplier — once Silver+Gold exist, the dataset is
+        # locked regardless of which anchor was originally picked.  Adding
+        # a NEW vendor source for an already-authored dataset is a Bronze-
+        # only operation handled outside this picker.
         _ds_eligible = [
             d
             for d in _snap.bronze_datasets
-            if not _has_full_authoring_under_anchor(
-                selected_client_for_authoring, str(d["dataset_code"]), anchor
+            if not _has_full_authoring(
+                selected_client_for_authoring, str(d["dataset_code"])
             )
         ]
         if not _ds_eligible:
@@ -1707,7 +1711,8 @@ with col_ds:
                 "Dataset",
                 options=[
                     f"— {selected_client_for_authoring} has fully authored every "
-                    f"dataset under {anchor}; archive one to author again —"
+                    f"dataset; archive one in the Client Medallion Registry to "
+                    f"author it again —"
                 ],
                 index=0,
                 disabled=True,
@@ -1738,8 +1743,10 @@ with col_ds:
                 key="dmd_pick_dataset",
                 help=(
                     f"Showing only datasets {selected_client_for_authoring} "
-                    f"hasn't fully authored under {anchor} yet "
-                    f"({len(_ds_eligible)} of {len(_snap.bronze_datasets)})."
+                    f"hasn't fully authored yet "
+                    f"({len(_ds_eligible)} of {len(_snap.bronze_datasets)}).  "
+                    f"Anchor (chosen above) is the standard the new Silver+"
+                    f"Gold will be modeled against."
                 ),
             )
             selected_dataset = ds_label_to_obj.get(_selected_ds_label)
