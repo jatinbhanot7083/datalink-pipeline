@@ -1463,11 +1463,22 @@ def _cc_inline_submit_button(*, key: str) -> None:
             st.rerun()
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 17.6 — Cloning Center (DISMANTLED PER USER REQUEST — REDESIGN PENDING)
+# Mode radio retained as the layout anchor for the new design.  All form
+# bodies, target multiselect, buffer/submit flow, and per-target plan
+# summaries removed; will be reintroduced once the new layout is locked.
+# Helpers (_cc_target_client_normalized, _cc_silver_blocks, _cc_gold_blocks,
+# _cc_build_silver_applier, _cc_build_gold_applier, _cc_inline_submit_button)
+# are KEPT — the new design will reuse them as-is.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
 @st.fragment
 def _render_cloning_center() -> None:
-    """The 3-mode clone surface. All actions buffer; nothing writes here."""
-    # Mode selector — radio buttons keep all 3 forms inline.
-    _mode = st.radio(
+    """Cloning Center — dismantled stub.  Keeps the Clone-mode radio (per
+    user spec) as the anchor for the new layout."""
+    st.radio(
         "Clone mode",
         options=[
             "📦 Full Global → Client (all datasets)",
@@ -1478,615 +1489,18 @@ def _render_cloning_center() -> None:
         horizontal=True,
         key="cc_mode",
     )
-
-    # ── Mode A — Full Global → Multiple Clients (all datasets) ──────────
-    if _mode.startswith("📦 Full Global"):
-        st.markdown(
-            "Clone every published Global Silver + Gold to one OR many target "
-            "clients.  Datasets a target already has (in any non-archived "
-            "state) are SKIPPED for that target, never overwritten."
-        )
-        col1, col2, col3 = st.columns([3, 1.3, 1.1])
-        with col1:
-            _full_targets = _checkbox_multiselect(
-                label="Target clients",
-                options=_snap.distinct_clients,
-                key="cc_full",
-            )
-        with col2:
-            st.write("")  # vertical alignment
-            _full_go = st.button(
-                "📦 Plan + buffer clones",
-                type="secondary",
-                use_container_width=True,
-                disabled=not _full_targets,
-                key="cc_full_go",
-            )
-        with col3:
-            st.write("")
-            # Placeholder — filled AFTER the buffer handler runs so the
-            # Submit button reads the post-buffer count, not the stale one.
-            _full_submit_slot = st.empty()
-
-        if _full_go:
-            normalized: list[str] = []
-            invalid: list[str] = []
-            for t in _full_targets:
-                norm = _cc_target_client_normalized(t)
-                if norm is None:
-                    invalid.append(t)
-                else:
-                    normalized.append(norm)
-            if invalid:
-                st.error(
-                    f"Invalid target client_id(s): "
-                    f"{', '.join(repr(v) for v in invalid)}.  Lowercase "
-                    f"alphanumeric / underscore / hyphen only.  "
-                    f"GLOBAL_CORP and __global__ are forbidden."
-                )
-            elif not normalized:
-                st.error("Pick at least one valid target.")
-            else:
-                # Per-target planning.  Each target gets its own block of
-                # buffered clones (only for datasets it doesn't already have).
-                planned_by_target: dict[str, list[str]] = {}
-                skipped_by_target: dict[str, list[str]] = {}
-                for target in normalized:
-                    planned_by_target.setdefault(target, [])
-                    skipped_by_target.setdefault(target, [])
-                    for src in _g_silver:
-                        src_status = str(src.get("status"))
-                        if src_status not in ("APPROVED", "LIVE"):
-                            continue
-                        ds = str(src.get("dataset_code"))
-                        if _cc_silver_blocks(target, ds):
-                            skipped_by_target[target].append(
-                                f"Silver {ds} (already exists)"
-                            )
-                            continue
-                        src_id = str(src.get("silver_dataset_id"))
-                        _dmd_top.stash_edit(
-                            kind="clone_silver",
-                            # Composite entity_id so the same source can be
-                            # cloned to many targets in one buffer.
-                            entity_id=f"{src_id}::{target}",
-                            payload={
-                                "apply": _cc_build_silver_applier(src_id, target),
-                                "target_client": target,
-                                "dataset_code": ds,
-                                "source_silver_id": src_id,
-                            },
-                            base_version=int(src.get("version") or 0),
-                            base_status=src_status,
-                        )
-                        planned_by_target[target].append(
-                            f"Silver {ds} v{src.get('version')}"
-                        )
-                    for src in _g_gold:
-                        src_status = str(src.get("status"))
-                        if src_status not in ("APPROVED", "LIVE"):
-                            continue
-                        ds = str(src.get("dataset_code"))
-                        if _cc_gold_blocks(target, ds):
-                            skipped_by_target[target].append(
-                                f"Gold {ds} (already exists)"
-                            )
-                            continue
-                        src_id = str(src.get("gold_dataset_id"))
-                        _dmd_top.stash_edit(
-                            kind="clone_gold",
-                            entity_id=f"{src_id}::{target}",
-                            payload={
-                                "apply": _cc_build_gold_applier(src_id, target),
-                                "target_client": target,
-                                "dataset_code": ds,
-                                "source_gold_id": src_id,
-                            },
-                            base_version=int(src.get("version") or 0),
-                            base_status=src_status,
-                        )
-                        planned_by_target[target].append(
-                            f"Gold {ds} v{src.get('version')}"
-                        )
-                total_planned = sum(len(v) for v in planned_by_target.values())
-                total_skipped = sum(len(v) for v in skipped_by_target.values())
-                if total_planned > 0:
-                    n_targets_with_plan = sum(
-                        1 for v in planned_by_target.values() if v
-                    )
-                    st.success(
-                        f"✏️ Buffered **{total_planned} clone"
-                        f"{'s' if total_planned != 1 else ''}** across "
-                        f"**{n_targets_with_plan} target"
-                        f"{'s' if n_targets_with_plan != 1 else ''}**.  "
-                        f"Click 🚀 Submit at the top to apply."
-                    )
-                # Per-target breakdown
-                for target in normalized:
-                    plan_n = len(planned_by_target.get(target, []))
-                    skip_n = len(skipped_by_target.get(target, []))
-                    if plan_n == 0 and skip_n == 0:
-                        continue
-                    with st.expander(
-                        f"`{target}` — planned {plan_n}, skipped {skip_n}",
-                        expanded=False,
-                    ):
-                        if planned_by_target[target]:
-                            st.caption("**Buffered for clone:**")
-                            for p in planned_by_target[target]:
-                                st.markdown(f"  - {p}")
-                        if skipped_by_target[target]:
-                            st.caption("**Skipped:**")
-                            for s in skipped_by_target[target]:
-                                st.markdown(f"  - {s}")
-                if total_planned == 0 and total_skipped == 0:
-                    st.info(
-                        "Nothing to clone.  No APPROVED / LIVE Global "
-                        "schemas exist yet — author + promote a Global "
-                        "Silver/Gold first."
-                    )
-        # Fill the Submit placeholder LAST so it sees the post-buffer count.
-        with _full_submit_slot.container():
-            _cc_inline_submit_button(key="cc_full_submit")
-
-    # ── Mode B — Per-dataset Global → Client ─────────────────────────────
-    elif _mode.startswith("📦 Per-dataset · Global"):
-        st.markdown(
-            "Clone ONE dataset's Global Silver + Gold to a single client.  "
-            "Source must be APPROVED or LIVE.  Either layer alone is "
-            "buffered if the other doesn't qualify."
-        )
-        col1, col2, col3, col4 = st.columns([2, 3, 1.1, 1.1])
-        with col1:
-            ds_set = sorted(
-                {
-                    str(s.get("dataset_code"))
-                    for s in _g_silver + _g_gold
-                    if str(s.get("status")) in ("APPROVED", "LIVE")
-                }
-            )
-            _gd_dataset = st.selectbox(
-                "Dataset (Global APPROVED/LIVE)",
-                options=ds_set,
-                index=0 if ds_set else None,
-                placeholder="No eligible datasets" if not ds_set else "Pick…",
-                key="cc_gd_dataset",
-            )
-        with col2:
-            _gd_targets = _checkbox_multiselect(
-                label="Target clients",
-                options=_snap.distinct_clients,
-                key="cc_gd",
-            )
-        with col3:
-            st.write("")
-            _gd_go = st.button(
-                "📦 Buffer",
-                type="secondary",
-                use_container_width=True,
-                disabled=not (_gd_dataset and _gd_targets),
-                key="cc_gd_go",
-            )
-        with col4:
-            st.write("")
-            _gd_submit_slot = st.empty()  # filled after handler — see below
-
-        if _gd_go:
-            normalized: list[str] = []
-            invalid: list[str] = []
-            for t in _gd_targets:
-                norm = _cc_target_client_normalized(t)
-                if norm is None:
-                    invalid.append(t)
-                else:
-                    normalized.append(norm)
-            if invalid:
-                st.error(
-                    f"Invalid target client_id(s): "
-                    f"{', '.join(repr(v) for v in invalid)}. Lowercase "
-                    f"alphanumeric / underscore / hyphen only."
-                )
-            elif not normalized:
-                st.error("Pick at least one valid target.")
-            else:
-                ds = str(_gd_dataset)
-
-                # Find best Silver + Gold sources for this dataset
-                _src_silver_rows = [
-                    s
-                    for s in _g_silver
-                    if str(s.get("dataset_code")) == ds
-                    and str(s.get("status")) in ("APPROVED", "LIVE")
-                ]
-                _src_silver = max(
-                    _src_silver_rows, key=lambda r: int(r.get("version") or 0)
-                ) if _src_silver_rows else None
-                _src_gold_rows = [
-                    g
-                    for g in _g_gold
-                    if str(g.get("dataset_code")) == ds
-                    and str(g.get("status")) in ("APPROVED", "LIVE")
-                ]
-                _src_gold = max(
-                    _src_gold_rows, key=lambda r: int(r.get("version") or 0)
-                ) if _src_gold_rows else None
-
-                if not _src_silver and not _src_gold:
-                    st.info(
-                        f"No APPROVED/LIVE Global Silver or Gold for "
-                        f"`{ds}` — promote one first."
-                    )
-                else:
-                    buffered_by_target: dict[str, list[str]] = {}
-                    blocked_by_target: dict[str, list[str]] = {}
-                    for target in normalized:
-                        buffered_by_target.setdefault(target, [])
-                        blocked_by_target.setdefault(target, [])
-
-                        if _src_silver:
-                            blk = _cc_silver_blocks(target, ds)
-                            if blk:
-                                blocked_by_target[target].append(
-                                    f"Silver — {blk}"
-                                )
-                            else:
-                                sid = str(_src_silver.get("silver_dataset_id"))
-                                _dmd_top.stash_edit(
-                                    kind="clone_silver",
-                                    entity_id=f"{sid}::{target}",
-                                    payload={
-                                        "apply": _cc_build_silver_applier(sid, target),
-                                        "target_client": target,
-                                        "dataset_code": ds,
-                                        "source_silver_id": sid,
-                                    },
-                                    base_version=int(_src_silver.get("version") or 0),
-                                    base_status=str(_src_silver.get("status")),
-                                )
-                                buffered_by_target[target].append(
-                                    f"Silver v{_src_silver.get('version')}"
-                                )
-
-                        if _src_gold:
-                            blk = _cc_gold_blocks(target, ds)
-                            if blk:
-                                blocked_by_target[target].append(
-                                    f"Gold — {blk}"
-                                )
-                            else:
-                                gid = str(_src_gold.get("gold_dataset_id"))
-                                _dmd_top.stash_edit(
-                                    kind="clone_gold",
-                                    entity_id=f"{gid}::{target}",
-                                    payload={
-                                        "apply": _cc_build_gold_applier(gid, target),
-                                        "target_client": target,
-                                        "dataset_code": ds,
-                                        "source_gold_id": gid,
-                                    },
-                                    base_version=int(_src_gold.get("version") or 0),
-                                    base_status=str(_src_gold.get("status")),
-                                )
-                                buffered_by_target[target].append(
-                                    f"Gold v{_src_gold.get('version')}"
-                                )
-
-                    total_planned = sum(
-                        len(v) for v in buffered_by_target.values()
-                    )
-                    if total_planned > 0:
-                        n_targets = sum(
-                            1 for v in buffered_by_target.values() if v
-                        )
-                        st.success(
-                            f"✏️ Buffered **{total_planned} clone"
-                            f"{'s' if total_planned != 1 else ''}** "
-                            f"across **{n_targets} target"
-                            f"{'s' if n_targets != 1 else ''}** for `{ds}`. "
-                            f"Submit at the top to apply."
-                        )
-                    for target in normalized:
-                        plan_n = len(buffered_by_target.get(target, []))
-                        block_n = len(blocked_by_target.get(target, []))
-                        if plan_n == 0 and block_n == 0:
-                            continue
-                        with st.expander(
-                            f"`{target}` — buffered {plan_n}, blocked {block_n}",
-                            expanded=False,
-                        ):
-                            if buffered_by_target[target]:
-                                st.caption("**Buffered:**")
-                                for b in buffered_by_target[target]:
-                                    st.markdown(f"  - {b}")
-                            if blocked_by_target[target]:
-                                st.caption("**Blocked:**")
-                                for b in blocked_by_target[target]:
-                                    st.markdown(f"  - {b}")
-        # Fill the Submit placeholder LAST.
-        with _gd_submit_slot.container():
-            _cc_inline_submit_button(key="cc_gd_submit")
-
-    # ── Mode C — Per-dataset Client → Client ─────────────────────────────
-    else:
-        st.markdown(
-            "Fork from one client's Silver/Gold to another client.  Both "
-            "ends are real clients (never GLOBAL_CORP — that's sacred)."
-        )
-        if not _snap.distinct_clients:
-            st.info(
-                "📭 No real clients have authored anything yet. Use Mode A "
-                "or B to seed a client from Global first."
-            )
-        else:
-            col1, col2, col3 = st.columns([1.2, 1.5, 1.2])
-            with col1:
-                _cc_src_client = st.selectbox(
-                    "Source client",
-                    options=_snap.distinct_clients,
-                    index=0,
-                    key="cc_cc_src_client",
-                )
-            with col2:
-                # Datasets where the source client has at least one
-                # APPROVED/LIVE Silver OR Gold
-                _src_silver_for = [
-                    s
-                    for s in _snap.silver_schemas
-                    if str(s.get("scope_owner")) == _cc_src_client
-                    and str(s.get("status")) in ("APPROVED", "LIVE")
-                ]
-                _src_gold_for = [
-                    g
-                    for g in _snap.gold_schemas
-                    if str(g.get("scope_owner")) == _cc_src_client
-                    and str(g.get("status")) in ("APPROVED", "LIVE")
-                ]
-                _ds_options = sorted(
-                    {
-                        str(r.get("dataset_code"))
-                        for r in _src_silver_for + _src_gold_for
-                    }
-                )
-                _cc_dataset = st.selectbox(
-                    "Dataset (APPROVED/LIVE in source)",
-                    options=_ds_options,
-                    index=0 if _ds_options else None,
-                    placeholder="No eligible datasets"
-                    if not _ds_options
-                    else "Pick…",
-                    key="cc_cc_dataset",
-                )
-            with col3:
-                _cc_tgt_options = [
-                    c for c in _snap.distinct_clients if c != _cc_src_client
-                ]
-                _cc_tgt_clients = _checkbox_multiselect(
-                    label="Target clients",
-                    options=_cc_tgt_options,
-                    key="cc_cc",
-                    exclude=[_cc_src_client] if _cc_src_client else None,
-                )
-            cc_act_a, cc_act_b = st.columns([2, 1])
-            with cc_act_a:
-                _cc_go = st.button(
-                    "📦 Buffer client → client clone(s)",
-                    type="secondary",
-                    use_container_width=True,
-                    disabled=not (
-                        _cc_src_client and _cc_dataset and _cc_tgt_clients
-                    ),
-                    key="cc_cc_go",
-                )
-            with cc_act_b:
-                _cc_submit_slot = st.empty()  # filled after handler — see below
-
-            if _cc_go:
-                normalized: list[str] = []
-                invalid: list[str] = []
-                for t in _cc_tgt_clients:
-                    norm = _cc_target_client_normalized(t)
-                    if norm is None:
-                        invalid.append(t)
-                    elif norm == _cc_src_client:
-                        invalid.append(f"{t} (= source)")
-                    else:
-                        normalized.append(norm)
-                if invalid:
-                    st.error(
-                        f"Invalid target client_id(s): "
-                        f"{', '.join(repr(v) for v in invalid)}.  Lowercase "
-                        f"alphanumeric / underscore / hyphen only; never "
-                        f"GLOBAL_CORP / __global__; never the source itself."
-                    )
-                elif not normalized:
-                    st.error("Pick at least one valid target.")
-                else:
-                    ds = str(_cc_dataset)
-
-                    _src_s = [
-                        s
-                        for s in _src_silver_for
-                        if str(s.get("dataset_code")) == ds
-                    ]
-                    _src_s_pick = max(
-                        _src_s, key=lambda r: int(r.get("version") or 0)
-                    ) if _src_s else None
-                    _src_g = [
-                        g
-                        for g in _src_gold_for
-                        if str(g.get("dataset_code")) == ds
-                    ]
-                    _src_g_pick = max(
-                        _src_g, key=lambda r: int(r.get("version") or 0)
-                    ) if _src_g else None
-
-                    if not _src_s_pick and not _src_g_pick:
-                        st.info(
-                            f"No eligible source rows for `{ds}` under "
-                            f"`{_cc_src_client}`."
-                        )
-                    else:
-                        buffered_by_target: dict[str, list[str]] = {}
-                        blocked_by_target: dict[str, list[str]] = {}
-                        for target in normalized:
-                            buffered_by_target.setdefault(target, [])
-                            blocked_by_target.setdefault(target, [])
-
-                            if _src_s_pick:
-                                blk = _cc_silver_blocks(target, ds)
-                                if blk:
-                                    blocked_by_target[target].append(
-                                        f"Silver — {blk}"
-                                    )
-                                else:
-                                    sid = str(
-                                        _src_s_pick.get("silver_dataset_id")
-                                    )
-                                    _dmd_top.stash_edit(
-                                        kind="clone_silver",
-                                        entity_id=f"{sid}::{target}",
-                                        payload={
-                                            "apply": _cc_build_silver_applier(
-                                                sid, target
-                                            ),
-                                            "target_client": target,
-                                            "dataset_code": ds,
-                                            "source_silver_id": sid,
-                                        },
-                                        base_version=int(
-                                            _src_s_pick.get("version") or 0
-                                        ),
-                                        base_status=str(
-                                            _src_s_pick.get("status")
-                                        ),
-                                    )
-                                    buffered_by_target[target].append(
-                                        f"Silver v{_src_s_pick.get('version')}"
-                                    )
-
-                            if _src_g_pick:
-                                blk = _cc_gold_blocks(target, ds)
-                                if blk:
-                                    blocked_by_target[target].append(
-                                        f"Gold — {blk}"
-                                    )
-                                else:
-                                    gid = str(
-                                        _src_g_pick.get("gold_dataset_id")
-                                    )
-                                    _dmd_top.stash_edit(
-                                        kind="clone_gold",
-                                        entity_id=f"{gid}::{target}",
-                                        payload={
-                                            "apply": _cc_build_gold_applier(
-                                                gid, target
-                                            ),
-                                            "target_client": target,
-                                            "dataset_code": ds,
-                                            "source_gold_id": gid,
-                                        },
-                                        base_version=int(
-                                            _src_g_pick.get("version") or 0
-                                        ),
-                                        base_status=str(
-                                            _src_g_pick.get("status")
-                                        ),
-                                    )
-                                    buffered_by_target[target].append(
-                                        f"Gold v{_src_g_pick.get('version')}"
-                                    )
-
-                        total_planned = sum(
-                            len(v) for v in buffered_by_target.values()
-                        )
-                        if total_planned > 0:
-                            n_targets = sum(
-                                1 for v in buffered_by_target.values() if v
-                            )
-                            st.success(
-                                f"✏️ Buffered **{total_planned} clone"
-                                f"{'s' if total_planned != 1 else ''}** "
-                                f"`{_cc_src_client}` → "
-                                f"**{n_targets} target"
-                                f"{'s' if n_targets != 1 else ''}** for "
-                                f"`{ds}`. Submit at the top to apply."
-                            )
-                        for target in normalized:
-                            plan_n = len(buffered_by_target.get(target, []))
-                            block_n = len(blocked_by_target.get(target, []))
-                            if plan_n == 0 and block_n == 0:
-                                continue
-                            with st.expander(
-                                f"`{target}` — buffered {plan_n}, "
-                                f"blocked {block_n}",
-                                expanded=False,
-                            ):
-                                if buffered_by_target[target]:
-                                    st.caption("**Buffered:**")
-                                    for b in buffered_by_target[target]:
-                                        st.markdown(f"  - {b}")
-                                if blocked_by_target[target]:
-                                    st.caption("**Blocked:**")
-                                    for b in blocked_by_target[target]:
-                                        st.markdown(f"  - {b}")
-        # Fill the Mode C Submit placeholder LAST.
-        with _cc_submit_slot.container():
-            _cc_inline_submit_button(key="cc_cc_submit")
-
-    # ── Inline Submit dock ─────────────────────────────────────────────
-    # Right at the bottom of every clone-mode action area.  When buffered
-    # edits exist, the green button is one click away from where the
-    # operator just pressed Plan + Buffer (no scrolling to the top).
-    _pending_now = _dmd_top.dirty_count()
-    st.markdown(
-        f"<div style='margin-top:1rem;padding:.6rem .9rem;background:#f8fafc;"
-        f"border:1px solid #cbd5e1;border-radius:8px;'>"
-        f"<strong>{('✏️ ' + str(_pending_now) + ' unsaved edit' + ('s' if _pending_now != 1 else '')) if _pending_now else '💤 No pending edits'}</strong> "
-        f"&middot; submit applies all buffered clones with optimistic-concurrency check.</div>",
-        unsafe_allow_html=True,
+    st.info(
+        "🚧 **Cloning Center redesign in progress.**  The mode radio above "
+        "stays as the layout anchor; the form body, target-client picker, "
+        "buffer / submit flow, and per-target plan summary are intentionally "
+        "blank pending the new design we'll lock together in the next step."
     )
-    s_col1, s_col2, _ = st.columns([1.3, 1, 3])
-    with s_col1:
-        if st.button(
-            f"🚀 Submit {_pending_now} change{'s' if _pending_now != 1 else ''}",
-            type="primary",
-            use_container_width=True,
-            disabled=_pending_now == 0,
-            key="cc_inline_submit",
-            help="Apply every buffered clone in one batch.",
-        ):
-            report = _dmd_top.submit_all()
-            if report.all_clean:
-                st.toast(
-                    f"✅ {report.applied_count} clone"
-                    f"{'s' if report.applied_count != 1 else ''} applied.",
-                    icon="🚀",
-                )
-                st.rerun()
-            else:
-                st.session_state["__dmd_last_report__"] = report
-                st.rerun()
-    with s_col2:
-        if st.button(
-            "🗑️ Discard",
-            use_container_width=True,
-            disabled=_pending_now == 0,
-            key="cc_inline_discard",
-            help="Drop every buffered edit without writing.",
-        ):
-            _dmd_top.discard_edits()
-            st.rerun(scope="fragment")
 
 
-st.markdown("## 📦 Cloning Center")
-st.caption(
-    "Industry-standard clone-from-template flow. All clones buffer locally "
-    "and apply via 🚀 Submit (top of page OR inline at the bottom of this "
-    "section) — concurrency-checked per source row. Client → Global is "
-    "forbidden (Global is sacred)."
-)
-with st.expander("Show / hide cloning modes", expanded=True):
-    _render_cloning_center()
+# Cloning Center invocation moved to the END of the file per user request:
+# 'Pick a dataset above Cloning, Cloning should always be at the end.'
+# See bottom of this module for the actual section markdown + expander
+# call to _render_cloning_center().
 
 
 st.markdown("---")
@@ -2286,1333 +1700,1354 @@ if not _authoring_unlocked:
         f"above to unlock the layer radio + the Bronze / Silver / Gold "
         f"design panels."
     )
-    st.stop()
+
+# Phase 17.6 — gate the layer-authoring block (was st.stop() above).
+# Cloning Center is invoked AFTER this conditional so it always shows,
+# even when no Client/Dataset/Anchor is picked yet.
+if _authoring_unlocked:
 
 
-# ---------------------------------------------------------------------------
-# Layer navigation — radio-as-tabs
-# ---------------------------------------------------------------------------
+    # ---------------------------------------------------------------------------
+    # Layer navigation — radio-as-tabs
+    # ---------------------------------------------------------------------------
 
-st.markdown("---")
+    st.markdown("---")
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Phase 16.7 — GLOBAL TEMPLATE PANEL
-#
-# Shows the canonical global Silver/Gold/Pipeline at the top + per-client
-# overrides below. Authoring priority:
-#   1. Clone from Global (no LLM tokens) — handled in Pipeline Architect
-#   2. Manual / Import — paste a spec
-#   3. Contract First — drop a file
-#   4. AI Construct — last resort, costs tokens
-# ═════════════════════════════════════════════════════════════════════════════
+    # ═════════════════════════════════════════════════════════════════════════════
+    # Phase 16.7 — GLOBAL TEMPLATE PANEL
+    #
+    # Shows the canonical global Silver/Gold/Pipeline at the top + per-client
+    # overrides below. Authoring priority:
+    #   1. Clone from Global (no LLM tokens) — handled in Pipeline Architect
+    #   2. Manual / Import — paste a spec
+    #   3. Contract First — drop a file
+    #   4. AI Construct — last resort, costs tokens
+    # ═════════════════════════════════════════════════════════════════════════════
 
-from datalink.templates import store as template_store  # noqa: E402
+    from datalink.templates import store as template_store
 
-_global_status = template_store.has_global(selected_dataset_code)
-_global_silver_live = _global_status.get("silver", False)
-_global_gold_live = _global_status.get("gold", False)
+    _global_status = template_store.has_global(selected_dataset_code)
+    _global_silver_live = _global_status.get("silver", False)
+    _global_gold_live = _global_status.get("gold", False)
 
-with st.container():
-    g_col1, g_col2 = st.columns([5, 2])
-    with g_col1:
-        if _global_silver_live or _global_gold_live:
-            pills = []
-            if _global_silver_live:
-                pills.append('<span class="dmd-pill dmd-pill-live">Silver-LIVE (global)</span>')
-            else:
-                pills.append('<span class="dmd-pill dmd-pill-dev">Silver-MISSING (global)</span>')
-            if _global_gold_live:
-                pills.append('<span class="dmd-pill dmd-pill-live">Gold-LIVE (global)</span>')
-            else:
-                pills.append('<span class="dmd-pill dmd-pill-dev">Gold-MISSING (global)</span>')
-            st.markdown(
-                f"""<div style="background:#dcfce7;border:1px solid #15803d;
-                              border-left:5px solid #15803d;border-radius:8px;
-                              padding:.7rem 1rem;margin:.4rem 0;">
-                <div style="font-weight:700;color:#0a1a3e;">
-                  📦 Global template available for <code>{selected_dataset_code}</code>
-                </div>
-                <div style="margin-top:.3rem;">{" ".join(pills)}</div>
-                <div style="font-size:.85rem;color:#475569;margin-top:.3rem;">
-                  Future clients will <strong>clone from this global</strong> rather than
-                  re-author with AI — saves tokens, ensures consistency.
-                </div>
-                </div>""",
-                unsafe_allow_html=True,
-            )
-        else:
-            st.info(
-                f"⚠️ **No global template yet for `{selected_dataset_code}`.** "
-                f"Once you author Silver and Gold here and approve them LIVE, "
-                f"use the **🌐 Publish to Global** button to make them the "
-                f"canonical template. New clients will clone from it."
-            )
-    with g_col2:
-        # Publish-to-Global action — relevant only when LIVE schemas exist for
-        # this dataset that aren't already global.
-        with _warehouse(readonly=True) as wh:
-            non_global_silver = list(
-                wh.query(
-                    "SELECT silver_dataset_id FROM CONTROL.global_silver_schema_datasets "
-                    "WHERE dataset_code = $ds AND status = 'LIVE' "
-                    "  AND scope_owner NOT IN ('GLOBAL_CORP', '__global__') LIMIT 1",
-                    {"ds": selected_dataset_code},
+    with st.container():
+        g_col1, g_col2 = st.columns([5, 2])
+        with g_col1:
+            if _global_silver_live or _global_gold_live:
+                pills = []
+                if _global_silver_live:
+                    pills.append('<span class="dmd-pill dmd-pill-live">Silver-LIVE (global)</span>')
+                else:
+                    pills.append('<span class="dmd-pill dmd-pill-dev">Silver-MISSING (global)</span>')
+                if _global_gold_live:
+                    pills.append('<span class="dmd-pill dmd-pill-live">Gold-LIVE (global)</span>')
+                else:
+                    pills.append('<span class="dmd-pill dmd-pill-dev">Gold-MISSING (global)</span>')
+                st.markdown(
+                    f"""<div style="background:#dcfce7;border:1px solid #15803d;
+                                  border-left:5px solid #15803d;border-radius:8px;
+                                  padding:.7rem 1rem;margin:.4rem 0;">
+                    <div style="font-weight:700;color:#0a1a3e;">
+                      📦 Global template available for <code>{selected_dataset_code}</code>
+                    </div>
+                    <div style="margin-top:.3rem;">{" ".join(pills)}</div>
+                    <div style="font-size:.85rem;color:#475569;margin-top:.3rem;">
+                      Future clients will <strong>clone from this global</strong> rather than
+                      re-author with AI — saves tokens, ensures consistency.
+                    </div>
+                    </div>""",
+                    unsafe_allow_html=True,
                 )
-            )
-            non_global_gold = list(
-                wh.query(
-                    "SELECT gold_dataset_id FROM CONTROL.global_gold_schema_datasets "
-                    "WHERE dataset_code = $ds AND status = 'LIVE' "
-                    "  AND scope_owner NOT IN ('GLOBAL_CORP', '__global__') LIMIT 1",
-                    {"ds": selected_dataset_code},
+            else:
+                st.info(
+                    f"⚠️ **No global template yet for `{selected_dataset_code}`.** "
+                    f"Once you author Silver and Gold here and approve them LIVE, "
+                    f"use the **🌐 Publish to Global** button to make them the "
+                    f"canonical template. New clients will clone from it."
                 )
-            )
-        # Phase 16.10 — clearer Publish-to-Global state machine:
-        #   1. Already published (Silver+Gold both global)            → green "✓ Already global"
-        #   2. Has client-scoped LIVE that can be promoted            → blue "Click to promote"
-        #   3. No LIVE schemas authored yet (or only global ones)     → grey "Author Silver/Gold first"
-        _has_client_to_promote = bool(non_global_silver or non_global_gold)
-        _both_already_global = _global_status.get("silver") and _global_status.get("gold")
+        with g_col2:
+            # Publish-to-Global action — relevant only when LIVE schemas exist for
+            # this dataset that aren't already global.
+            with _warehouse(readonly=True) as wh:
+                non_global_silver = list(
+                    wh.query(
+                        "SELECT silver_dataset_id FROM CONTROL.global_silver_schema_datasets "
+                        "WHERE dataset_code = $ds AND status = 'LIVE' "
+                        "  AND scope_owner NOT IN ('GLOBAL_CORP', '__global__') LIMIT 1",
+                        {"ds": selected_dataset_code},
+                    )
+                )
+                non_global_gold = list(
+                    wh.query(
+                        "SELECT gold_dataset_id FROM CONTROL.global_gold_schema_datasets "
+                        "WHERE dataset_code = $ds AND status = 'LIVE' "
+                        "  AND scope_owner NOT IN ('GLOBAL_CORP', '__global__') LIMIT 1",
+                        {"ds": selected_dataset_code},
+                    )
+                )
+            # Phase 16.10 — clearer Publish-to-Global state machine:
+            #   1. Already published (Silver+Gold both global)            → green "✓ Already global"
+            #   2. Has client-scoped LIVE that can be promoted            → blue "Click to promote"
+            #   3. No LIVE schemas authored yet (or only global ones)     → grey "Author Silver/Gold first"
+            _has_client_to_promote = bool(non_global_silver or non_global_gold)
+            _both_already_global = _global_status.get("silver") and _global_status.get("gold")
 
-        if _both_already_global and not _has_client_to_promote:
-            st.markdown(
-                f"""
-                <div style="padding:.6rem .8rem;background:#dcfce7;border:1px solid #15803d;
-                            border-radius:6px;font-size:.92rem;line-height:1.4;">
-                  <div style="font-weight:700;color:#15803d;">✓ Already global</div>
-                  <div style="color:#475569;font-size:.82rem;margin-top:.2rem;">
-                    Silver + Gold for <code>{selected_dataset_code}</code> are
-                    already published as the canonical global template. New
-                    clients clone from this — no further action needed.
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-        elif _has_client_to_promote:
-            promote_targets = []
-            if non_global_silver:
-                promote_targets.append("Silver")
-            if non_global_gold:
-                promote_targets.append("Gold")
-            st.markdown(
-                f"""
-                <div style="padding:.6rem .8rem;background:#dbeafe;border:1px solid #1d4ed8;
-                            border-radius:6px;font-size:.92rem;line-height:1.4;margin-bottom:.5rem;">
-                  <div style="font-weight:700;color:#1d4ed8;">📤 Ready to promote</div>
-                  <div style="color:#475569;font-size:.82rem;margin-top:.2rem;">
-                    Will publish <strong>{' + '.join(promote_targets)}</strong> as
-                    the global canonical template for <code>{selected_dataset_code}</code>.
-                    Future clients will clone from this — saves ~$0.008 LLM cost
-                    per onboarded client.
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-            if st.button(
-                "🌐 Click to promote → Global",
-                use_container_width=True,
-                type="primary",
-                help="Copy the LIVE client-scoped design over to scope_owner='GLOBAL_CORP'. "
-                "Idempotent — safe to re-click.",
-            ):
-                promoted = []
+            if _both_already_global and not _has_client_to_promote:
+                st.markdown(
+                    f"""
+                    <div style="padding:.6rem .8rem;background:#dcfce7;border:1px solid #15803d;
+                                border-radius:6px;font-size:.92rem;line-height:1.4;">
+                      <div style="font-weight:700;color:#15803d;">✓ Already global</div>
+                      <div style="color:#475569;font-size:.82rem;margin-top:.2rem;">
+                        Silver + Gold for <code>{selected_dataset_code}</code> are
+                        already published as the canonical global template. New
+                        clients clone from this — no further action needed.
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            elif _has_client_to_promote:
+                promote_targets = []
                 if non_global_silver:
-                    template_store.publish_silver_to_global(
-                        str(non_global_silver[0]["silver_dataset_id"]),
-                        by="ui:designer",
-                    )
-                    promoted.append("Silver")
+                    promote_targets.append("Silver")
                 if non_global_gold:
-                    template_store.publish_gold_to_global(
-                        str(non_global_gold[0]["gold_dataset_id"]),
-                        by="ui:designer",
-                    )
-                    promoted.append("Gold")
-                st.success(f"📦 Published to Global: {', '.join(promoted)}")
-                st.rerun()
-        else:
-            st.markdown(
-                f"""
-                <div style="padding:.6rem .8rem;background:#f1f5f9;border:1px solid #94a3b8;
-                            border-radius:6px;font-size:.92rem;line-height:1.4;">
-                  <div style="font-weight:700;color:#475569;">⏳ Nothing to promote yet</div>
-                  <div style="color:#64748b;font-size:.82rem;margin-top:.2rem;">
-                    Author and approve a client-scoped <strong>Silver</strong> +
-                    <strong>Gold</strong> for <code>{selected_dataset_code}</code> first
-                    (use the AI Construct or Manual tabs below). Once both are LIVE
-                    under a real client, the promote button appears here.
-                  </div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
-
-st.markdown(f"## Designing **{selected_dataset_display}**")
-
-layer = st.radio(
-    "Layer",
-    options=["🥉 Bronze (read-only)", "🥈 Silver (designable)", "🥇 Gold (designable)"],
-    horizontal=True,
-    label_visibility="collapsed",
-)
-
-# Find existing LIVE schemas for this dataset
-live_silver = next(
-    (
-        s
-        for s in all_silver
-        if s["dataset_code"] == selected_dataset_code and s.get("status") == "LIVE"
-    ),
-    None,
-)
-live_gold = next(
-    (
-        g
-        for g in all_gold
-        if g["dataset_code"] == selected_dataset_code and g.get("status") == "LIVE"
-    ),
-    None,
-)
-
-
-# ===========================================================================
-# 🥉 BRONZE TAB — read-only
-# ===========================================================================
-
-if layer.startswith("🥉"):
-    st.markdown("### 🥉 Bronze (read-only — from vendor mapping spec)")
-    st.info(
-        "Bronze fields are loaded from the product catalog (`global_bronze_catalog_*`). "
-        "They reflect what the client agreed to send. To author a one-off Bronze "
-        "contract for a vendor file outside the catalog, use the "
-        "[Data Contract Architect](/Data_Contract_Architect)."
-    )
-    fields = _bronze_fields_for(selected_dataset_code)
-    if not fields:
-        st.warning("No Bronze fields found.")
-    else:
-        rows = []
-        for f in fields:
-            bk = "🔑" if f.get("is_business_key") else ""
-            pii = "🔒" if f.get("is_pii") else ""
-            phi = "🩺" if f.get("is_phi") else ""
-            rows.append(
-                {
-                    "#": f["field_order"],
-                    "Bronze column": f["bronze_column_name"],
-                    "Type": f["logical_type"],
-                    "Req?": f["requirement"],
-                    "BK": bk,
-                    "PII": pii,
-                    "PHI": phi,
-                    "Description": (f.get("description") or "")[:80],
-                }
-            )
-        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-
-# ===========================================================================
-# 🥈 SILVER TAB — designable, 3 modes, version history
-# ===========================================================================
-
-elif layer.startswith("🥈"):
-    st.markdown("### 🥈 Silver (Hub/Sat/Link by default; NORMALIZED for trivial datasets)")
-
-    # Show LIVE state
-    if live_silver:
-        st.success(
-            f"✅ **LIVE Silver** v{live_silver['version']} · "
-            f"pattern=`{live_silver['silver_pattern']}` · "
-            f"anchor=`{live_silver['silver_anchor']}` · "
-            f"source=`{live_silver['source']}` · "
-            f"approved by `{live_silver['approved_by']}`"
-        )
-        with _warehouse(readonly=True) as wh:
-            schema = _cached_silver_schema(live_silver["silver_dataset_id"])
-        # Render tables list
-        with st.expander("📋 Silver tables in this LIVE schema", expanded=True):
-            tables_rows = []
-            for t in schema["tables"]:
-                bks = json.loads(t.get("business_keys_json") or "[]") or []
-                tables_rows.append(
-                    {
-                        "Order": t["table_order"],
-                        "Table": t["table_name"],
-                        "Kind": t["table_kind"],
-                        "Business keys": ", ".join(bks) if bks else "—",
-                        "Description": (t.get("description") or "")[:80],
-                    }
+                    promote_targets.append("Gold")
+                st.markdown(
+                    f"""
+                    <div style="padding:.6rem .8rem;background:#dbeafe;border:1px solid #1d4ed8;
+                                border-radius:6px;font-size:.92rem;line-height:1.4;margin-bottom:.5rem;">
+                      <div style="font-weight:700;color:#1d4ed8;">📤 Ready to promote</div>
+                      <div style="color:#475569;font-size:.82rem;margin-top:.2rem;">
+                        Will publish <strong>{' + '.join(promote_targets)}</strong> as
+                        the global canonical template for <code>{selected_dataset_code}</code>.
+                        Future clients will clone from this — saves ~$0.008 LLM cost
+                        per onboarded client.
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
                 )
-            st.dataframe(pd.DataFrame(tables_rows), use_container_width=True, hide_index=True)
-        with st.expander(f"🧬 Silver columns ({len(schema['columns'])})", expanded=True):
-            col_rows = []
-            for c in schema["columns"]:
-                tag = ""
-                if c.get("is_hash_key"):
-                    tag = "🔑h"
-                elif c.get("is_business_key"):
-                    tag = "🔑"
-                elif c.get("is_hash_diff"):
-                    tag = "📐d"
-                col_rows.append(
-                    {
-                        "#": c["column_order"],
-                        "Column": c["column_name"],
-                        "Type": c["logical_type"],
-                        "Null?": "✓" if c.get("nullable") else "—",
-                        "Tag": tag,
-                        "PII": "🔒" if c.get("is_pii") else "",
-                        "PHI": "🩺" if c.get("is_phi") else "",
-                    }
-                )
-            st.dataframe(pd.DataFrame(col_rows), use_container_width=True, hide_index=True)
-        with st.expander(
-            f"🔁 Bronze → Silver mappings ({len(schema['mappings'])})", expanded=True
-        ):
-            map_rows = []
-            for m in schema["mappings"]:
-                srcs = m.get("bronze_source_columns") or "[]"
-                if isinstance(srcs, str):
-                    try:
-                        srcs = json.loads(srcs)
-                    except json.JSONDecodeError:
-                        srcs = []
-                map_rows.append(
-                    {
-                        "Silver table": m["silver_table_name"],
-                        "Silver col": m["silver_column_name"],
-                        "Kind": m["transform_kind"],
-                        "Bronze sources": ", ".join(srcs)[:60],
-                        "Transform SQL": (m["transform_sql"] or "")[:80],
-                    }
-                )
-            st.dataframe(pd.DataFrame(map_rows), use_container_width=True, hide_index=True)
-    else:
-        st.info(f"No LIVE Silver schema for **{selected_dataset_display}** yet.")
-
-    # Version history
-    silver_versions = [s for s in all_silver if s["dataset_code"] == selected_dataset_code]
-    if silver_versions:
-        with st.expander(f"📜 Silver version history ({len(silver_versions)})", expanded=True):
-            ver_rows = []
-            for s in silver_versions:
-                ver_rows.append(
-                    {
-                        "Version": s["version"],
-                        "Status": s["status"],
-                        "Pattern": s["silver_pattern"],
-                        "Anchor": s["silver_anchor"],
-                        "Source": s["source"],
-                        "Created": s["created_at"],
-                        "Approved": s["approved_at"] or "—",
-                        "Archived": s["archived_at"] or "—",
-                        "Silver ID": str(s["silver_dataset_id"])[:8] + "…",
-                    }
-                )
-            st.dataframe(pd.DataFrame(ver_rows), use_container_width=True, hide_index=True)
-            st.caption(
-                "💡 Revert to an archived version: use `revert_silver_schema(archived_silver_dataset_id, ...)` "
-                "from the bridge — UI button coming in next iteration."
-            )
-
-    # Author mode tabs
-    st.markdown("#### Design a new Silver schema (or new version)")
-    SILVER_PROPOSAL_KEY = f"silver_proposal_{selected_dataset_code}"
-    pattern_default = live_silver["silver_pattern"] if live_silver else "HUB_SAT_LINK"
-    silver_pattern_choice = st.radio(
-        "Silver pattern",
-        options=["HUB_SAT_LINK (DV2 default)", "NORMALIZED (overkill fallback)"],
-        index=0 if pattern_default == "HUB_SAT_LINK" else 1,
-        horizontal=True,
-        help="HUB_SAT_LINK is the DV2 integration pattern (default). NORMALIZED "
-        "is a single-table fallback for trivially small datasets.",
-    )
-    silver_pattern = "HUB_SAT_LINK" if silver_pattern_choice.startswith("HUB") else "NORMALIZED"
-
-    # Phase 16.5 (Wave 5 #4) — added "📂 Contract First" tab that absorbs
-    # the legacy Data Contract Architect's file-driven flow (upload a sample,
-    # AI proposes a Bronze contract).
-    silver_tab_ai, silver_tab_manual, silver_tab_import, silver_tab_file = st.tabs(
-        ["🤖 AI Construct", "✏️ Manual Author", "📥 Import", "📂 Contract First (file)"]
-    )
-
-    with silver_tab_ai:
-        _ds_for_msg = selected_dataset or {}
-        st.markdown(
-            f"Agent designs Silver `{silver_pattern}` from the Bronze catalog "
-            f"({_ds_for_msg.get('total_fields', '?')} fields), grounded against the "
-            f"`{anchor}` corpus when applicable."
-        )
-        # Phase 16.10 — AI spend confirmation gate. Disabled by default.
-        _silver_ai_confirm = st.checkbox(
-            "✅ I confirm AI spend (~$0.005 per propose)",
-            value=False,
-            key=f"silver_ai_confirm_{selected_dataset_code}",
-            help="Required to enable Propose. Calls Claude Haiku 4.5 against "
-            "the catalog + RAG corpus. Defaults OFF to prevent accidents.",
-        )
-        if st.button(
-            "🚀 Propose Silver schema (AI)",
-            type="primary",
-            key="silver_ai_propose",
-            disabled=not _silver_ai_confirm,
-            help=None if _silver_ai_confirm else "🔒 Tick the AI-spend confirm box above to enable.",
-        ):
-            with (
-                st.spinner(
-                    f"Agent designing Silver `{silver_pattern}` for {selected_dataset_display} ({anchor})..."
-                ),
-                _warehouse(readonly=False) as wh,
-            ):
-                settings = load_settings()
-                llm = get_llm(settings)
-                memory: AgentMemoryStore | None = None
-                try:
-                    memory = AgentMemoryStore(embedder=get_embedder())
-                except Exception:
-                    memory = None
-                try:
-                    proposal = propose_silver_ai(
-                        llm=llm,
-                        warehouse=wh,
-                        memory=memory,
-                        dataset_code=selected_dataset_code,
-                        silver_anchor=anchor,
-                        silver_pattern=silver_pattern,
-                        actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                    )
-                    st.session_state[SILVER_PROPOSAL_KEY] = proposal
-                    st.success(
-                        f"Proposal ready — {len(proposal['silver_tables'])} tables, "
-                        f"{len(proposal.get('bronze_to_silver_mappings', []))} mappings, "
-                        f"{proposal['tokens_used']} tokens, {proposal['duration_ms']}ms."
-                    )
-                except Exception as exc:
-                    st.error(f"Agent failed: {type(exc).__name__}: {exc}")
-                    st.exception(exc)
-
-    with silver_tab_manual:
-        st.markdown(
-            "**Hand-author the Silver schema.** Add Hubs (business-key registries), "
-            "Satellites (descriptive attributes), and Links (relationships). Pro tip: "
-            "run **AI Construct** first to get a skeleton, edit here to refine."
-        )
-
-        # Session-state-backed table list. Each entry:
-        # {"name": str, "kind": "HUB"|"SAT"|"LINK",
-        #  "parent_hub_name": str|None, "business_keys_csv": str,
-        #  "columns": list[{"name", "logical_type", "nullable", "is_pii", "is_phi"}],
-        #  "description": str}
-        _MANUAL_KEY = f"silver_manual_tables_{selected_dataset_code}"
-        if _MANUAL_KEY not in st.session_state:
-            st.session_state[_MANUAL_KEY] = []
-
-        man_tables: list[dict[str, Any]] = st.session_state[_MANUAL_KEY]
-
-        # --- Quick-add toolbar ----------------------------------------------
-        ac1, ac2, ac3, ac4 = st.columns([1, 1, 1, 4])
-        with ac1:
-            if st.button(
-                "➕ Add HUB", use_container_width=True, key=f"man_add_hub_{selected_dataset_code}"
-            ):
-                man_tables.append(
-                    {
-                        "name": f"hub_entity_{len(man_tables) + 1}",
-                        "kind": "HUB",
-                        "parent_hub_name": None,
-                        "business_keys_csv": "",
-                        "description": "",
-                        "columns": [
-                            {
-                                "name": "hash_key",
-                                "logical_type": "VARCHAR",
-                                "nullable": False,
-                                "is_pii": False,
-                                "is_phi": False,
-                            },
-                            {
-                                "name": "_load_dt",
-                                "logical_type": "TIMESTAMP",
-                                "nullable": False,
-                                "is_pii": False,
-                                "is_phi": False,
-                            },
-                            {
-                                "name": "_record_source",
-                                "logical_type": "VARCHAR",
-                                "nullable": False,
-                                "is_pii": False,
-                                "is_phi": False,
-                            },
-                        ],
-                    }
-                )
-                st.rerun()
-        with ac2:
-            if st.button(
-                "➕ Add SAT", use_container_width=True, key=f"man_add_sat_{selected_dataset_code}"
-            ):
-                man_tables.append(
-                    {
-                        "name": f"sat_attributes_{len(man_tables) + 1}",
-                        "kind": "SAT",
-                        "parent_hub_name": "",
-                        "business_keys_csv": "",
-                        "description": "",
-                        "columns": [
-                            {
-                                "name": "hash_key",
-                                "logical_type": "VARCHAR",
-                                "nullable": False,
-                                "is_pii": False,
-                                "is_phi": False,
-                            },
-                            {
-                                "name": "hash_diff",
-                                "logical_type": "VARCHAR",
-                                "nullable": False,
-                                "is_pii": False,
-                                "is_phi": False,
-                            },
-                            {
-                                "name": "_load_dt",
-                                "logical_type": "TIMESTAMP",
-                                "nullable": False,
-                                "is_pii": False,
-                                "is_phi": False,
-                            },
-                        ],
-                    }
-                )
-                st.rerun()
-        with ac3:
-            if st.button(
-                "➕ Add LINK", use_container_width=True, key=f"man_add_link_{selected_dataset_code}"
-            ):
-                man_tables.append(
-                    {
-                        "name": f"link_relationship_{len(man_tables) + 1}",
-                        "kind": "LINK",
-                        "parent_hub_name": "",
-                        "business_keys_csv": "",
-                        "description": "",
-                        "columns": [
-                            {
-                                "name": "hash_key",
-                                "logical_type": "VARCHAR",
-                                "nullable": False,
-                                "is_pii": False,
-                                "is_phi": False,
-                            },
-                            {
-                                "name": "_load_dt",
-                                "logical_type": "TIMESTAMP",
-                                "nullable": False,
-                                "is_pii": False,
-                                "is_phi": False,
-                            },
-                        ],
-                    }
-                )
-                st.rerun()
-        with ac4:
-            cl1, cl2 = st.columns([1, 1])
-            with cl1:
                 if st.button(
-                    "🗑 Clear all",
-                    key=f"man_clear_{selected_dataset_code}",
+                    "🌐 Click to promote → Global",
                     use_container_width=True,
-                    disabled=not man_tables,
+                    type="primary",
+                    help="Copy the LIVE client-scoped design over to scope_owner='GLOBAL_CORP'. "
+                    "Idempotent — safe to re-click.",
                 ):
-                    st.session_state[_MANUAL_KEY] = []
+                    promoted = []
+                    if non_global_silver:
+                        template_store.publish_silver_to_global(
+                            str(non_global_silver[0]["silver_dataset_id"]),
+                            by="ui:designer",
+                        )
+                        promoted.append("Silver")
+                    if non_global_gold:
+                        template_store.publish_gold_to_global(
+                            str(non_global_gold[0]["gold_dataset_id"]),
+                            by="ui:designer",
+                        )
+                        promoted.append("Gold")
+                    st.success(f"📦 Published to Global: {', '.join(promoted)}")
                     st.rerun()
-            with cl2:
-                if st.button(
-                    "📥 Seed from Bronze",
-                    use_container_width=True,
-                    help="Pre-fill ONE Hub with the dataset's business-key fields "
-                    "from the Bronze catalog. Quick start point.",
-                    key=f"man_seed_{selected_dataset_code}",
-                ):
-                    bronze_fields = _bronze_fields_for(selected_dataset_code)
-                    bks = [f for f in bronze_fields if f.get("is_business_key")]
-                    bk_names = [
-                        str(f.get("bronze_column_name") or f.get("gold_column_name") or "")
-                        for f in bks
-                    ]
-                    seed_cols = (
-                        [
-                            {
-                                "name": "hash_key",
-                                "logical_type": "VARCHAR",
-                                "nullable": False,
-                                "is_pii": False,
-                                "is_phi": False,
-                            },
-                        ]
-                        + [
-                            {
-                                "name": str(
-                                    f.get("bronze_column_name") or f.get("gold_column_name") or ""
-                                ),
-                                "logical_type": str(f.get("logical_type") or "VARCHAR").upper(),
-                                "nullable": False,
-                                "is_pii": bool(f.get("is_pii")),
-                                "is_phi": bool(f.get("is_phi")),
-                            }
-                            for f in bks
-                        ]
-                        + [
-                            {
-                                "name": "_load_dt",
-                                "logical_type": "TIMESTAMP",
-                                "nullable": False,
-                                "is_pii": False,
-                                "is_phi": False,
-                            },
-                            {
-                                "name": "_record_source",
-                                "logical_type": "VARCHAR",
-                                "nullable": False,
-                                "is_pii": False,
-                                "is_phi": False,
-                            },
-                        ]
+            else:
+                st.markdown(
+                    f"""
+                    <div style="padding:.6rem .8rem;background:#f1f5f9;border:1px solid #94a3b8;
+                                border-radius:6px;font-size:.92rem;line-height:1.4;">
+                      <div style="font-weight:700;color:#475569;">⏳ Nothing to promote yet</div>
+                      <div style="color:#64748b;font-size:.82rem;margin-top:.2rem;">
+                        Author and approve a client-scoped <strong>Silver</strong> +
+                        <strong>Gold</strong> for <code>{selected_dataset_code}</code> first
+                        (use the AI Construct or Manual tabs below). Once both are LIVE
+                        under a real client, the promote button appears here.
+                      </div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+    st.markdown(f"## Designing **{selected_dataset_display}**")
+
+    layer = st.radio(
+        "Layer",
+        options=["🥉 Bronze (read-only)", "🥈 Silver (designable)", "🥇 Gold (designable)"],
+        horizontal=True,
+        label_visibility="collapsed",
+    )
+
+    # Find existing LIVE schemas for this dataset
+    live_silver = next(
+        (
+            s
+            for s in all_silver
+            if s["dataset_code"] == selected_dataset_code and s.get("status") == "LIVE"
+        ),
+        None,
+    )
+    live_gold = next(
+        (
+            g
+            for g in all_gold
+            if g["dataset_code"] == selected_dataset_code and g.get("status") == "LIVE"
+        ),
+        None,
+    )
+
+
+    # ===========================================================================
+    # 🥉 BRONZE TAB — read-only
+    # ===========================================================================
+
+    if layer.startswith("🥉"):
+        st.markdown("### 🥉 Bronze (read-only — from vendor mapping spec)")
+        st.info(
+            "Bronze fields are loaded from the product catalog (`global_bronze_catalog_*`). "
+            "They reflect what the client agreed to send. To author a one-off Bronze "
+            "contract for a vendor file outside the catalog, use the "
+            "[Data Contract Architect](/Data_Contract_Architect)."
+        )
+        fields = _bronze_fields_for(selected_dataset_code)
+        if not fields:
+            st.warning("No Bronze fields found.")
+        else:
+            rows = []
+            for f in fields:
+                bk = "🔑" if f.get("is_business_key") else ""
+                pii = "🔒" if f.get("is_pii") else ""
+                phi = "🩺" if f.get("is_phi") else ""
+                rows.append(
+                    {
+                        "#": f["field_order"],
+                        "Bronze column": f["bronze_column_name"],
+                        "Type": f["logical_type"],
+                        "Req?": f["requirement"],
+                        "BK": bk,
+                        "PII": pii,
+                        "PHI": phi,
+                        "Description": (f.get("description") or "")[:80],
+                    }
+                )
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+    # ===========================================================================
+    # 🥈 SILVER TAB — designable, 3 modes, version history
+    # ===========================================================================
+
+    elif layer.startswith("🥈"):
+        st.markdown("### 🥈 Silver (Hub/Sat/Link by default; NORMALIZED for trivial datasets)")
+
+        # Show LIVE state
+        if live_silver:
+            st.success(
+                f"✅ **LIVE Silver** v{live_silver['version']} · "
+                f"pattern=`{live_silver['silver_pattern']}` · "
+                f"anchor=`{live_silver['silver_anchor']}` · "
+                f"source=`{live_silver['source']}` · "
+                f"approved by `{live_silver['approved_by']}`"
+            )
+            with _warehouse(readonly=True) as wh:
+                schema = _cached_silver_schema(live_silver["silver_dataset_id"])
+            # Render tables list
+            with st.expander("📋 Silver tables in this LIVE schema", expanded=True):
+                tables_rows = []
+                for t in schema["tables"]:
+                    bks = json.loads(t.get("business_keys_json") or "[]") or []
+                    tables_rows.append(
+                        {
+                            "Order": t["table_order"],
+                            "Table": t["table_name"],
+                            "Kind": t["table_kind"],
+                            "Business keys": ", ".join(bks) if bks else "—",
+                            "Description": (t.get("description") or "")[:80],
+                        }
                     )
+                st.dataframe(pd.DataFrame(tables_rows), use_container_width=True, hide_index=True)
+            with st.expander(f"🧬 Silver columns ({len(schema['columns'])})", expanded=True):
+                col_rows = []
+                for c in schema["columns"]:
+                    tag = ""
+                    if c.get("is_hash_key"):
+                        tag = "🔑h"
+                    elif c.get("is_business_key"):
+                        tag = "🔑"
+                    elif c.get("is_hash_diff"):
+                        tag = "📐d"
+                    col_rows.append(
+                        {
+                            "#": c["column_order"],
+                            "Column": c["column_name"],
+                            "Type": c["logical_type"],
+                            "Null?": "✓" if c.get("nullable") else "—",
+                            "Tag": tag,
+                            "PII": "🔒" if c.get("is_pii") else "",
+                            "PHI": "🩺" if c.get("is_phi") else "",
+                        }
+                    )
+                st.dataframe(pd.DataFrame(col_rows), use_container_width=True, hide_index=True)
+            with st.expander(
+                f"🔁 Bronze → Silver mappings ({len(schema['mappings'])})", expanded=True
+            ):
+                map_rows = []
+                for m in schema["mappings"]:
+                    srcs = m.get("bronze_source_columns") or "[]"
+                    if isinstance(srcs, str):
+                        try:
+                            srcs = json.loads(srcs)
+                        except json.JSONDecodeError:
+                            srcs = []
+                    map_rows.append(
+                        {
+                            "Silver table": m["silver_table_name"],
+                            "Silver col": m["silver_column_name"],
+                            "Kind": m["transform_kind"],
+                            "Bronze sources": ", ".join(srcs)[:60],
+                            "Transform SQL": (m["transform_sql"] or "")[:80],
+                        }
+                    )
+                st.dataframe(pd.DataFrame(map_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info(f"No LIVE Silver schema for **{selected_dataset_display}** yet.")
+
+        # Version history
+        silver_versions = [s for s in all_silver if s["dataset_code"] == selected_dataset_code]
+        if silver_versions:
+            with st.expander(f"📜 Silver version history ({len(silver_versions)})", expanded=True):
+                ver_rows = []
+                for s in silver_versions:
+                    ver_rows.append(
+                        {
+                            "Version": s["version"],
+                            "Status": s["status"],
+                            "Pattern": s["silver_pattern"],
+                            "Anchor": s["silver_anchor"],
+                            "Source": s["source"],
+                            "Created": s["created_at"],
+                            "Approved": s["approved_at"] or "—",
+                            "Archived": s["archived_at"] or "—",
+                            "Silver ID": str(s["silver_dataset_id"])[:8] + "…",
+                        }
+                    )
+                st.dataframe(pd.DataFrame(ver_rows), use_container_width=True, hide_index=True)
+                st.caption(
+                    "💡 Revert to an archived version: use `revert_silver_schema(archived_silver_dataset_id, ...)` "
+                    "from the bridge — UI button coming in next iteration."
+                )
+
+        # Author mode tabs
+        st.markdown("#### Design a new Silver schema (or new version)")
+        SILVER_PROPOSAL_KEY = f"silver_proposal_{selected_dataset_code}"
+        pattern_default = live_silver["silver_pattern"] if live_silver else "HUB_SAT_LINK"
+        silver_pattern_choice = st.radio(
+            "Silver pattern",
+            options=["HUB_SAT_LINK (DV2 default)", "NORMALIZED (overkill fallback)"],
+            index=0 if pattern_default == "HUB_SAT_LINK" else 1,
+            horizontal=True,
+            help="HUB_SAT_LINK is the DV2 integration pattern (default). NORMALIZED "
+            "is a single-table fallback for trivially small datasets.",
+        )
+        silver_pattern = "HUB_SAT_LINK" if silver_pattern_choice.startswith("HUB") else "NORMALIZED"
+
+        # Phase 16.5 (Wave 5 #4) — added "📂 Contract First" tab that absorbs
+        # the legacy Data Contract Architect's file-driven flow (upload a sample,
+        # AI proposes a Bronze contract).
+        silver_tab_ai, silver_tab_manual, silver_tab_import, silver_tab_file = st.tabs(
+            ["🤖 AI Construct", "✏️ Manual Author", "📥 Import", "📂 Contract First (file)"]
+        )
+
+        with silver_tab_ai:
+            _ds_for_msg = selected_dataset or {}
+            st.markdown(
+                f"Agent designs Silver `{silver_pattern}` from the Bronze catalog "
+                f"({_ds_for_msg.get('total_fields', '?')} fields), grounded against the "
+                f"`{anchor}` corpus when applicable."
+            )
+            # Phase 16.10 — AI spend confirmation gate. Disabled by default.
+            _silver_ai_confirm = st.checkbox(
+                "✅ I confirm AI spend (~$0.005 per propose)",
+                value=False,
+                key=f"silver_ai_confirm_{selected_dataset_code}",
+                help="Required to enable Propose. Calls Claude Haiku 4.5 against "
+                "the catalog + RAG corpus. Defaults OFF to prevent accidents.",
+            )
+            if st.button(
+                "🚀 Propose Silver schema (AI)",
+                type="primary",
+                key="silver_ai_propose",
+                disabled=not _silver_ai_confirm,
+                help=None if _silver_ai_confirm else "🔒 Tick the AI-spend confirm box above to enable.",
+            ):
+                with (
+                    st.spinner(
+                        f"Agent designing Silver `{silver_pattern}` for {selected_dataset_display} ({anchor})..."
+                    ),
+                    _warehouse(readonly=False) as wh,
+                ):
+                    settings = load_settings()
+                    llm = get_llm(settings)
+                    memory: AgentMemoryStore | None = None
+                    try:
+                        memory = AgentMemoryStore(embedder=get_embedder())
+                    except Exception:
+                        memory = None
+                    try:
+                        proposal = propose_silver_ai(
+                            llm=llm,
+                            warehouse=wh,
+                            memory=memory,
+                            dataset_code=selected_dataset_code,
+                            silver_anchor=anchor,
+                            silver_pattern=silver_pattern,
+                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
+                        )
+                        st.session_state[SILVER_PROPOSAL_KEY] = proposal
+                        st.success(
+                            f"Proposal ready — {len(proposal['silver_tables'])} tables, "
+                            f"{len(proposal.get('bronze_to_silver_mappings', []))} mappings, "
+                            f"{proposal['tokens_used']} tokens, {proposal['duration_ms']}ms."
+                        )
+                    except Exception as exc:
+                        st.error(f"Agent failed: {type(exc).__name__}: {exc}")
+                        st.exception(exc)
+
+        with silver_tab_manual:
+            st.markdown(
+                "**Hand-author the Silver schema.** Add Hubs (business-key registries), "
+                "Satellites (descriptive attributes), and Links (relationships). Pro tip: "
+                "run **AI Construct** first to get a skeleton, edit here to refine."
+            )
+
+            # Session-state-backed table list. Each entry:
+            # {"name": str, "kind": "HUB"|"SAT"|"LINK",
+            #  "parent_hub_name": str|None, "business_keys_csv": str,
+            #  "columns": list[{"name", "logical_type", "nullable", "is_pii", "is_phi"}],
+            #  "description": str}
+            _MANUAL_KEY = f"silver_manual_tables_{selected_dataset_code}"
+            if _MANUAL_KEY not in st.session_state:
+                st.session_state[_MANUAL_KEY] = []
+
+            man_tables: list[dict[str, Any]] = st.session_state[_MANUAL_KEY]
+
+            # --- Quick-add toolbar ----------------------------------------------
+            ac1, ac2, ac3, ac4 = st.columns([1, 1, 1, 4])
+            with ac1:
+                if st.button(
+                    "➕ Add HUB", use_container_width=True, key=f"man_add_hub_{selected_dataset_code}"
+                ):
                     man_tables.append(
                         {
-                            "name": f"hub_{selected_dataset_code}",
+                            "name": f"hub_entity_{len(man_tables) + 1}",
                             "kind": "HUB",
                             "parent_hub_name": None,
-                            "business_keys_csv": ", ".join(bk_names),
-                            "description": (
-                                f"Hub seeded from Bronze catalog ({len(bks)} business keys)."
-                            ),
-                            "columns": seed_cols,
+                            "business_keys_csv": "",
+                            "description": "",
+                            "columns": [
+                                {
+                                    "name": "hash_key",
+                                    "logical_type": "VARCHAR",
+                                    "nullable": False,
+                                    "is_pii": False,
+                                    "is_phi": False,
+                                },
+                                {
+                                    "name": "_load_dt",
+                                    "logical_type": "TIMESTAMP",
+                                    "nullable": False,
+                                    "is_pii": False,
+                                    "is_phi": False,
+                                },
+                                {
+                                    "name": "_record_source",
+                                    "logical_type": "VARCHAR",
+                                    "nullable": False,
+                                    "is_pii": False,
+                                    "is_phi": False,
+                                },
+                            ],
                         }
                     )
                     st.rerun()
-
-        # --- Table editors --------------------------------------------------
-        if not man_tables:
-            st.info(
-                "👆 Click **➕ Add HUB / SAT / LINK** above to start. "
-                "Or click **📥 Seed from Bronze** to auto-populate a starting "
-                "Hub from the Bronze catalog's business-key fields."
-            )
-        else:
-            for ti, t in enumerate(list(man_tables)):
-                with st.expander(
-                    f"{['🟢 HUB', '🟡 SAT', '🔵 LINK'][['HUB', 'SAT', 'LINK'].index(t['kind'])]}  "
-                    f"**{t['name']}**  ({len(t.get('columns', []))} cols)",
-                    expanded=(ti == len(man_tables) - 1),
+            with ac2:
+                if st.button(
+                    "➕ Add SAT", use_container_width=True, key=f"man_add_sat_{selected_dataset_code}"
                 ):
-                    tc1, tc2 = st.columns([4, 1])
-                    with tc1:
-                        new_name = st.text_input(
-                            "Table name",
-                            value=t["name"],
-                            key=f"man_t{ti}_name_{selected_dataset_code}",
-                        )
-                        if new_name != t["name"]:
-                            t["name"] = new_name
-                    with tc2:
-                        if st.button(
-                            "🗑 Remove this table", key=f"man_t{ti}_rm_{selected_dataset_code}"
-                        ):
-                            man_tables.pop(ti)
-                            st.rerun()
-
-                    if t["kind"] in ("SAT", "LINK"):
-                        existing_hubs = [x["name"] for x in man_tables if x["kind"] == "HUB"]
-                        if existing_hubs:
-                            t["parent_hub_name"] = st.selectbox(
-                                "Parent Hub",
-                                options=existing_hubs,
-                                index=(
-                                    existing_hubs.index(t["parent_hub_name"])
-                                    if t.get("parent_hub_name") in existing_hubs
-                                    else 0
-                                ),
-                                key=f"man_t{ti}_parent_{selected_dataset_code}",
-                            )
-                        else:
-                            st.warning(
-                                f"No Hubs defined yet — add one before creating {t['kind']}."
-                            )
-                    if t["kind"] == "HUB":
-                        t["business_keys_csv"] = st.text_input(
-                            "Business keys (comma-separated column names)",
-                            value=t.get("business_keys_csv", ""),
-                            key=f"man_t{ti}_bks_{selected_dataset_code}",
-                            help="The natural keys that identify a unique entity. "
-                            "These feed the hash_key generation. e.g. "
-                            "`member_id, plan_id`",
-                        )
-                    t["description"] = st.text_input(
-                        "Description (optional)",
-                        value=t.get("description", ""),
-                        key=f"man_t{ti}_desc_{selected_dataset_code}",
-                    )
-
-                    # Columns editor — uses st.data_editor for inline grid
-                    st.markdown("**Columns**")
-                    cols_df = pd.DataFrame(t.get("columns", []))
-                    if cols_df.empty:
-                        cols_df = pd.DataFrame(
-                            [
+                    man_tables.append(
+                        {
+                            "name": f"sat_attributes_{len(man_tables) + 1}",
+                            "kind": "SAT",
+                            "parent_hub_name": "",
+                            "business_keys_csv": "",
+                            "description": "",
+                            "columns": [
                                 {
-                                    "name": "",
+                                    "name": "hash_key",
                                     "logical_type": "VARCHAR",
-                                    "nullable": True,
+                                    "nullable": False,
                                     "is_pii": False,
                                     "is_phi": False,
+                                },
+                                {
+                                    "name": "hash_diff",
+                                    "logical_type": "VARCHAR",
+                                    "nullable": False,
+                                    "is_pii": False,
+                                    "is_phi": False,
+                                },
+                                {
+                                    "name": "_load_dt",
+                                    "logical_type": "TIMESTAMP",
+                                    "nullable": False,
+                                    "is_pii": False,
+                                    "is_phi": False,
+                                },
+                            ],
+                        }
+                    )
+                    st.rerun()
+            with ac3:
+                if st.button(
+                    "➕ Add LINK", use_container_width=True, key=f"man_add_link_{selected_dataset_code}"
+                ):
+                    man_tables.append(
+                        {
+                            "name": f"link_relationship_{len(man_tables) + 1}",
+                            "kind": "LINK",
+                            "parent_hub_name": "",
+                            "business_keys_csv": "",
+                            "description": "",
+                            "columns": [
+                                {
+                                    "name": "hash_key",
+                                    "logical_type": "VARCHAR",
+                                    "nullable": False,
+                                    "is_pii": False,
+                                    "is_phi": False,
+                                },
+                                {
+                                    "name": "_load_dt",
+                                    "logical_type": "TIMESTAMP",
+                                    "nullable": False,
+                                    "is_pii": False,
+                                    "is_phi": False,
+                                },
+                            ],
+                        }
+                    )
+                    st.rerun()
+            with ac4:
+                cl1, cl2 = st.columns([1, 1])
+                with cl1:
+                    if st.button(
+                        "🗑 Clear all",
+                        key=f"man_clear_{selected_dataset_code}",
+                        use_container_width=True,
+                        disabled=not man_tables,
+                    ):
+                        st.session_state[_MANUAL_KEY] = []
+                        st.rerun()
+                with cl2:
+                    if st.button(
+                        "📥 Seed from Bronze",
+                        use_container_width=True,
+                        help="Pre-fill ONE Hub with the dataset's business-key fields "
+                        "from the Bronze catalog. Quick start point.",
+                        key=f"man_seed_{selected_dataset_code}",
+                    ):
+                        bronze_fields = _bronze_fields_for(selected_dataset_code)
+                        bks = [f for f in bronze_fields if f.get("is_business_key")]
+                        bk_names = [
+                            str(f.get("bronze_column_name") or f.get("gold_column_name") or "")
+                            for f in bks
+                        ]
+                        seed_cols = (
+                            [
+                                {
+                                    "name": "hash_key",
+                                    "logical_type": "VARCHAR",
+                                    "nullable": False,
+                                    "is_pii": False,
+                                    "is_phi": False,
+                                },
+                            ]
+                            + [
+                                {
+                                    "name": str(
+                                        f.get("bronze_column_name") or f.get("gold_column_name") or ""
+                                    ),
+                                    "logical_type": str(f.get("logical_type") or "VARCHAR").upper(),
+                                    "nullable": False,
+                                    "is_pii": bool(f.get("is_pii")),
+                                    "is_phi": bool(f.get("is_phi")),
                                 }
+                                for f in bks
+                            ]
+                            + [
+                                {
+                                    "name": "_load_dt",
+                                    "logical_type": "TIMESTAMP",
+                                    "nullable": False,
+                                    "is_pii": False,
+                                    "is_phi": False,
+                                },
+                                {
+                                    "name": "_record_source",
+                                    "logical_type": "VARCHAR",
+                                    "nullable": False,
+                                    "is_pii": False,
+                                    "is_phi": False,
+                                },
                             ]
                         )
-                    edited = st.data_editor(
-                        cols_df,
-                        num_rows="dynamic",
-                        use_container_width=True,
-                        key=f"man_t{ti}_cols_{selected_dataset_code}",
-                        column_config={
-                            "name": st.column_config.TextColumn("Column name"),
-                            "logical_type": st.column_config.SelectboxColumn(
-                                "Type",
-                                options=[
-                                    "VARCHAR",
-                                    "INTEGER",
-                                    "DECIMAL",
-                                    "BOOLEAN",
-                                    "DATE",
-                                    "TIMESTAMP",
-                                    "VARIANT",
-                                ],
-                                required=True,
-                            ),
-                            "nullable": st.column_config.CheckboxColumn("Nullable"),
-                            "is_pii": st.column_config.CheckboxColumn("PII"),
-                            "is_phi": st.column_config.CheckboxColumn("PHI"),
-                        },
-                    )
-                    # Persist edits
-                    t["columns"] = [
-                        {
-                            "name": str(r.get("name") or "").strip(),
-                            "logical_type": str(r.get("logical_type") or "VARCHAR"),
-                            "nullable": bool(r.get("nullable", True)),
-                            "is_pii": bool(r.get("is_pii", False)),
-                            "is_phi": bool(r.get("is_phi", False)),
-                        }
-                        for _, r in edited.iterrows()
-                        if str(r.get("name") or "").strip()
-                    ]
+                        man_tables.append(
+                            {
+                                "name": f"hub_{selected_dataset_code}",
+                                "kind": "HUB",
+                                "parent_hub_name": None,
+                                "business_keys_csv": ", ".join(bk_names),
+                                "description": (
+                                    f"Hub seeded from Bronze catalog ({len(bks)} business keys)."
+                                ),
+                                "columns": seed_cols,
+                            }
+                        )
+                        st.rerun()
 
-        # --- Validate + Save ------------------------------------------------
-        st.markdown("---")
-        sc1, sc2 = st.columns([1, 4])
-        with sc1:
-            save_clicked = st.button(
-                "💾 Save manual proposal",
-                type="primary",
-                use_container_width=True,
-                disabled=not man_tables,
-                key=f"man_save_{selected_dataset_code}",
-            )
-        with sc2:
-            errors: list[str] = []
-            if man_tables:
-                names_seen = set()
-                for t in man_tables:
-                    if not t["name"]:
-                        errors.append("A table has an empty name.")
-                    if t["name"] in names_seen:
-                        errors.append(f"Duplicate table name: {t['name']}")
-                    names_seen.add(t["name"])
-                    if not t.get("columns"):
-                        errors.append(f"`{t['name']}` has no columns.")
-                    if t["kind"] in ("SAT", "LINK") and not t.get("parent_hub_name"):
-                        errors.append(f"{t['kind']} `{t['name']}` needs a parent Hub.")
-                    if t["kind"] == "HUB" and not t.get("business_keys_csv"):
-                        errors.append(f"HUB `{t['name']}` needs business keys.")
-                if errors:
-                    st.error("Fix these before saving:\n" + "\n".join(f"- {e}" for e in errors))
-                else:
-                    n_hubs = sum(1 for t in man_tables if t["kind"] == "HUB")
-                    n_sats = sum(1 for t in man_tables if t["kind"] == "SAT")
-                    n_lnks = sum(1 for t in man_tables if t["kind"] == "LINK")
-                    n_cols = sum(len(t.get("columns", [])) for t in man_tables)
-                    st.success(
-                        f"✅ Ready: {n_hubs} Hub(s), {n_sats} Satellite(s), "
-                        f"{n_lnks} Link(s), {n_cols} columns total. "
-                        f"Click **Save manual proposal** to load into review."
-                    )
-
-        if save_clicked and not errors:
-            try:
-                from datalink.agents.silver_schema_designer import (
-                    propose_silver_manual,
+            # --- Table editors --------------------------------------------------
+            if not man_tables:
+                st.info(
+                    "👆 Click **➕ Add HUB / SAT / LINK** above to start. "
+                    "Or click **📥 Seed from Bronze** to auto-populate a starting "
+                    "Hub from the Bronze catalog's business-key fields."
                 )
-
-                silver_tables_payload = []
-                for t in man_tables:
-                    silver_tables_payload.append(
-                        {
-                            "name": t["name"],
-                            "table_kind": t["kind"],
-                            "parent_hub_name": t.get("parent_hub_name"),
-                            "business_keys": [
-                                bk.strip()
-                                for bk in (t.get("business_keys_csv") or "").split(",")
-                                if bk.strip()
-                            ],
-                            "description": t.get("description") or "",
-                            "columns": t.get("columns", []),
-                        }
-                    )
-                proposal = propose_silver_manual(
-                    dataset_code=selected_dataset_code,
-                    silver_pattern=silver_pattern,
-                    silver_tables=silver_tables_payload,
-                    silver_anchor=anchor,
-                    rationale="Operator hand-authored via Manual tab.",
-                )
-                st.session_state[SILVER_PROPOSAL_KEY] = proposal
-                st.toast("💾 Manual proposal saved.", icon="✅")
-                st.rerun()
-            except Exception as exc:
-                st.error(f"Save failed: {type(exc).__name__}: {exc}")
-                st.exception(exc)
-
-    with silver_tab_import:
-        st.markdown("Paste an existing Silver schema in one of the supported formats.")
-        silver_import_format = st.selectbox(
-            "Format",
-            options=["DDL_SQL", "DBT_YAML", "DBT_PROJECT", "JSON_SCHEMA"],
-            help="DDL_SQL: single CREATE TABLE → NORMALIZED. "
-            "DBT_YAML: single dbt model → NORMALIZED. "
-            "DBT_PROJECT: multiple models with HUB_/SAT_/LINK_ naming → HUB_SAT_LINK. "
-            "JSON_SCHEMA: → NORMALIZED.",
-        )
-        silver_import_text = st.text_area(
-            "Paste schema definition", height=240, key="silver_import_text"
-        )
-        if st.button("📥 Parse + capture", key="silver_import_propose"):
-            if not silver_import_text.strip():
-                st.warning("Paste a schema first.")
             else:
+                for ti, t in enumerate(list(man_tables)):
+                    with st.expander(
+                        f"{['🟢 HUB', '🟡 SAT', '🔵 LINK'][['HUB', 'SAT', 'LINK'].index(t['kind'])]}  "
+                        f"**{t['name']}**  ({len(t.get('columns', []))} cols)",
+                        expanded=(ti == len(man_tables) - 1),
+                    ):
+                        tc1, tc2 = st.columns([4, 1])
+                        with tc1:
+                            new_name = st.text_input(
+                                "Table name",
+                                value=t["name"],
+                                key=f"man_t{ti}_name_{selected_dataset_code}",
+                            )
+                            if new_name != t["name"]:
+                                t["name"] = new_name
+                        with tc2:
+                            if st.button(
+                                "🗑 Remove this table", key=f"man_t{ti}_rm_{selected_dataset_code}"
+                            ):
+                                man_tables.pop(ti)
+                                st.rerun()
+
+                        if t["kind"] in ("SAT", "LINK"):
+                            existing_hubs = [x["name"] for x in man_tables if x["kind"] == "HUB"]
+                            if existing_hubs:
+                                t["parent_hub_name"] = st.selectbox(
+                                    "Parent Hub",
+                                    options=existing_hubs,
+                                    index=(
+                                        existing_hubs.index(t["parent_hub_name"])
+                                        if t.get("parent_hub_name") in existing_hubs
+                                        else 0
+                                    ),
+                                    key=f"man_t{ti}_parent_{selected_dataset_code}",
+                                )
+                            else:
+                                st.warning(
+                                    f"No Hubs defined yet — add one before creating {t['kind']}."
+                                )
+                        if t["kind"] == "HUB":
+                            t["business_keys_csv"] = st.text_input(
+                                "Business keys (comma-separated column names)",
+                                value=t.get("business_keys_csv", ""),
+                                key=f"man_t{ti}_bks_{selected_dataset_code}",
+                                help="The natural keys that identify a unique entity. "
+                                "These feed the hash_key generation. e.g. "
+                                "`member_id, plan_id`",
+                            )
+                        t["description"] = st.text_input(
+                            "Description (optional)",
+                            value=t.get("description", ""),
+                            key=f"man_t{ti}_desc_{selected_dataset_code}",
+                        )
+
+                        # Columns editor — uses st.data_editor for inline grid
+                        st.markdown("**Columns**")
+                        cols_df = pd.DataFrame(t.get("columns", []))
+                        if cols_df.empty:
+                            cols_df = pd.DataFrame(
+                                [
+                                    {
+                                        "name": "",
+                                        "logical_type": "VARCHAR",
+                                        "nullable": True,
+                                        "is_pii": False,
+                                        "is_phi": False,
+                                    }
+                                ]
+                            )
+                        edited = st.data_editor(
+                            cols_df,
+                            num_rows="dynamic",
+                            use_container_width=True,
+                            key=f"man_t{ti}_cols_{selected_dataset_code}",
+                            column_config={
+                                "name": st.column_config.TextColumn("Column name"),
+                                "logical_type": st.column_config.SelectboxColumn(
+                                    "Type",
+                                    options=[
+                                        "VARCHAR",
+                                        "INTEGER",
+                                        "DECIMAL",
+                                        "BOOLEAN",
+                                        "DATE",
+                                        "TIMESTAMP",
+                                        "VARIANT",
+                                    ],
+                                    required=True,
+                                ),
+                                "nullable": st.column_config.CheckboxColumn("Nullable"),
+                                "is_pii": st.column_config.CheckboxColumn("PII"),
+                                "is_phi": st.column_config.CheckboxColumn("PHI"),
+                            },
+                        )
+                        # Persist edits
+                        t["columns"] = [
+                            {
+                                "name": str(r.get("name") or "").strip(),
+                                "logical_type": str(r.get("logical_type") or "VARCHAR"),
+                                "nullable": bool(r.get("nullable", True)),
+                                "is_pii": bool(r.get("is_pii", False)),
+                                "is_phi": bool(r.get("is_phi", False)),
+                            }
+                            for _, r in edited.iterrows()
+                            if str(r.get("name") or "").strip()
+                        ]
+
+            # --- Validate + Save ------------------------------------------------
+            st.markdown("---")
+            sc1, sc2 = st.columns([1, 4])
+            with sc1:
+                save_clicked = st.button(
+                    "💾 Save manual proposal",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not man_tables,
+                    key=f"man_save_{selected_dataset_code}",
+                )
+            with sc2:
+                errors: list[str] = []
+                if man_tables:
+                    names_seen = set()
+                    for t in man_tables:
+                        if not t["name"]:
+                            errors.append("A table has an empty name.")
+                        if t["name"] in names_seen:
+                            errors.append(f"Duplicate table name: {t['name']}")
+                        names_seen.add(t["name"])
+                        if not t.get("columns"):
+                            errors.append(f"`{t['name']}` has no columns.")
+                        if t["kind"] in ("SAT", "LINK") and not t.get("parent_hub_name"):
+                            errors.append(f"{t['kind']} `{t['name']}` needs a parent Hub.")
+                        if t["kind"] == "HUB" and not t.get("business_keys_csv"):
+                            errors.append(f"HUB `{t['name']}` needs business keys.")
+                    if errors:
+                        st.error("Fix these before saving:\n" + "\n".join(f"- {e}" for e in errors))
+                    else:
+                        n_hubs = sum(1 for t in man_tables if t["kind"] == "HUB")
+                        n_sats = sum(1 for t in man_tables if t["kind"] == "SAT")
+                        n_lnks = sum(1 for t in man_tables if t["kind"] == "LINK")
+                        n_cols = sum(len(t.get("columns", [])) for t in man_tables)
+                        st.success(
+                            f"✅ Ready: {n_hubs} Hub(s), {n_sats} Satellite(s), "
+                            f"{n_lnks} Link(s), {n_cols} columns total. "
+                            f"Click **Save manual proposal** to load into review."
+                        )
+
+            if save_clicked and not errors:
                 try:
-                    proposal = propose_silver_import(
+                    from datalink.agents.silver_schema_designer import (
+                        propose_silver_manual,
+                    )
+
+                    silver_tables_payload = []
+                    for t in man_tables:
+                        silver_tables_payload.append(
+                            {
+                                "name": t["name"],
+                                "table_kind": t["kind"],
+                                "parent_hub_name": t.get("parent_hub_name"),
+                                "business_keys": [
+                                    bk.strip()
+                                    for bk in (t.get("business_keys_csv") or "").split(",")
+                                    if bk.strip()
+                                ],
+                                "description": t.get("description") or "",
+                                "columns": t.get("columns", []),
+                            }
+                        )
+                    proposal = propose_silver_manual(
                         dataset_code=selected_dataset_code,
-                        import_format=silver_import_format,
-                        text=silver_import_text,
+                        silver_pattern=silver_pattern,
+                        silver_tables=silver_tables_payload,
                         silver_anchor=anchor,
+                        rationale="Operator hand-authored via Manual tab.",
                     )
                     st.session_state[SILVER_PROPOSAL_KEY] = proposal
-                    st.success(f"Parsed — {len(proposal['silver_tables'])} table(s).")
+                    st.toast("💾 Manual proposal saved.", icon="✅")
+                    st.rerun()
                 except Exception as exc:
-                    st.error(f"Import failed: {type(exc).__name__}: {exc}")
+                    st.error(f"Save failed: {type(exc).__name__}: {exc}")
+                    st.exception(exc)
 
-    # Phase 16.5 (Wave 5 #4) — Contract-First file upload tab.
-    # Absorbs the legacy Data Contract Architect's FILE_DRIVEN mode:
-    # operator drops a sample file, the page reads headers + first rows,
-    # an AI agent proposes a Bronze contract, then the operator can accept it
-    # as-is (which triggers a downstream Silver proposal via AI Construct).
-    with silver_tab_file:
-        st.markdown(
-            "Drop a sample file (CSV, PSV, JSON, EDI). The page extracts headers "
-            "+ first ~5 rows, the contract agent proposes a Bronze contract, and "
-            "you can accept it to seed the Silver design."
-        )
-        uploaded = st.file_uploader(
-            "Sample file",
-            type=["csv", "psv", "tsv", "txt", "json", "edi"],
-            key=f"silver_file_upload_{selected_dataset_code}",
-        )
-        if uploaded is not None:
-            try:
-                # Detect delimiter
-                sample_text = uploaded.read().decode("utf-8", errors="replace")
-                if uploaded.name.lower().endswith(".json"):
-                    import json as _json
+        with silver_tab_import:
+            st.markdown("Paste an existing Silver schema in one of the supported formats.")
+            silver_import_format = st.selectbox(
+                "Format",
+                options=["DDL_SQL", "DBT_YAML", "DBT_PROJECT", "JSON_SCHEMA"],
+                help="DDL_SQL: single CREATE TABLE → NORMALIZED. "
+                "DBT_YAML: single dbt model → NORMALIZED. "
+                "DBT_PROJECT: multiple models with HUB_/SAT_/LINK_ naming → HUB_SAT_LINK. "
+                "JSON_SCHEMA: → NORMALIZED.",
+            )
+            silver_import_text = st.text_area(
+                "Paste schema definition", height=240, key="silver_import_text"
+            )
+            if st.button("📥 Parse + capture", key="silver_import_propose"):
+                if not silver_import_text.strip():
+                    st.warning("Paste a schema first.")
+                else:
+                    try:
+                        proposal = propose_silver_import(
+                            dataset_code=selected_dataset_code,
+                            import_format=silver_import_format,
+                            text=silver_import_text,
+                            silver_anchor=anchor,
+                        )
+                        st.session_state[SILVER_PROPOSAL_KEY] = proposal
+                        st.success(f"Parsed — {len(proposal['silver_tables'])} table(s).")
+                    except Exception as exc:
+                        st.error(f"Import failed: {type(exc).__name__}: {exc}")
 
-                    payload = _json.loads(sample_text)
-                    if isinstance(payload, list) and payload:
-                        headers = list(payload[0].keys()) if isinstance(payload[0], dict) else []
-                        rows = [
-                            [str(payload[i].get(h, "")) for h in headers]
-                            for i in range(min(5, len(payload)))
-                        ]
+        # Phase 16.5 (Wave 5 #4) — Contract-First file upload tab.
+        # Absorbs the legacy Data Contract Architect's FILE_DRIVEN mode:
+        # operator drops a sample file, the page reads headers + first rows,
+        # an AI agent proposes a Bronze contract, then the operator can accept it
+        # as-is (which triggers a downstream Silver proposal via AI Construct).
+        with silver_tab_file:
+            st.markdown(
+                "Drop a sample file (CSV, PSV, JSON, EDI). The page extracts headers "
+                "+ first ~5 rows, the contract agent proposes a Bronze contract, and "
+                "you can accept it to seed the Silver design."
+            )
+            uploaded = st.file_uploader(
+                "Sample file",
+                type=["csv", "psv", "tsv", "txt", "json", "edi"],
+                key=f"silver_file_upload_{selected_dataset_code}",
+            )
+            if uploaded is not None:
+                try:
+                    # Detect delimiter
+                    sample_text = uploaded.read().decode("utf-8", errors="replace")
+                    if uploaded.name.lower().endswith(".json"):
+                        import json as _json
+
+                        payload = _json.loads(sample_text)
+                        if isinstance(payload, list) and payload:
+                            headers = list(payload[0].keys()) if isinstance(payload[0], dict) else []
+                            rows = [
+                                [str(payload[i].get(h, "")) for h in headers]
+                                for i in range(min(5, len(payload)))
+                            ]
+                        else:
+                            headers, rows = [], []
                     else:
-                        headers, rows = [], []
-                else:
-                    delim = ","
-                    if "|" in sample_text.split("\n", 1)[0]:
-                        delim = "|"
-                    elif "\t" in sample_text.split("\n", 1)[0]:
-                        delim = "\t"
-                    lines = [ln for ln in sample_text.splitlines() if ln.strip()]
-                    headers = [h.strip() for h in lines[0].split(delim)] if lines else []
-                    rows = [[v.strip() for v in ln.split(delim)] for ln in lines[1:6]]
+                        delim = ","
+                        if "|" in sample_text.split("\n", 1)[0]:
+                            delim = "|"
+                        elif "\t" in sample_text.split("\n", 1)[0]:
+                            delim = "\t"
+                        lines = [ln for ln in sample_text.splitlines() if ln.strip()]
+                        headers = [h.strip() for h in lines[0].split(delim)] if lines else []
+                        rows = [[v.strip() for v in ln.split(delim)] for ln in lines[1:6]]
 
-                st.markdown(f"**Detected {len(headers)} columns:**")
-                st.code(", ".join(headers), language="text")
-                st.markdown("**Sample rows:**")
-                if rows:
-                    st.dataframe(
-                        pd.DataFrame(rows, columns=headers),
-                        use_container_width=True,
-                        hide_index=True,
+                    st.markdown(f"**Detected {len(headers)} columns:**")
+                    st.code(", ".join(headers), language="text")
+                    st.markdown("**Sample rows:**")
+                    if rows:
+                        st.dataframe(
+                            pd.DataFrame(rows, columns=headers),
+                            use_container_width=True,
+                            hide_index=True,
+                        )
+                    else:
+                        st.caption("No data rows in sample.")
+
+                    if st.button(
+                        "🚀 Propose Bronze contract → seed Silver design",
+                        type="primary",
+                        key=f"silver_file_propose_{selected_dataset_code}",
+                    ):
+                        st.info(
+                            "📦 File-driven contract proposal recorded. To turn this "
+                            "into a LIVE Silver schema, switch to the **🤖 AI Construct** "
+                            "tab — the agent has the file context and will design the "
+                            "Silver schema accordingly. (Full file→Silver round-trip "
+                            "wiring is Phase 16.6 polish.)"
+                        )
+                except Exception as exc:
+                    st.error(f"Couldn't parse file: {type(exc).__name__}: {exc}")
+
+        # Show Silver proposal if any
+        silver_proposal = st.session_state.get(SILVER_PROPOSAL_KEY)
+        if silver_proposal:
+            st.markdown("---")
+            st.markdown("#### 📋 Silver proposal — review")
+            st.markdown(
+                f"""
+                <div class="gd-card">
+                  <span class="gd-pill gd-pill-{str(silver_proposal.get("designer_mode", "")).split("_")[0].lower()}">
+                    {silver_proposal.get("designer_mode")}
+                  </span>
+                  <span class="gd-pill gd-pill-draft">DRAFT (NEW)</span>
+                  <span class="gd-pill" style="background:#fde68a;color:#78350f;">
+                    PATTERN: {silver_proposal.get("silver_pattern")}
+                  </span>
+                  <span class="gd-pill" style="background:#dbeafe;color:#1e40af;">
+                    ANCHOR: {silver_proposal.get("silver_anchor")}
+                  </span>
+                  <div class="gd-meta">
+                    Tokens: {silver_proposal.get("tokens_used", 0)} ·
+                    Latency: {silver_proposal.get("duration_ms", 0)}ms ·
+                    Tables: {len(silver_proposal["silver_tables"])} ·
+                    Mappings: {len(silver_proposal.get("bronze_to_silver_mappings", []))}
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            with st.expander("Tables in proposal", expanded=True):
+                t_rows = []
+                for t in silver_proposal["silver_tables"]:
+                    t_rows.append(
+                        {
+                            "Table": t["table_name"],
+                            "Kind": t["table_kind"],
+                            "Columns": len(t.get("columns") or []),
+                            "BKs": ", ".join(t.get("business_keys") or []),
+                            "Parent Hub": t.get("parent_hub_name") or "—",
+                        }
                     )
-                else:
-                    st.caption("No data rows in sample.")
+                st.dataframe(pd.DataFrame(t_rows), use_container_width=True, hide_index=True)
 
-                if st.button(
-                    "🚀 Propose Bronze contract → seed Silver design",
+            st.markdown(f"**Rationale:** {silver_proposal.get('rationale', '')}")
+
+            s_a, s_b, _ = st.columns([1, 1, 4])
+            with s_a:
+                silver_save_draft = st.button(
+                    "💾 Save as DRAFT", key="silver_save_draft", use_container_width=True
+                )
+            with s_b:
+                silver_approve = st.button(
+                    "✅ Save & Approve → LIVE",
                     type="primary",
-                    key=f"silver_file_propose_{selected_dataset_code}",
-                ):
-                    st.info(
-                        "📦 File-driven contract proposal recorded. To turn this "
-                        "into a LIVE Silver schema, switch to the **🤖 AI Construct** "
-                        "tab — the agent has the file context and will design the "
-                        "Silver schema accordingly. (Full file→Silver round-trip "
-                        "wiring is Phase 16.6 polish.)"
-                    )
-            except Exception as exc:
-                st.error(f"Couldn't parse file: {type(exc).__name__}: {exc}")
-
-    # Show Silver proposal if any
-    silver_proposal = st.session_state.get(SILVER_PROPOSAL_KEY)
-    if silver_proposal:
-        st.markdown("---")
-        st.markdown("#### 📋 Silver proposal — review")
-        st.markdown(
-            f"""
-            <div class="gd-card">
-              <span class="gd-pill gd-pill-{str(silver_proposal.get("designer_mode", "")).split("_")[0].lower()}">
-                {silver_proposal.get("designer_mode")}
-              </span>
-              <span class="gd-pill gd-pill-draft">DRAFT (NEW)</span>
-              <span class="gd-pill" style="background:#fde68a;color:#78350f;">
-                PATTERN: {silver_proposal.get("silver_pattern")}
-              </span>
-              <span class="gd-pill" style="background:#dbeafe;color:#1e40af;">
-                ANCHOR: {silver_proposal.get("silver_anchor")}
-              </span>
-              <div class="gd-meta">
-                Tokens: {silver_proposal.get("tokens_used", 0)} ·
-                Latency: {silver_proposal.get("duration_ms", 0)}ms ·
-                Tables: {len(silver_proposal["silver_tables"])} ·
-                Mappings: {len(silver_proposal.get("bronze_to_silver_mappings", []))}
-              </div>
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-        with st.expander("Tables in proposal", expanded=True):
-            t_rows = []
-            for t in silver_proposal["silver_tables"]:
-                t_rows.append(
-                    {
-                        "Table": t["table_name"],
-                        "Kind": t["table_kind"],
-                        "Columns": len(t.get("columns") or []),
-                        "BKs": ", ".join(t.get("business_keys") or []),
-                        "Parent Hub": t.get("parent_hub_name") or "—",
-                    }
+                    key="silver_approve",
+                    use_container_width=True,
                 )
-            st.dataframe(pd.DataFrame(t_rows), use_container_width=True, hide_index=True)
 
-        st.markdown(f"**Rationale:** {silver_proposal.get('rationale', '')}")
+            if silver_save_draft:
+                with _warehouse(readonly=False) as wh:
+                    try:
+                        sid = persist_silver_proposal(
+                            warehouse=wh,
+                            proposal=silver_proposal,
+                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
+                            auto_submit=False,
+                        )
+                        st.success(f"Saved as DRAFT. silver_dataset_id=`{sid}`")
+                        st.session_state.pop(SILVER_PROPOSAL_KEY, None)
+                    except Exception as exc:
+                        st.error(f"Save failed: {exc}")
 
-        s_a, s_b, _ = st.columns([1, 1, 4])
-        with s_a:
-            silver_save_draft = st.button(
-                "💾 Save as DRAFT", key="silver_save_draft", use_container_width=True
+            if silver_approve:
+                with _warehouse(readonly=False) as wh:
+                    try:
+                        sid = persist_silver_proposal(
+                            warehouse=wh,
+                            proposal=silver_proposal,
+                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
+                            auto_submit=True,
+                        )
+                        approve_silver_schema(
+                            warehouse=wh,
+                            silver_dataset_id=sid,
+                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
+                        )
+                        st.success(
+                            f"🎉 LIVE — Silver schema for `{selected_dataset_code}` is now LIVE."
+                        )
+                        st.session_state.pop(SILVER_PROPOSAL_KEY, None)
+                    except Exception as exc:
+                        st.error(f"Approve failed: {exc}")
+                        st.exception(exc)
+
+
+    # ===========================================================================
+    # 🥇 GOLD TAB — designable, 3 modes (existing flow, gated on Silver-LIVE)
+    # ===========================================================================
+
+    elif layer.startswith("🥇"):
+        st.markdown("### 🥇 Gold (canonical consumption model)")
+
+        # Gate: Gold requires Silver-LIVE for approval
+        if not live_silver:
+            st.warning(
+                f"⚠️ **Gold approval requires LIVE Silver first.** No LIVE Silver "
+                f"schema exists for `{selected_dataset_code}` yet. "
+                f"Switch to the 🥈 Silver tab to design + approve Silver, then come back."
             )
-        with s_b:
-            silver_approve = st.button(
-                "✅ Save & Approve → LIVE",
+            _gold_block_skipped = True  # was st.stop() — we keep rendering
+
+        # Show LIVE Gold
+        if live_gold:
+            st.success(
+                f"✅ **LIVE Gold** v{live_gold['version']} · "
+                f"anchor=`{live_gold['gold_anchor']}` · "
+                f"source=`{live_gold['source']}` · "
+                f"table=`{live_gold['gold_table_name']}` · "
+                f"approved by `{live_gold['approved_by']}`"
+            )
+            # Show Gold columns
+            gschema = _cached_gold_schema(live_gold["gold_dataset_id"])
+            with st.expander(f"🥇 Gold columns ({len(gschema['columns'])})", expanded=True):
+                col_rows = []
+                for c in gschema["columns"]:
+                    col_rows.append(
+                        {
+                            "#": c["column_order"],
+                            "Column": c["gold_column_name"],
+                            "Type": c["logical_type"],
+                            "Null?": "✓" if c.get("nullable") else "—",
+                            "BK": "🔑" if c.get("is_business_key") else "",
+                            "PII": "🔒" if c.get("is_pii") else "",
+                            "PHI": "🩺" if c.get("is_phi") else "",
+                            "Anchor cite": (c.get("anchor_reference") or "")[:50],
+                        }
+                    )
+                st.dataframe(pd.DataFrame(col_rows), use_container_width=True, hide_index=True)
+        else:
+            st.info(f"No LIVE Gold schema for **{selected_dataset_display}** yet.")
+
+        # Phase 17.6 — per-dataset Versioning + Subscribers + Compatibility
+        # advisor REMOVED from inside the Gold layer.  The cross-cutting
+        # versioning view + advisor now live in the page-level Global Medallion
+        # Registry section.  Per-client subscriptions deprecated by user.
+
+        # Legacy Gold version history (Phase 15.x — kept for audit)
+        gold_versions = [g for g in all_gold if g["dataset_code"] == selected_dataset_code]
+        if gold_versions:
+            with st.expander(f"📜 Gold version history ({len(gold_versions)})", expanded=True):
+                ver_rows = []
+                for g in gold_versions:
+                    ver_rows.append(
+                        {
+                            "Version": g["version"],
+                            "Status": g["status"],
+                            "Anchor": g["gold_anchor"],
+                            "Source": g["source"],
+                            "Created": g["created_at"],
+                            "Approved": g["approved_at"] or "—",
+                            "Archived": g["archived_at"] or "—",
+                            "Gold ID": str(g["gold_dataset_id"])[:8] + "…",
+                        }
+                    )
+                st.dataframe(pd.DataFrame(ver_rows), use_container_width=True, hide_index=True)
+
+        # Gold authoring — keep existing 3-mode flow
+        st.markdown("#### Design a new Gold schema (or new version)")
+        GOLD_PROPOSAL_KEY = f"gold_proposal_{selected_dataset_code}"
+
+        gold_tab_ai, gold_tab_manual, gold_tab_import, gold_tab_file = st.tabs(
+            ["🤖 AI Construct", "✏️ Manual Author", "📥 Import", "📂 Contract First (file)"]
+        )
+        with gold_tab_ai:
+            st.markdown(
+                f"Agent designs canonical Gold schema for {selected_dataset_display} "
+                f"anchored against `{anchor}`."
+            )
+            # Phase 16.10 — AI spend confirmation gate. Disabled by default.
+            _gold_ai_confirm = st.checkbox(
+                "✅ I confirm AI spend (~$0.003 per propose)",
+                value=False,
+                key=f"gold_ai_confirm_{selected_dataset_code}",
+                help="Required to enable Propose. Calls Claude Haiku 4.5 against "
+                "the catalog + RAG corpus. Defaults OFF to prevent accidents.",
+            )
+            if st.button(
+                "🚀 Propose Gold (AI)",
                 type="primary",
-                key="silver_approve",
-                use_container_width=True,
-            )
-
-        if silver_save_draft:
-            with _warehouse(readonly=False) as wh:
-                try:
-                    sid = persist_silver_proposal(
-                        warehouse=wh,
-                        proposal=silver_proposal,
-                        actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                        auto_submit=False,
-                    )
-                    st.success(f"Saved as DRAFT. silver_dataset_id=`{sid}`")
-                    st.session_state.pop(SILVER_PROPOSAL_KEY, None)
-                except Exception as exc:
-                    st.error(f"Save failed: {exc}")
-
-        if silver_approve:
-            with _warehouse(readonly=False) as wh:
-                try:
-                    sid = persist_silver_proposal(
-                        warehouse=wh,
-                        proposal=silver_proposal,
-                        actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                        auto_submit=True,
-                    )
-                    approve_silver_schema(
-                        warehouse=wh,
-                        silver_dataset_id=sid,
-                        actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                    )
-                    st.success(
-                        f"🎉 LIVE — Silver schema for `{selected_dataset_code}` is now LIVE."
-                    )
-                    st.session_state.pop(SILVER_PROPOSAL_KEY, None)
-                except Exception as exc:
-                    st.error(f"Approve failed: {exc}")
-                    st.exception(exc)
-
-
-# ===========================================================================
-# 🥇 GOLD TAB — designable, 3 modes (existing flow, gated on Silver-LIVE)
-# ===========================================================================
-
-elif layer.startswith("🥇"):
-    st.markdown("### 🥇 Gold (canonical consumption model)")
-
-    # Gate: Gold requires Silver-LIVE for approval
-    if not live_silver:
-        st.warning(
-            f"⚠️ **Gold approval requires LIVE Silver first.** No LIVE Silver "
-            f"schema exists for `{selected_dataset_code}` yet. "
-            f"Switch to the 🥈 Silver tab to design + approve Silver, then come back."
-        )
-        st.stop()
-
-    # Show LIVE Gold
-    if live_gold:
-        st.success(
-            f"✅ **LIVE Gold** v{live_gold['version']} · "
-            f"anchor=`{live_gold['gold_anchor']}` · "
-            f"source=`{live_gold['source']}` · "
-            f"table=`{live_gold['gold_table_name']}` · "
-            f"approved by `{live_gold['approved_by']}`"
-        )
-        # Show Gold columns
-        gschema = _cached_gold_schema(live_gold["gold_dataset_id"])
-        with st.expander(f"🥇 Gold columns ({len(gschema['columns'])})", expanded=True):
-            col_rows = []
-            for c in gschema["columns"]:
-                col_rows.append(
-                    {
-                        "#": c["column_order"],
-                        "Column": c["gold_column_name"],
-                        "Type": c["logical_type"],
-                        "Null?": "✓" if c.get("nullable") else "—",
-                        "BK": "🔑" if c.get("is_business_key") else "",
-                        "PII": "🔒" if c.get("is_pii") else "",
-                        "PHI": "🩺" if c.get("is_phi") else "",
-                        "Anchor cite": (c.get("anchor_reference") or "")[:50],
-                    }
-                )
-            st.dataframe(pd.DataFrame(col_rows), use_container_width=True, hide_index=True)
-    else:
-        st.info(f"No LIVE Gold schema for **{selected_dataset_display}** yet.")
-
-    # Phase 17.6 — per-dataset Versioning + Subscribers + Compatibility
-    # advisor REMOVED from inside the Gold layer.  The cross-cutting
-    # versioning view + advisor now live in the page-level Global Medallion
-    # Registry section.  Per-client subscriptions deprecated by user.
-
-    # Legacy Gold version history (Phase 15.x — kept for audit)
-    gold_versions = [g for g in all_gold if g["dataset_code"] == selected_dataset_code]
-    if gold_versions:
-        with st.expander(f"📜 Gold version history ({len(gold_versions)})", expanded=True):
-            ver_rows = []
-            for g in gold_versions:
-                ver_rows.append(
-                    {
-                        "Version": g["version"],
-                        "Status": g["status"],
-                        "Anchor": g["gold_anchor"],
-                        "Source": g["source"],
-                        "Created": g["created_at"],
-                        "Approved": g["approved_at"] or "—",
-                        "Archived": g["archived_at"] or "—",
-                        "Gold ID": str(g["gold_dataset_id"])[:8] + "…",
-                    }
-                )
-            st.dataframe(pd.DataFrame(ver_rows), use_container_width=True, hide_index=True)
-
-    # Gold authoring — keep existing 3-mode flow
-    st.markdown("#### Design a new Gold schema (or new version)")
-    GOLD_PROPOSAL_KEY = f"gold_proposal_{selected_dataset_code}"
-
-    gold_tab_ai, gold_tab_manual, gold_tab_import, gold_tab_file = st.tabs(
-        ["🤖 AI Construct", "✏️ Manual Author", "📥 Import", "📂 Contract First (file)"]
-    )
-    with gold_tab_ai:
-        st.markdown(
-            f"Agent designs canonical Gold schema for {selected_dataset_display} "
-            f"anchored against `{anchor}`."
-        )
-        # Phase 16.10 — AI spend confirmation gate. Disabled by default.
-        _gold_ai_confirm = st.checkbox(
-            "✅ I confirm AI spend (~$0.003 per propose)",
-            value=False,
-            key=f"gold_ai_confirm_{selected_dataset_code}",
-            help="Required to enable Propose. Calls Claude Haiku 4.5 against "
-            "the catalog + RAG corpus. Defaults OFF to prevent accidents.",
-        )
-        if st.button(
-            "🚀 Propose Gold (AI)",
-            type="primary",
-            key="gold_ai_propose",
-            disabled=not _gold_ai_confirm,
-            help=None if _gold_ai_confirm else "🔒 Tick the AI-spend confirm box above to enable.",
-        ):
-            with (
-                st.spinner(f"Agent constructing Gold for {selected_dataset_display}..."),
-                _warehouse(readonly=False) as wh,
+                key="gold_ai_propose",
+                disabled=not _gold_ai_confirm,
+                help=None if _gold_ai_confirm else "🔒 Tick the AI-spend confirm box above to enable.",
             ):
-                settings = load_settings()
-                llm = get_llm(settings)
-                gold_memory: AgentMemoryStore | None = None
-                try:
-                    gold_memory = AgentMemoryStore(embedder=get_embedder())
-                except Exception:
-                    gold_memory = None
-                try:
-                    proposal = propose_gold_ai(
-                        llm=llm,
-                        warehouse=wh,
-                        memory=gold_memory,
-                        dataset_code=selected_dataset_code,
-                        gold_anchor=anchor,
-                        actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                    )
-                    st.session_state[GOLD_PROPOSAL_KEY] = proposal
-                    st.success(
-                        f"Proposal ready — {len(proposal['proposed_columns'])} cols, "
-                        f"{len(proposal['bronze_to_gold_mappings'])} mappings, "
-                        f"{proposal['tokens_used']} tokens."
-                    )
-                except Exception as exc:
-                    st.error(f"Agent failed: {exc}")
-                    st.exception(exc)
-    with gold_tab_manual:
-        st.markdown(
-            "Hand-author Gold columns in the grid below. Pro tip: run AI Construct "
-            "first to get a starting shape."
-        )
-        manual_table_name = st.text_input(
-            "Gold table name",
-            value=selected_dataset_code,
-            key="gold_manual_table_name",
-        )
-        if "gold_manual_cols" not in st.session_state:
-            st.session_state["gold_manual_cols"] = pd.DataFrame(
-                [
-                    {
-                        "gold_column_name": "",
-                        "logical_type": "TEXT",
-                        "nullable": True,
-                        "is_business_key": False,
-                        "is_pii": False,
-                        "is_phi": False,
-                        "description": "",
-                        "anchor_reference": "",
-                        "rationale": "",
-                    }
-                ]
+                with (
+                    st.spinner(f"Agent constructing Gold for {selected_dataset_display}..."),
+                    _warehouse(readonly=False) as wh,
+                ):
+                    settings = load_settings()
+                    llm = get_llm(settings)
+                    gold_memory: AgentMemoryStore | None = None
+                    try:
+                        gold_memory = AgentMemoryStore(embedder=get_embedder())
+                    except Exception:
+                        gold_memory = None
+                    try:
+                        proposal = propose_gold_ai(
+                            llm=llm,
+                            warehouse=wh,
+                            memory=gold_memory,
+                            dataset_code=selected_dataset_code,
+                            gold_anchor=anchor,
+                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
+                        )
+                        st.session_state[GOLD_PROPOSAL_KEY] = proposal
+                        st.success(
+                            f"Proposal ready — {len(proposal['proposed_columns'])} cols, "
+                            f"{len(proposal['bronze_to_gold_mappings'])} mappings, "
+                            f"{proposal['tokens_used']} tokens."
+                        )
+                    except Exception as exc:
+                        st.error(f"Agent failed: {exc}")
+                        st.exception(exc)
+        with gold_tab_manual:
+            st.markdown(
+                "Hand-author Gold columns in the grid below. Pro tip: run AI Construct "
+                "first to get a starting shape."
             )
-        cols_df = st.data_editor(
-            st.session_state["gold_manual_cols"],
-            num_rows="dynamic",
-            use_container_width=True,
-            column_config={
-                "logical_type": st.column_config.SelectboxColumn(
-                    options=["TEXT", "INTEGER", "DECIMAL", "DATE", "TIMESTAMP", "BOOLEAN"],
-                ),
-            },
-            key="gold_manual_cols_editor",
-        )
-        st.session_state["gold_manual_cols"] = cols_df
-        if st.button("📋 Capture as proposal", key="gold_manual_propose"):
-            clean_cols = []
-            for _, row in cols_df.iterrows():
-                name = str(row.get("gold_column_name") or "").strip()
-                if not name:
-                    continue
-                clean_cols.append(
-                    {
-                        "gold_column_name": name,
-                        "logical_type": str(row.get("logical_type") or "TEXT"),
-                        "nullable": bool(row.get("nullable", True)),
-                        "is_business_key": bool(row.get("is_business_key", False)),
-                        "is_pii": bool(row.get("is_pii", False)),
-                        "is_phi": bool(row.get("is_phi", False)),
-                        "description": str(row.get("description") or ""),
-                        "anchor_reference": str(row.get("anchor_reference") or "") or None,
-                        "rationale": str(row.get("rationale") or "Manually authored."),
-                    }
-                )
-            if not clean_cols:
-                st.warning("Add at least one column.")
-            else:
-                proposal = propose_gold_manual(
-                    dataset_code=selected_dataset_code,
-                    gold_table_name=manual_table_name,
-                    columns=clean_cols,
-                    mappings=[],
-                    gold_anchor=anchor,
-                )
-                st.session_state[GOLD_PROPOSAL_KEY] = proposal
-                st.success(f"Captured manual proposal — {len(clean_cols)} columns.")
-    with gold_tab_import:
-        gold_import_format = st.selectbox(
-            "Format",
-            options=[
-                "DDL_SQL",
-                "DBT_YAML",
-                "FHIR_PROFILE_JSON",
-                "JSON_SCHEMA",
-                "SNOWFLAKE_DESCRIBE",
-            ],
-            key="gold_import_format",
-        )
-        gold_import_text = st.text_area(
-            "Paste schema definition", height=240, key="gold_import_text"
-        )
-        if st.button("📥 Parse + capture", key="gold_import_propose"):
-            if not gold_import_text.strip():
-                st.warning("Paste a schema first.")
-            else:
-                try:
-                    proposal = propose_gold_import(
-                        dataset_code=selected_dataset_code,
-                        import_format=gold_import_format,
-                        text=gold_import_text,
-                        gold_anchor=anchor,
-                    )
-                    st.session_state[GOLD_PROPOSAL_KEY] = proposal
-                    st.success(f"Parsed — {len(proposal['proposed_columns'])} columns.")
-                except Exception as exc:
-                    st.error(f"Import failed: {exc}")
-
-    # Phase 16.5 (Wave 5 #4) — Contract-First file upload for Gold.
-    with gold_tab_file:
-        st.info(
-            "📂 **Contract-First file upload is most useful for Silver design.** "
-            "For Gold, use **🤖 AI Construct** (which runs against the LIVE Silver "
-            "design) or **📥 Import** (paste a Gold spec directly). If you must "
-            "upload a file for Gold:"
-        )
-        gold_uploaded = st.file_uploader(
-            "Sample file (Gold-shape)",
-            type=["csv", "psv", "tsv", "txt", "json"],
-            key=f"gold_file_upload_{selected_dataset_code}",
-        )
-        if gold_uploaded is not None:
-            try:
-                content = gold_uploaded.read().decode("utf-8", errors="replace")
-                first_line = content.split("\n", 1)[0] if content else ""
-                delim = "|" if "|" in first_line else "\t" if "\t" in first_line else ","
-                headers = [h.strip() for h in first_line.split(delim)] if first_line else []
-                st.markdown(f"**{len(headers)} headers detected:**")
-                st.code(", ".join(headers))
-                st.caption(
-                    "Use these headers as a reference when authoring via Manual "
-                    "or Import tabs above. Direct-to-Gold proposal from a file "
-                    "is forthcoming (Phase 16.6)."
-                )
-            except Exception as exc:
-                st.error(f"Couldn't read file: {exc}")
-
-    # Render Gold proposal if any
-    gold_proposal = st.session_state.get(GOLD_PROPOSAL_KEY)
-    if gold_proposal:
-        st.markdown("---")
-        st.markdown("#### 📋 Gold proposal — review")
-        st.markdown(f"**Rationale:** {gold_proposal.get('rationale', '')}")
-        with st.expander(f"Gold columns ({len(gold_proposal['proposed_columns'])})", expanded=True):
-            col_rows = []
-            for c in gold_proposal["proposed_columns"]:
-                col_rows.append(
-                    {
-                        "Column": c["gold_column_name"],
-                        "Type": c["logical_type"],
-                        "Null?": "✓" if c["nullable"] else "—",
-                        "BK": "🔑" if c.get("is_business_key") else "",
-                        "PII": "🔒" if c.get("is_pii") else "",
-                        "PHI": "🩺" if c.get("is_phi") else "",
-                        "Anchor": (c.get("anchor_reference") or "")[:60],
-                    }
-                )
-            st.dataframe(pd.DataFrame(col_rows), use_container_width=True, hide_index=True)
-        with st.expander(
-            f"Bronze→Gold mappings ({len(gold_proposal.get('bronze_to_gold_mappings', []))})",
-            expanded=True,
-        ):
-            map_rows = []
-            for m in gold_proposal.get("bronze_to_gold_mappings", []):
-                srcs = ", ".join(m.get("bronze_source_columns", []))
-                map_rows.append(
-                    {
-                        "Gold col": m["gold_column_name"],
-                        "Kind": m["transform_kind"],
-                        "Bronze sources": srcs,
-                        "Transform SQL": m["transform_sql"][:80],
-                    }
-                )
-            st.dataframe(pd.DataFrame(map_rows), use_container_width=True, hide_index=True)
-
-        ga, gb, _ = st.columns([1, 1, 4])
-        with ga:
-            gold_save_draft = st.button(
-                "💾 Save as DRAFT", key="gold_save_draft", use_container_width=True
+            manual_table_name = st.text_input(
+                "Gold table name",
+                value=selected_dataset_code,
+                key="gold_manual_table_name",
             )
-        with gb:
-            gold_approve = st.button(
-                "✅ Save & Approve → LIVE",
-                type="primary",
-                key="gold_approve",
+            if "gold_manual_cols" not in st.session_state:
+                st.session_state["gold_manual_cols"] = pd.DataFrame(
+                    [
+                        {
+                            "gold_column_name": "",
+                            "logical_type": "TEXT",
+                            "nullable": True,
+                            "is_business_key": False,
+                            "is_pii": False,
+                            "is_phi": False,
+                            "description": "",
+                            "anchor_reference": "",
+                            "rationale": "",
+                        }
+                    ]
+                )
+            cols_df = st.data_editor(
+                st.session_state["gold_manual_cols"],
+                num_rows="dynamic",
                 use_container_width=True,
+                column_config={
+                    "logical_type": st.column_config.SelectboxColumn(
+                        options=["TEXT", "INTEGER", "DECIMAL", "DATE", "TIMESTAMP", "BOOLEAN"],
+                    ),
+                },
+                key="gold_manual_cols_editor",
             )
-        if gold_save_draft:
-            with _warehouse(readonly=False) as wh:
+            st.session_state["gold_manual_cols"] = cols_df
+            if st.button("📋 Capture as proposal", key="gold_manual_propose"):
+                clean_cols = []
+                for _, row in cols_df.iterrows():
+                    name = str(row.get("gold_column_name") or "").strip()
+                    if not name:
+                        continue
+                    clean_cols.append(
+                        {
+                            "gold_column_name": name,
+                            "logical_type": str(row.get("logical_type") or "TEXT"),
+                            "nullable": bool(row.get("nullable", True)),
+                            "is_business_key": bool(row.get("is_business_key", False)),
+                            "is_pii": bool(row.get("is_pii", False)),
+                            "is_phi": bool(row.get("is_phi", False)),
+                            "description": str(row.get("description") or ""),
+                            "anchor_reference": str(row.get("anchor_reference") or "") or None,
+                            "rationale": str(row.get("rationale") or "Manually authored."),
+                        }
+                    )
+                if not clean_cols:
+                    st.warning("Add at least one column.")
+                else:
+                    proposal = propose_gold_manual(
+                        dataset_code=selected_dataset_code,
+                        gold_table_name=manual_table_name,
+                        columns=clean_cols,
+                        mappings=[],
+                        gold_anchor=anchor,
+                    )
+                    st.session_state[GOLD_PROPOSAL_KEY] = proposal
+                    st.success(f"Captured manual proposal — {len(clean_cols)} columns.")
+        with gold_tab_import:
+            gold_import_format = st.selectbox(
+                "Format",
+                options=[
+                    "DDL_SQL",
+                    "DBT_YAML",
+                    "FHIR_PROFILE_JSON",
+                    "JSON_SCHEMA",
+                    "SNOWFLAKE_DESCRIBE",
+                ],
+                key="gold_import_format",
+            )
+            gold_import_text = st.text_area(
+                "Paste schema definition", height=240, key="gold_import_text"
+            )
+            if st.button("📥 Parse + capture", key="gold_import_propose"):
+                if not gold_import_text.strip():
+                    st.warning("Paste a schema first.")
+                else:
+                    try:
+                        proposal = propose_gold_import(
+                            dataset_code=selected_dataset_code,
+                            import_format=gold_import_format,
+                            text=gold_import_text,
+                            gold_anchor=anchor,
+                        )
+                        st.session_state[GOLD_PROPOSAL_KEY] = proposal
+                        st.success(f"Parsed — {len(proposal['proposed_columns'])} columns.")
+                    except Exception as exc:
+                        st.error(f"Import failed: {exc}")
+
+        # Phase 16.5 (Wave 5 #4) — Contract-First file upload for Gold.
+        with gold_tab_file:
+            st.info(
+                "📂 **Contract-First file upload is most useful for Silver design.** "
+                "For Gold, use **🤖 AI Construct** (which runs against the LIVE Silver "
+                "design) or **📥 Import** (paste a Gold spec directly). If you must "
+                "upload a file for Gold:"
+            )
+            gold_uploaded = st.file_uploader(
+                "Sample file (Gold-shape)",
+                type=["csv", "psv", "tsv", "txt", "json"],
+                key=f"gold_file_upload_{selected_dataset_code}",
+            )
+            if gold_uploaded is not None:
                 try:
-                    gid = persist_gold_proposal(
-                        warehouse=wh,
-                        proposal=gold_proposal,
-                        actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                        auto_submit=False,
+                    content = gold_uploaded.read().decode("utf-8", errors="replace")
+                    first_line = content.split("\n", 1)[0] if content else ""
+                    delim = "|" if "|" in first_line else "\t" if "\t" in first_line else ","
+                    headers = [h.strip() for h in first_line.split(delim)] if first_line else []
+                    st.markdown(f"**{len(headers)} headers detected:**")
+                    st.code(", ".join(headers))
+                    st.caption(
+                        "Use these headers as a reference when authoring via Manual "
+                        "or Import tabs above. Direct-to-Gold proposal from a file "
+                        "is forthcoming (Phase 16.6)."
                     )
-                    st.success(f"Saved as DRAFT. gold_dataset_id=`{gid}`")
-                    st.session_state.pop(GOLD_PROPOSAL_KEY, None)
                 except Exception as exc:
-                    st.error(f"Save failed: {exc}")
-        if gold_approve:
-            with _warehouse(readonly=False) as wh:
-                try:
-                    gid = persist_gold_proposal(
-                        warehouse=wh,
-                        proposal=gold_proposal,
-                        actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                        auto_submit=True,
+                    st.error(f"Couldn't read file: {exc}")
+
+        # Render Gold proposal if any
+        gold_proposal = st.session_state.get(GOLD_PROPOSAL_KEY)
+        if gold_proposal:
+            st.markdown("---")
+            st.markdown("#### 📋 Gold proposal — review")
+            st.markdown(f"**Rationale:** {gold_proposal.get('rationale', '')}")
+            with st.expander(f"Gold columns ({len(gold_proposal['proposed_columns'])})", expanded=True):
+                col_rows = []
+                for c in gold_proposal["proposed_columns"]:
+                    col_rows.append(
+                        {
+                            "Column": c["gold_column_name"],
+                            "Type": c["logical_type"],
+                            "Null?": "✓" if c["nullable"] else "—",
+                            "BK": "🔑" if c.get("is_business_key") else "",
+                            "PII": "🔒" if c.get("is_pii") else "",
+                            "PHI": "🩺" if c.get("is_phi") else "",
+                            "Anchor": (c.get("anchor_reference") or "")[:60],
+                        }
                     )
-                    approve_gold_schema(
-                        warehouse=wh,
-                        gold_dataset_id=gid,
-                        actor=f"ui:{st.session_state.get('client_id', 'operator')}",
+                st.dataframe(pd.DataFrame(col_rows), use_container_width=True, hide_index=True)
+            with st.expander(
+                f"Bronze→Gold mappings ({len(gold_proposal.get('bronze_to_gold_mappings', []))})",
+                expanded=True,
+            ):
+                map_rows = []
+                for m in gold_proposal.get("bronze_to_gold_mappings", []):
+                    srcs = ", ".join(m.get("bronze_source_columns", []))
+                    map_rows.append(
+                        {
+                            "Gold col": m["gold_column_name"],
+                            "Kind": m["transform_kind"],
+                            "Bronze sources": srcs,
+                            "Transform SQL": m["transform_sql"][:80],
+                        }
                     )
-                    st.success(f"🎉 LIVE — Gold schema for `{selected_dataset_code}` is now LIVE.")
-                    st.session_state.pop(GOLD_PROPOSAL_KEY, None)
-                except Exception as exc:
-                    st.error(f"Approve failed: {exc}")
-                    st.exception(exc)
+                st.dataframe(pd.DataFrame(map_rows), use_container_width=True, hide_index=True)
+
+            ga, gb, _ = st.columns([1, 1, 4])
+            with ga:
+                gold_save_draft = st.button(
+                    "💾 Save as DRAFT", key="gold_save_draft", use_container_width=True
+                )
+            with gb:
+                gold_approve = st.button(
+                    "✅ Save & Approve → LIVE",
+                    type="primary",
+                    key="gold_approve",
+                    use_container_width=True,
+                )
+            if gold_save_draft:
+                with _warehouse(readonly=False) as wh:
+                    try:
+                        gid = persist_gold_proposal(
+                            warehouse=wh,
+                            proposal=gold_proposal,
+                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
+                            auto_submit=False,
+                        )
+                        st.success(f"Saved as DRAFT. gold_dataset_id=`{gid}`")
+                        st.session_state.pop(GOLD_PROPOSAL_KEY, None)
+                    except Exception as exc:
+                        st.error(f"Save failed: {exc}")
+            if gold_approve:
+                with _warehouse(readonly=False) as wh:
+                    try:
+                        gid = persist_gold_proposal(
+                            warehouse=wh,
+                            proposal=gold_proposal,
+                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
+                            auto_submit=True,
+                        )
+                        approve_gold_schema(
+                            warehouse=wh,
+                            gold_dataset_id=gid,
+                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
+                        )
+                        st.success(f"🎉 LIVE — Gold schema for `{selected_dataset_code}` is now LIVE.")
+                        st.session_state.pop(GOLD_PROPOSAL_KEY, None)
+                    except Exception as exc:
+                        st.error(f"Approve failed: {exc}")
+                        st.exception(exc)
+
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 17.6 — Cloning Center renders LAST, always, regardless of whether the
+# layer authoring block above ran.  Per user spec: 'Cloning Center should
+# always be at the end.'
+# ─────────────────────────────────────────────────────────────────────────────
+st.markdown("## 📦 Cloning Center")
+st.caption(
+    "Clone-from-template flow.  All clones will buffer locally and apply "
+    "via 🚀 Submit — concurrency-checked per source row.  Client → Global "
+    "is forbidden (Global is sacred).  *(Body intentionally blank — "
+    "redesign in progress; mode radio retained as the layout anchor.)*"
+)
+with st.expander("Show / hide cloning modes", expanded=True):
+    _render_cloning_center()
