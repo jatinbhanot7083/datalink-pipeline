@@ -149,124 +149,17 @@ st.markdown(
 # above never need a per-client view.
 
 
-# ═════════════════════════════════════════════════════════════════════════════
-# Phase 17.6 — 🚀 Submit Bar (sticky at the top of the page)
+# Phase 17.6.5 — Submit Bar + dirty-buffer + conflict-review modal REMOVED
+# per user feedback ('NO Buffering or those stupid commands, they were
+# very confusing').  All clone / promote / archive actions are now
+# DIRECT WRITES — they hit Snowflake immediately when clicked, the
+# snapshot cache is invalidated, and the page re-renders with fresh data.
 #
-# Shows count of pending in-memory edits + a Submit button that batches
-# them server-side with optimistic-concurrency check.  When a conflict is
-# detected, the buffer is preserved (forced-review path per Q2 (b)).
-# ═════════════════════════════════════════════════════════════════════════════
+# We still import _dmd_data for the bulk-fetch snapshot helper (its
+# get_snapshot() / invalidate() entry-points are useful and fast).  The
+# stash_edit() / submit_all() / discard_edits() functions in that module
+# are now dead code retained for git history; they aren't called anywhere.
 from datalink.ui import _dmd_data as _dmd_top  # noqa: E402
-
-
-@st.fragment
-def _render_submit_bar() -> None:
-    """Sticky-feeling submit + discard pair.  Lives in its own fragment so
-    a click here does NOT re-fire any of the page's grid queries."""
-    pending = _dmd_top.dirty_count()
-    if pending == 0:
-        st.caption(
-            "💤 No pending edits. Edits made in the grids below buffer here "
-            "and submit as a batch when you click the green button."
-        )
-        return
-
-    bar1, bar2, bar3, bar4 = st.columns([3, 1.2, 1.2, 1.4])
-    with bar1:
-        st.markdown(
-            f"<div style='padding:.4rem .6rem;background:#fef3c7;"
-            f"border-left:4px solid {_AMBER};border-radius:6px;'>"
-            f"<strong>✏️ {pending} unsaved edit{'s' if pending != 1 else ''}</strong> "
-            f"buffered locally — nothing has reached Snowflake yet.</div>",
-            unsafe_allow_html=True,
-        )
-    with bar2:
-        if st.button(
-            "🚀 Submit changes",
-            type="primary",
-            use_container_width=True,
-            help="Apply every buffered edit. Optimistic-concurrency checked "
-            "per row — conflicts force a review modal.",
-            key="submit_bar_submit",
-        ):
-            report = _dmd_top.submit_all()
-            if report.all_clean:
-                st.toast(
-                    f"✅ {report.applied_count} edit"
-                    f"{'s' if report.applied_count != 1 else ''} applied.",
-                    icon="🚀",
-                )
-                st.rerun()  # whole page rerender — fresh snapshot
-            else:
-                # Stash report for the conflict review modal further down the
-                # page (rendered when a conflict exists).
-                st.session_state["__dmd_last_report__"] = report
-                st.rerun()  # show the conflict review surface
-    with bar3:
-        if st.button(
-            "🗑️ Discard all",
-            use_container_width=True,
-            help="Drop every buffered edit without writing.",
-            key="submit_bar_discard",
-        ):
-            n = _dmd_top.discard_edits()
-            st.toast(f"🗑️ Discarded {n} edit{'s' if n != 1 else ''}.", icon="✅")
-            st.rerun(scope="fragment")
-    with bar4:
-        # Don't reach for the page-scoped `_snap` here — this fragment
-        # runs ABOVE where `_snap` is defined, and on a fragment-only
-        # rerun the module-level binding may not exist yet.  Pull a
-        # cached snapshot of our own (cheap — it's the same @st.cache_data
-        # entry the rest of the page reads).
-        _bar_snap = _dmd_top.get_snapshot()
-        st.caption(f"Snapshot loaded: `{_bar_snap.loaded_at[:19]}`")
-
-
-_render_submit_bar()
-
-
-# Phase 17.6 — Conflict review surface.  When submit_all() returns conflicts
-# (another user edited the same row), we don't auto-merge.  We show the
-# operator a per-conflict diff and force them to discard or override.
-_last_report = st.session_state.get("__dmd_last_report__")
-if _last_report is not None and not getattr(_last_report, "all_clean", True):
-    st.error(
-        f"⚠️ Submit completed with **{_last_report.conflict_count} conflict"
-        f"{'s' if _last_report.conflict_count != 1 else ''}** and "
-        f"**{_last_report.error_count} error"
-        f"{'s' if _last_report.error_count != 1 else ''}**. "
-        f"{_last_report.applied_count} clean edit"
-        f"{'s' if _last_report.applied_count != 1 else ''} applied."
-    )
-    with st.expander("🔍 Forced review — every per-row outcome", expanded=True):
-        for o in _last_report.outcomes:
-            icon = {
-                "applied": "✅",
-                "conflict": "⚠️",
-                "error": "❌",
-            }.get(o.status, "•")
-            st.markdown(
-                f"{icon} **{o.kind}** · `{o.entity_id[:8]}…` · "
-                f"_{o.status}_ — {o.detail or '(no detail)'}"
-            )
-        cb1, cb2 = st.columns([1, 4])
-        with cb1:
-            if st.button(
-                "Dismiss & re-edit",
-                key="dismiss_report",
-                help="Clear this report; the buffer stays so you can rework "
-                "the conflicting rows.",
-            ):
-                st.session_state.pop("__dmd_last_report__", None)
-                st.rerun()
-        with cb2:
-            st.caption(
-                "_Conflicting edits remained in the buffer.  Inspect the "
-                "current state in the grid below; re-author your change "
-                "knowing the server is now ahead of your snapshot._"
-            )
-    st.markdown("---")
-
 
 # ---------------------------------------------------------------------------
 # Bootstrap CONTROL tables
@@ -749,18 +642,10 @@ def _render_client_medallion_registry() -> None:
     for cell in _client_cells.values():
         s = cell.get("silver")
         g = cell.get("gold")
-        # Buffered indicator — show a 🚧 if any pending edit targets this cell.
         s_id = str((s or {}).get("silver_dataset_id") or "")
         g_id = str((g or {}).get("gold_dataset_id") or "")
-        buffered_flags = []
-        for k in ("silver_status", "silver_archive"):
-            if s_id and _dmd_top.is_buffered(k, s_id):
-                buffered_flags.append("🚧 Silver")
-                break
-        for k in ("gold_status", "gold_archive"):
-            if g_id and _dmd_top.is_buffered(k, g_id):
-                buffered_flags.append("🚧 Gold")
-                break
+        # Phase 17.6.5 — direct-write mode; no buffered indicator anymore.
+        buffered_flags: list[str] = []
         latest = max(
             str((s or {}).get("created_at") or ""),
             str((g or {}).get("created_at") or ""),
@@ -890,48 +775,8 @@ def _render_client_medallion_registry() -> None:
         f"### Actions for **{_sel_row['Client']} / {_sel_row['Dataset']}**"
     )
 
-    # Inline Submit / Discard strip — right under the actions header so the
-    # operator never has to scroll back up after clicking Promote / Archive.
-    _ar_pending = _dmd_top.dirty_count()
-    if _ar_pending > 0:
-        ar_a, ar_b, ar_c = st.columns([1.4, 1.1, 4])
-        with ar_a:
-            if st.button(
-                f"🚀 Submit {_ar_pending} change{'s' if _ar_pending != 1 else ''}",
-                type="primary",
-                use_container_width=True,
-                key="cmr_action_submit",
-                help="Apply every buffered edit on the page now.",
-            ):
-                report = _dmd_top.submit_all()
-                if report.all_clean:
-                    st.toast(
-                        f"✅ {report.applied_count} edit"
-                        f"{'s' if report.applied_count != 1 else ''} applied.",
-                        icon="🚀",
-                    )
-                    st.rerun()
-                else:
-                    st.session_state["__dmd_last_report__"] = report
-                    st.rerun()
-        with ar_b:
-            if st.button(
-                "🗑️ Discard",
-                use_container_width=True,
-                key="cmr_action_discard",
-                help="Drop every buffered edit on the page.",
-            ):
-                _dmd_top.discard_edits()
-                st.rerun(scope="fragment")
-        with ar_c:
-            st.markdown(
-                f"<div style='padding:.45rem .6rem;background:#fef3c7;"
-                f"border-left:4px solid {_AMBER};border-radius:6px;font-size:.88rem;'>"
-                f"✏️ <strong>{_ar_pending} unsaved edit"
-                f"{'s' if _ar_pending != 1 else ''}</strong> buffered.  Click "
-                f"Submit to push to Snowflake.</div>",
-                unsafe_allow_html=True,
-            )
+    # Phase 17.6.5 — buffered-Submit strip removed.  Action buttons below
+    # write directly to Snowflake when clicked.
 
     # Two columns: Silver action panel + Gold action panel
     s_col, g_col = st.columns(2)
@@ -949,66 +794,111 @@ def _render_client_medallion_registry() -> None:
             f"{str(row.get('created_at') or '')[:19]}"
         )
 
-        next_status = {
-            "DRAFT": "PENDING_REVIEW",
-            "PENDING_REVIEW": "APPROVED",
-            "APPROVED": "LIVE",
-        }.get(status)
-
-        kind_status = "silver_status" if layer == "Silver" else "gold_status"
-        kind_archive = "silver_archive" if layer == "Silver" else "gold_archive"
+        # Phase 17.6.5 — direct-write 2-step lifecycle:
+        #   DRAFT     → 📋 Review     → APPROVED
+        #   APPROVED  → ✅ Make LIVE  → LIVE
+        #   any non-archived → 🗄️ Archive
+        # Each click writes immediately to Snowflake, invalidates the
+        # snapshot, and reruns the page so the grid reflects new state.
         entity_id = str(
             row.get("silver_dataset_id" if layer == "Silver" else "gold_dataset_id")
         )
+        layer_table = (
+            f"{CONTROL_SCHEMA}.global_silver_schema_datasets"
+            if layer == "Silver"
+            else f"{CONTROL_SCHEMA}.global_gold_schema_datasets"
+        )
+        layer_id_col = (
+            "silver_dataset_id" if layer == "Silver" else "gold_dataset_id"
+        )
+
+        def _direct_set_status(new_status: str, *, set_approved_by: bool) -> None:
+            set_clauses = [f"status = '{new_status}'"]
+            params = {"id": entity_id}
+            if set_approved_by:
+                set_clauses.append("approved_at = CURRENT_TIMESTAMP()")
+                set_clauses.append("approved_by = $by")
+                params["by"] = "ui:client_medallion"
+            with _warehouse(readonly=False) as _wh_w:
+                _wh_w.execute(
+                    f"UPDATE {layer_table} "
+                    f"SET {', '.join(set_clauses)} "
+                    f"WHERE {layer_id_col} = $id",
+                    params,
+                )
+            _dmd_top.invalidate()
+            st.toast(
+                f"✅ {layer} → {new_status}",
+                icon="🚀",
+            )
+            st.rerun()
+
+        def _direct_archive() -> None:
+            with _warehouse(readonly=False) as _wh_w:
+                _wh_w.execute(
+                    f"UPDATE {layer_table} "
+                    f"SET status = 'ARCHIVED', "
+                    f"    archived_at = CURRENT_TIMESTAMP() "
+                    f"WHERE {layer_id_col} = $id",
+                    {"id": entity_id},
+                )
+            _dmd_top.invalidate()
+            st.toast(f"🗄️ Archived {layer}", icon="✅")
+            st.rerun()
 
         ac1, ac2, ac3 = st.columns([1.5, 1, 1])
         with ac1:
-            if next_status:
+            if status == "DRAFT":
                 if st.button(
-                    f"⬆️ Promote → {next_status}",
+                    "📋 Review",
                     use_container_width=True,
                     type="primary",
-                    key=f"cmr_promote_{layer}_{entity_id}",
-                    help="Buffers the change. Click 🚀 Submit at the top to apply.",
+                    key=f"cmr_review_{layer}_{entity_id}",
+                    help="Mark as APPROVED — you've reviewed the schema and "
+                    "approve it for downstream use.",
                 ):
-                    _dmd_top.stash_edit(
-                        kind=kind_status,
-                        entity_id=entity_id,
-                        payload={
-                            "new_status": next_status,
-                            "actor": "ui:client_medallion",
-                        },
-                        base_version=int(row.get("version") or 0),
-                        base_status=status,
-                    )
-                    st.toast(
-                        f"✏️ Buffered {layer} → {next_status}", icon="📝"
-                    )
-                    st.rerun(scope="fragment")
+                    _direct_set_status("APPROVED", set_approved_by=True)
+            elif status == "APPROVED":
+                if st.button(
+                    "✅ Make LIVE",
+                    use_container_width=True,
+                    type="primary",
+                    key=f"cmr_live_{layer}_{entity_id}",
+                    help="Promote APPROVED → LIVE.  Pipeline Architect will "
+                    "build physical Snowflake objects from this.",
+                ):
+                    _direct_set_status("LIVE", set_approved_by=False)
+            elif status in ("PENDING_REVIEW",):
+                # Legacy 4-step still supported — collapse PENDING_REVIEW
+                # straight to APPROVED on click.
+                if st.button(
+                    "📋 Approve",
+                    use_container_width=True,
+                    type="primary",
+                    key=f"cmr_review_{layer}_{entity_id}",
+                ):
+                    _direct_set_status("APPROVED", set_approved_by=True)
             else:
+                # LIVE / ARCHIVED / REJECTED — terminal-ish; no advance button.
                 st.button(
-                    "⬆️ Promote",
+                    {
+                        "LIVE": "🟢 Already LIVE",
+                        "ARCHIVED": "🗄️ Archived",
+                        "REJECTED": "🔴 Rejected",
+                    }.get(status, status),
                     use_container_width=True,
                     disabled=True,
-                    key=f"cmr_promote_{layer}_disabled",
-                    help=f"{status} is terminal — cannot promote further.",
+                    key=f"cmr_terminal_{layer}_{entity_id}",
                 )
         with ac2:
             if status != "ARCHIVED" and st.button(
                 "🗄️ Archive",
                 use_container_width=True,
                 key=f"cmr_archive_{layer}_{entity_id}",
-                help="Buffers the archive. Soft-delete; row preserved for audit.",
+                help="Soft-delete this version. Row preserved for audit. "
+                "Frees the (client, dataset) slot for re-authoring.",
             ):
-                _dmd_top.stash_edit(
-                    kind=kind_archive,
-                    entity_id=entity_id,
-                    payload={"actor": "ui:client_medallion"},
-                    base_version=int(row.get("version") or 0),
-                    base_status=status,
-                )
-                st.toast(f"✏️ Buffered Archive {layer}", icon="🗄️")
-                st.rerun(scope="fragment")
+                _direct_archive()
         with ac3:
             cols_dict = (
                 _snap.silver_columns_by_dataset.get(entity_id, [])
@@ -1037,23 +927,6 @@ def _render_client_medallion_registry() -> None:
                     st.dataframe(
                         pd.DataFrame(_cv), use_container_width=True, hide_index=True
                     )
-
-        # Buffered-edit BADGE only — the Submit/Discard pair lives ONCE
-        # at the top of the action panel (under 'Actions for X / Y').
-        # We don't duplicate it per layer — that was confusing.
-        any_buffered = any(
-            _dmd_top.is_buffered(k, entity_id)
-            for k in (kind_status, kind_archive)
-        )
-        if any_buffered:
-            st.markdown(
-                f"<div style='padding:.35rem .6rem;background:#fef3c7;"
-                f"border-left:3px solid {_AMBER};border-radius:5px;"
-                f"font-size:.82rem;margin-top:.4rem;'>"
-                f"🚧 Pending <strong>{layer}</strong> edit — use the green "
-                f"<strong>Submit</strong> button above to apply.</div>",
-                unsafe_allow_html=True,
-            )
 
     with s_col:
         _layer_action_panel("Silver", _silver)
@@ -1501,72 +1374,478 @@ def _checkbox_multiselect(
     return list(selected)
 
 
-def _cc_inline_submit_button(*, key: str) -> None:
-    """Compact inline Submit button — sits beside the mode's Plan+Buffer
-    primary button.  Shows the live pending count.  Single click applies
-    every buffered edit."""
-    pending = _dmd_top.dirty_count()
-    label = (
-        f"🚀 Submit {pending}" if pending else "🚀 Submit"
-    )
-    if st.button(
-        label,
-        type="primary",
-        use_container_width=True,
-        disabled=pending == 0,
-        key=key,
-        help=(
-            f"Apply all {pending} buffered edit{'s' if pending != 1 else ''} "
-            f"with optimistic-concurrency check."
-            if pending
-            else "Buffer at least one clone (left) before submitting."
-        ),
-    ):
-        report = _dmd_top.submit_all()
-        if report.all_clean:
-            st.toast(
-                f"✅ {report.applied_count} clone"
-                f"{'s' if report.applied_count != 1 else ''} applied.",
-                icon="🚀",
-            )
-            st.rerun()
-        else:
-            st.session_state["__dmd_last_report__"] = report
-            st.rerun()
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 17.6.5 — Cloning Center (REDESIGNED — direct write, no buffering)
+#
+# User spec:
+#   * 3 modes via radio:
+#       A) Full Global → ONE client     (clone every LIVE Global schema)
+#       B) Per Global Dataset → ONE client
+#       C) Per (Source Client, Dataset) → ONE target client
+#   * Always exactly ONE target client — no multiselect, no plan-then-batch.
+#   * Click Clone → IMMEDIATELY writes new DRAFT row(s) to Snowflake.
+#   * The new DRAFT(s) appear in Client Medallion Registry above; the
+#     operator reviews + approves there (Review → Approve = 2 clicks).
+#   * No buffering, no Submit Bar, no concurrency-conflict modal.
+# ─────────────────────────────────────────────────────────────────────────────
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 17.6 — Cloning Center (DISMANTLED PER USER REQUEST — REDESIGN PENDING)
-# Mode radio retained as the layout anchor for the new design.  All form
-# bodies, target multiselect, buffer/submit flow, and per-target plan
-# summaries removed; will be reintroduced once the new layout is locked.
-# Helpers (_cc_target_client_normalized, _cc_silver_blocks, _cc_gold_blocks,
-# _cc_build_silver_applier, _cc_build_gold_applier, _cc_inline_submit_button)
-# are KEPT — the new design will reuse them as-is.
-# ─────────────────────────────────────────────────────────────────────────────
+def _cc_run_silver_clone_now(source_silver_id: str, target_client: str) -> None:
+    """Direct-write Silver clone.  Wraps the existing applier in a
+    warehouse_ctx so the click handler doesn't have to."""
+    applier = _cc_build_silver_applier(source_silver_id, target_client)
+    with _warehouse(readonly=False) as _wh_w:
+        applier(_wh_w)
+
+
+def _cc_run_gold_clone_now(source_gold_id: str, target_client: str) -> None:
+    """Direct-write Gold clone."""
+    applier = _cc_build_gold_applier(source_gold_id, target_client)
+    with _warehouse(readonly=False) as _wh_w:
+        applier(_wh_w)
 
 
 @st.fragment
 def _render_cloning_center() -> None:
-    """Cloning Center — dismantled stub.  Keeps the Clone-mode radio (per
-    user spec) as the anchor for the new layout."""
-    st.radio(
+    """3-mode clone surface, direct-write.  Each click creates a DRAFT
+    row immediately; operator reviews/approves it in the Client Medallion
+    Registry above."""
+
+    _mode = st.radio(
         "Clone mode",
         options=[
             "📦 Full Global → Client (all datasets)",
-            "📦 Per-dataset · Global → Client",
-            "📦 Per-dataset · Client → Client",
+            "📦 Per Global Dataset → Client",
+            "📦 Per Source Client / Dataset → Target Client",
         ],
         index=0,
         horizontal=True,
         key="cc_mode",
     )
-    st.info(
-        "🚧 **Cloning Center redesign in progress.**  The mode radio above "
-        "stays as the layout anchor; the form body, target-client picker, "
-        "buffer / submit flow, and per-target plan summary are intentionally "
-        "blank pending the new design we'll lock together in the next step."
-    )
+
+    # Build the universe of LIVE-only sources we can clone from.
+    _g_silver_live = [
+        s for s in _g_silver if str(s.get("status")) == "LIVE"
+    ]
+    _g_gold_live = [
+        g for g in _g_gold if str(g.get("status")) == "LIVE"
+    ]
+
+    # ─── Mode A — Full Global → ONE client ─────────────────────────────
+    if _mode.startswith("📦 Full Global"):
+        st.markdown(
+            "Clones EVERY LIVE Global Silver + Gold to a single target "
+            "client.  Datasets the target already has (any non-archived "
+            "Silver+Gold) are silently SKIPPED — never overwritten."
+        )
+        col1, col2 = st.columns([3, 1.4])
+        with col1:
+            if not _snap.distinct_clients:
+                _full_target = st.text_input(
+                    "Target client (no existing clients yet — type one)",
+                    placeholder="aetna",
+                    key="cc_full_target_text",
+                )
+            else:
+                _opts = ["— Select —", *_snap.distinct_clients, "➕ New client…"]
+                _pick = st.selectbox(
+                    "Target client",
+                    options=_opts,
+                    index=0,
+                    key="cc_full_target_pick",
+                )
+                if _pick == "➕ New client…":
+                    _full_target = st.text_input(
+                        "New client_id",
+                        placeholder="cigna · anthem · …",
+                        key="cc_full_target_new",
+                    )
+                elif _pick == "— Select —":
+                    _full_target = ""
+                else:
+                    _full_target = _pick
+        with col2:
+            st.write("")  # vertical alignment
+            _full_go = st.button(
+                "📦 Clone all Globals → client",
+                type="primary",
+                use_container_width=True,
+                disabled=not _full_target,
+                key="cc_full_clone",
+            )
+
+        if _full_go and _full_target:
+            target = _cc_target_client_normalized(_full_target)
+            if not target:
+                st.error(
+                    "Invalid target client_id.  Lowercase alphanumeric / "
+                    "underscore / hyphen only.  GLOBAL_CORP is forbidden."
+                )
+            else:
+                cloned: list[str] = []
+                skipped: list[str] = []
+                for src in _g_silver_live:
+                    ds = str(src.get("dataset_code"))
+                    if _has_full_authoring(target, ds):
+                        skipped.append(f"Silver {ds} (already authored)")
+                        continue
+                    try:
+                        _cc_run_silver_clone_now(
+                            str(src.get("silver_dataset_id")), target
+                        )
+                        cloned.append(f"Silver {ds} v{src.get('version')}")
+                    except Exception as exc:
+                        st.error(
+                            f"Silver {ds} clone failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                for src in _g_gold_live:
+                    ds = str(src.get("dataset_code"))
+                    if _cc_gold_blocks(target, ds):
+                        skipped.append(f"Gold {ds} (already authored)")
+                        continue
+                    try:
+                        _cc_run_gold_clone_now(
+                            str(src.get("gold_dataset_id")), target
+                        )
+                        cloned.append(f"Gold {ds} v{src.get('version')}")
+                    except Exception as exc:
+                        st.error(
+                            f"Gold {ds} clone failed: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                if cloned:
+                    _dmd_top.invalidate()
+                    st.toast(
+                        f"✅ Cloned {len(cloned)} schema"
+                        f"{'s' if len(cloned) != 1 else ''} to `{target}`.  "
+                        "Open the Client Medallion Registry above to "
+                        "review + approve.",
+                        icon="📦",
+                    )
+                    st.rerun()
+                if skipped:
+                    with st.expander(
+                        f"Skipped ({len(skipped)})", expanded=False
+                    ):
+                        for s in skipped:
+                            st.markdown(f"  - {s}")
+                if not cloned and not skipped:
+                    st.info(
+                        "Nothing to clone — no LIVE Global Silver or Gold "
+                        "schemas exist yet.  Author + promote one first."
+                    )
+
+    # ─── Mode B — Per Global Dataset → ONE client ──────────────────────
+    elif _mode.startswith("📦 Per Global Dataset"):
+        st.markdown(
+            "Clone ONE Global dataset's LIVE Silver + Gold to ONE target "
+            "client.  Source must be LIVE (not DRAFT/APPROVED).  Either "
+            "layer alone is cloned if the other doesn't qualify."
+        )
+        col1, col2, col3 = st.columns([2, 2, 1.4])
+        with col1:
+            _live_ds = sorted(
+                {
+                    str(s.get("dataset_code"))
+                    for s in _g_silver_live + _g_gold_live
+                }
+            )
+            _gd_dataset = st.selectbox(
+                "Global dataset (LIVE)",
+                options=["— Select —", *_live_ds] if _live_ds else ["(no LIVE Globals)"],
+                index=0,
+                disabled=not _live_ds,
+                key="cc_gd_dataset",
+            )
+        with col2:
+            if not _snap.distinct_clients:
+                _gd_target = st.text_input(
+                    "Target client (none yet — type one)",
+                    placeholder="aetna",
+                    key="cc_gd_target_text",
+                )
+            else:
+                _opts = ["— Select —", *_snap.distinct_clients, "➕ New client…"]
+                _pick = st.selectbox(
+                    "Target client",
+                    options=_opts,
+                    index=0,
+                    key="cc_gd_target_pick",
+                )
+                if _pick == "➕ New client…":
+                    _gd_target = st.text_input(
+                        "New client_id",
+                        placeholder="cigna",
+                        key="cc_gd_target_new",
+                    )
+                elif _pick == "— Select —":
+                    _gd_target = ""
+                else:
+                    _gd_target = _pick
+        with col3:
+            st.write("")
+            _gd_go = st.button(
+                "📦 Clone",
+                type="primary",
+                use_container_width=True,
+                disabled=not (
+                    _gd_dataset
+                    and _gd_dataset != "— Select —"
+                    and _gd_target
+                ),
+                key="cc_gd_clone",
+            )
+
+        if _gd_go:
+            target = _cc_target_client_normalized(_gd_target)
+            if not target:
+                st.error("Invalid target client_id.")
+            else:
+                ds = str(_gd_dataset)
+                cloned_layers: list[str] = []
+                blockers: list[str] = []
+
+                _src_s = max(
+                    [s for s in _g_silver_live if str(s.get("dataset_code")) == ds],
+                    key=lambda r: int(r.get("version") or 0),
+                    default=None,
+                )
+                if _src_s and not _cc_silver_blocks(target, ds):
+                    try:
+                        _cc_run_silver_clone_now(
+                            str(_src_s["silver_dataset_id"]), target
+                        )
+                        cloned_layers.append(f"Silver v{_src_s.get('version')}")
+                    except Exception as exc:
+                        st.error(
+                            f"Silver clone failed: {type(exc).__name__}: {exc}"
+                        )
+                elif _src_s and _cc_silver_blocks(target, ds):
+                    blockers.append(
+                        "Silver — target already has it.  Archive in the "
+                        "Client Medallion Registry first."
+                    )
+
+                _src_g = max(
+                    [g for g in _g_gold_live if str(g.get("dataset_code")) == ds],
+                    key=lambda r: int(r.get("version") or 0),
+                    default=None,
+                )
+                if _src_g and not _cc_gold_blocks(target, ds):
+                    try:
+                        _cc_run_gold_clone_now(
+                            str(_src_g["gold_dataset_id"]), target
+                        )
+                        cloned_layers.append(f"Gold v{_src_g.get('version')}")
+                    except Exception as exc:
+                        st.error(
+                            f"Gold clone failed: {type(exc).__name__}: {exc}"
+                        )
+                elif _src_g and _cc_gold_blocks(target, ds):
+                    blockers.append(
+                        "Gold — target already has it.  Archive first."
+                    )
+
+                if cloned_layers:
+                    _dmd_top.invalidate()
+                    st.toast(
+                        f"✅ {' + '.join(cloned_layers)} cloned to "
+                        f"`{target}/{ds}`.  Review + approve in Client "
+                        f"Medallion Registry above.",
+                        icon="📦",
+                    )
+                    st.rerun()
+                if blockers:
+                    for b in blockers:
+                        st.warning(f"⚠️ {b}")
+                if (
+                    not cloned_layers
+                    and not blockers
+                    and not _src_s
+                    and not _src_g
+                ):
+                    st.info(
+                        f"No LIVE Global Silver or Gold for `{ds}` — "
+                        f"author + promote one first."
+                    )
+
+    # ─── Mode C — Per (Source Client, Dataset) → ONE target client ─────
+    else:
+        st.markdown(
+            "Fork from a source client's LIVE Silver/Gold to a target "
+            "client.  Both ends are real clients (never GLOBAL_CORP — "
+            "that's sacred)."
+        )
+        if not _snap.distinct_clients:
+            st.info(
+                "📭 No real clients have authored anything yet.  Use Mode A "
+                "or B to seed a client from Global first."
+            )
+        else:
+            col1, col2, col3, col4 = st.columns([1.5, 2, 2, 1.2])
+            with col1:
+                _src_client = st.selectbox(
+                    "Source client",
+                    options=["— Select —", *_snap.distinct_clients],
+                    index=0,
+                    key="cc_cc_src_client",
+                )
+            with col2:
+                if _src_client == "— Select —":
+                    _src_ds_options: list[str] = []
+                else:
+                    _src_silver_for = [
+                        s
+                        for s in _snap.silver_schemas
+                        if str(s.get("scope_owner")) == _src_client
+                        and str(s.get("status")) == "LIVE"
+                    ]
+                    _src_gold_for = [
+                        g
+                        for g in _snap.gold_schemas
+                        if str(g.get("scope_owner")) == _src_client
+                        and str(g.get("status")) == "LIVE"
+                    ]
+                    _src_ds_options = sorted(
+                        {
+                            str(r.get("dataset_code"))
+                            for r in _src_silver_for + _src_gold_for
+                        }
+                    )
+                _cc_dataset = st.selectbox(
+                    "Dataset (LIVE in source)",
+                    options=["— Select —", *_src_ds_options]
+                    if _src_ds_options
+                    else ["(none)"],
+                    index=0,
+                    disabled=not _src_ds_options,
+                    key="cc_cc_dataset",
+                )
+            with col3:
+                _tgt_options = [
+                    c for c in _snap.distinct_clients if c != _src_client
+                ]
+                _tgt_pick_options = [
+                    "— Select —",
+                    *_tgt_options,
+                    "➕ New client…",
+                ]
+                _tgt_pick = st.selectbox(
+                    "Target client",
+                    options=_tgt_pick_options,
+                    index=0,
+                    key="cc_cc_target_pick",
+                )
+                if _tgt_pick == "➕ New client…":
+                    _cc_target = st.text_input(
+                        "New client_id",
+                        placeholder="bcbs",
+                        key="cc_cc_target_new",
+                    )
+                elif _tgt_pick == "— Select —":
+                    _cc_target = ""
+                else:
+                    _cc_target = _tgt_pick
+            with col4:
+                st.write("")
+                _cc_go = st.button(
+                    "📦 Clone",
+                    type="primary",
+                    use_container_width=True,
+                    disabled=not (
+                        _src_client != "— Select —"
+                        and _cc_dataset != "— Select —"
+                        and _cc_target
+                    ),
+                    key="cc_cc_clone",
+                )
+
+            if _cc_go:
+                target = _cc_target_client_normalized(_cc_target)
+                if not target:
+                    st.error("Invalid target client_id.")
+                elif target == _src_client:
+                    st.error("Source and target are the same client.")
+                else:
+                    ds = str(_cc_dataset)
+                    cloned_layers: list[str] = []
+                    blockers: list[str] = []
+
+                    _src_s_pick = max(
+                        [
+                            s
+                            for s in _snap.silver_schemas
+                            if str(s.get("scope_owner")) == _src_client
+                            and str(s.get("dataset_code")) == ds
+                            and str(s.get("status")) == "LIVE"
+                        ],
+                        key=lambda r: int(r.get("version") or 0),
+                        default=None,
+                    )
+                    if _src_s_pick and not _cc_silver_blocks(target, ds):
+                        try:
+                            _cc_run_silver_clone_now(
+                                str(_src_s_pick["silver_dataset_id"]), target
+                            )
+                            cloned_layers.append(
+                                f"Silver v{_src_s_pick.get('version')}"
+                            )
+                        except Exception as exc:
+                            st.error(
+                                f"Silver clone failed: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                    elif _src_s_pick and _cc_silver_blocks(target, ds):
+                        blockers.append(
+                            "Silver — target already has it.  Archive first."
+                        )
+
+                    _src_g_pick = max(
+                        [
+                            g
+                            for g in _snap.gold_schemas
+                            if str(g.get("scope_owner")) == _src_client
+                            and str(g.get("dataset_code")) == ds
+                            and str(g.get("status")) == "LIVE"
+                        ],
+                        key=lambda r: int(r.get("version") or 0),
+                        default=None,
+                    )
+                    if _src_g_pick and not _cc_gold_blocks(target, ds):
+                        try:
+                            _cc_run_gold_clone_now(
+                                str(_src_g_pick["gold_dataset_id"]), target
+                            )
+                            cloned_layers.append(
+                                f"Gold v{_src_g_pick.get('version')}"
+                            )
+                        except Exception as exc:
+                            st.error(
+                                f"Gold clone failed: "
+                                f"{type(exc).__name__}: {exc}"
+                            )
+                    elif _src_g_pick and _cc_gold_blocks(target, ds):
+                        blockers.append(
+                            "Gold — target already has it.  Archive first."
+                        )
+
+                    if cloned_layers:
+                        _dmd_top.invalidate()
+                        st.toast(
+                            f"✅ {' + '.join(cloned_layers)} cloned "
+                            f"`{_src_client}` → `{target}/{ds}`.",
+                            icon="📦",
+                        )
+                        st.rerun()
+                    if blockers:
+                        for b in blockers:
+                            st.warning(f"⚠️ {b}")
+                    if not cloned_layers and not blockers:
+                        st.info(
+                            f"No LIVE source rows for `{ds}` under "
+                            f"`{_src_client}`."
+                        )
 
 
 # Cloning Center invocation moved to the END of the file per user request:
