@@ -966,52 +966,22 @@ def _render_client_medallion_registry() -> None:
                         pd.DataFrame(_cv), use_container_width=True, hide_index=True
                     )
 
-        # Buffered-edit indicator + INLINE Submit so the operator can
-        # commit the just-clicked Promote/Archive without scrolling.
+        # Buffered-edit BADGE only — the Submit/Discard pair lives ONCE
+        # at the top of the action panel (under 'Actions for X / Y').
+        # We don't duplicate it per layer — that was confusing.
         any_buffered = any(
             _dmd_top.is_buffered(k, entity_id)
             for k in (kind_status, kind_archive)
         )
         if any_buffered:
             st.markdown(
-                f"<div style='padding:.4rem .6rem;background:#fef3c7;"
-                f"border-radius:6px;font-size:.85rem;margin-top:.4rem;'>"
-                f"🚧 <strong>Pending {layer} edit</strong> — buffered locally.</div>",
+                f"<div style='padding:.35rem .6rem;background:#fef3c7;"
+                f"border-left:3px solid {_AMBER};border-radius:5px;"
+                f"font-size:.82rem;margin-top:.4rem;'>"
+                f"🚧 Pending <strong>{layer}</strong> edit — use the green "
+                f"<strong>Submit</strong> button above to apply.</div>",
                 unsafe_allow_html=True,
             )
-            sb1, sb2 = st.columns([1, 1])
-            with sb1:
-                if st.button(
-                    "🚀 Submit now",
-                    type="primary",
-                    use_container_width=True,
-                    key=f"cmr_layer_submit_{layer}_{entity_id}",
-                    help="Apply this Promote/Archive (and any other buffered edits) now.",
-                ):
-                    report = _dmd_top.submit_all()
-                    if report.all_clean:
-                        st.toast(
-                            f"✅ {report.applied_count} edit"
-                            f"{'s' if report.applied_count != 1 else ''} applied.",
-                            icon="🚀",
-                        )
-                        st.rerun()
-                    else:
-                        st.session_state["__dmd_last_report__"] = report
-                        st.rerun()
-            with sb2:
-                if st.button(
-                    "🗑️ Discard",
-                    use_container_width=True,
-                    key=f"cmr_layer_discard_{layer}_{entity_id}",
-                    help="Drop this layer's buffered edits without writing.",
-                ):
-                    # Drop only this layer's pending edits (silver_status,
-                    # silver_archive, gold_status, gold_archive on this id).
-                    buf = _dmd_top._buffer()
-                    for k in (kind_status, kind_archive):
-                        buf.pop((k, entity_id), None)
-                    st.rerun(scope="fragment")
 
     with s_col:
         _layer_action_panel("Silver", _silver)
