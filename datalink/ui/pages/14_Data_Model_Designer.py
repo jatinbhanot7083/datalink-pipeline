@@ -1504,7 +1504,9 @@ def _render_cloning_center() -> None:
             )
         with col3:
             st.write("")
-            _cc_inline_submit_button(key="cc_full_submit")
+            # Placeholder — filled AFTER the buffer handler runs so the
+            # Submit button reads the post-buffer count, not the stale one.
+            _full_submit_slot = st.empty()
 
         if _full_go:
             normalized: list[str] = []
@@ -1623,6 +1625,9 @@ def _render_cloning_center() -> None:
                         "schemas exist yet — author + promote a Global "
                         "Silver/Gold first."
                     )
+        # Fill the Submit placeholder LAST so it sees the post-buffer count.
+        with _full_submit_slot.container():
+            _cc_inline_submit_button(key="cc_full_submit")
 
     # ── Mode B — Per-dataset Global → Client ─────────────────────────────
     elif _mode.startswith("📦 Per-dataset · Global"):
@@ -1664,7 +1669,7 @@ def _render_cloning_center() -> None:
             )
         with col4:
             st.write("")
-            _cc_inline_submit_button(key="cc_gd_submit")
+            _gd_submit_slot = st.empty()  # filled after handler — see below
 
         if _gd_go:
             normalized: list[str] = []
@@ -1797,6 +1802,9 @@ def _render_cloning_center() -> None:
                                 st.caption("**Blocked:**")
                                 for b in blocked_by_target[target]:
                                     st.markdown(f"  - {b}")
+        # Fill the Submit placeholder LAST.
+        with _gd_submit_slot.container():
+            _cc_inline_submit_button(key="cc_gd_submit")
 
     # ── Mode C — Per-dataset Client → Client ─────────────────────────────
     else:
@@ -1870,7 +1878,7 @@ def _render_cloning_center() -> None:
                     key="cc_cc_go",
                 )
             with cc_act_b:
-                _cc_inline_submit_button(key="cc_cc_submit")
+                _cc_submit_slot = st.empty()  # filled after handler — see below
 
             if _cc_go:
                 normalized: list[str] = []
@@ -2021,6 +2029,9 @@ def _render_cloning_center() -> None:
                                     st.caption("**Blocked:**")
                                     for b in blocked_by_target[target]:
                                         st.markdown(f"  - {b}")
+        # Fill the Mode C Submit placeholder LAST.
+        with _cc_submit_slot.container():
+            _cc_inline_submit_button(key="cc_cc_submit")
 
     # ── Inline Submit dock ─────────────────────────────────────────────
     # Right at the bottom of every clone-mode action area.  When buffered
