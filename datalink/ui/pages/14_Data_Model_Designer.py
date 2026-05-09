@@ -818,6 +818,49 @@ def _render_client_medallion_registry() -> None:
         f"### Actions for **{_sel_row['Client']} / {_sel_row['Dataset']}**"
     )
 
+    # Inline Submit / Discard strip — right under the actions header so the
+    # operator never has to scroll back up after clicking Promote / Archive.
+    _ar_pending = _dmd_top.dirty_count()
+    if _ar_pending > 0:
+        ar_a, ar_b, ar_c = st.columns([1.4, 1.1, 4])
+        with ar_a:
+            if st.button(
+                f"🚀 Submit {_ar_pending} change{'s' if _ar_pending != 1 else ''}",
+                type="primary",
+                use_container_width=True,
+                key="cmr_action_submit",
+                help="Apply every buffered edit on the page now.",
+            ):
+                report = _dmd_top.submit_all()
+                if report.all_clean:
+                    st.toast(
+                        f"✅ {report.applied_count} edit"
+                        f"{'s' if report.applied_count != 1 else ''} applied.",
+                        icon="🚀",
+                    )
+                    st.rerun()
+                else:
+                    st.session_state["__dmd_last_report__"] = report
+                    st.rerun()
+        with ar_b:
+            if st.button(
+                "🗑️ Discard",
+                use_container_width=True,
+                key="cmr_action_discard",
+                help="Drop every buffered edit on the page.",
+            ):
+                _dmd_top.discard_edits()
+                st.rerun(scope="fragment")
+        with ar_c:
+            st.markdown(
+                f"<div style='padding:.45rem .6rem;background:#fef3c7;"
+                f"border-left:4px solid {_AMBER};border-radius:6px;font-size:.88rem;'>"
+                f"✏️ <strong>{_ar_pending} unsaved edit"
+                f"{'s' if _ar_pending != 1 else ''}</strong> buffered.  Click "
+                f"Submit to push to Snowflake.</div>",
+                unsafe_allow_html=True,
+            )
+
     # Two columns: Silver action panel + Gold action panel
     s_col, g_col = st.columns(2)
 
@@ -923,16 +966,52 @@ def _render_client_medallion_registry() -> None:
                         pd.DataFrame(_cv), use_container_width=True, hide_index=True
                     )
 
-        # Buffered-edit indicator + cancel
-        for k in (kind_status, kind_archive):
-            if _dmd_top.is_buffered(k, entity_id):
-                st.markdown(
-                    f"<div style='padding:.3rem .5rem;background:#fef3c7;"
-                    f"border-radius:5px;font-size:.85rem;'>"
-                    f"🚧 <strong>Pending edit</strong> on this {layer} — "
-                    f"submit at the top to apply.</div>",
-                    unsafe_allow_html=True,
-                )
+        # Buffered-edit indicator + INLINE Submit so the operator can
+        # commit the just-clicked Promote/Archive without scrolling.
+        any_buffered = any(
+            _dmd_top.is_buffered(k, entity_id)
+            for k in (kind_status, kind_archive)
+        )
+        if any_buffered:
+            st.markdown(
+                f"<div style='padding:.4rem .6rem;background:#fef3c7;"
+                f"border-radius:6px;font-size:.85rem;margin-top:.4rem;'>"
+                f"🚧 <strong>Pending {layer} edit</strong> — buffered locally.</div>",
+                unsafe_allow_html=True,
+            )
+            sb1, sb2 = st.columns([1, 1])
+            with sb1:
+                if st.button(
+                    "🚀 Submit now",
+                    type="primary",
+                    use_container_width=True,
+                    key=f"cmr_layer_submit_{layer}_{entity_id}",
+                    help="Apply this Promote/Archive (and any other buffered edits) now.",
+                ):
+                    report = _dmd_top.submit_all()
+                    if report.all_clean:
+                        st.toast(
+                            f"✅ {report.applied_count} edit"
+                            f"{'s' if report.applied_count != 1 else ''} applied.",
+                            icon="🚀",
+                        )
+                        st.rerun()
+                    else:
+                        st.session_state["__dmd_last_report__"] = report
+                        st.rerun()
+            with sb2:
+                if st.button(
+                    "🗑️ Discard",
+                    use_container_width=True,
+                    key=f"cmr_layer_discard_{layer}_{entity_id}",
+                    help="Drop this layer's buffered edits without writing.",
+                ):
+                    # Drop only this layer's pending edits (silver_status,
+                    # silver_archive, gold_status, gold_archive on this id).
+                    buf = _dmd_top._buffer()
+                    for k in (kind_status, kind_archive):
+                        buf.pop((k, entity_id), None)
+                    st.rerun(scope="fragment")
 
     with s_col:
         _layer_action_panel("Silver", _silver)
