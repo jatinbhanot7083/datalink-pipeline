@@ -2086,53 +2086,195 @@ st.markdown("---")
 # ---------------------------------------------------------------------------
 
 st.markdown("## 🎯 Pick a dataset (drill into one for authoring)")
-ds_label_to_obj = {
-    f"{d['display_name']}  ({d['total_fields']} fields, {d['category']})": d
-    for d in bronze_datasets
-}
+st.caption(
+    "Authoring is gated: pick **Client → Dataset → Anchor**, then the layer "
+    "radio below activates.  The Dataset list excludes datasets the chosen "
+    "client already has fully authored (any non-archived Silver+Gold) — "
+    "guard rail against accidental recreate.  Archive the existing schema "
+    "in the Client Medallion Registry above to free a slot."
+)
 
-# Phase 16.1 — accept ?dataset=<code> query param so deep-links from
-# Pipeline Architect / other pages land directly on the right dataset.
+
+# Build (Client + Dataset + Anchor) triple.  Sentinel value for unselected.
+_SENTINEL = "— Select —"
+
+# Client picker — same source as the Cloning Center, plus GLOBAL_CORP for
+# building canonical templates (operator's primary mode for first build).
+_authoring_clients = ["GLOBAL_CORP", *list(_snap.distinct_clients)]
+
+# Pre-fill from query string for back-compat with deep-links (?client=X&dataset=Y).
+_client_qp = st.query_params.get("client")
 _dataset_qp = st.query_params.get("dataset")
-_default_idx = 0
-if _dataset_qp and bronze_datasets:
-    for i, lab in enumerate(ds_label_to_obj.keys()):
-        if ds_label_to_obj[lab]["dataset_code"] == _dataset_qp:
-            _default_idx = i
-            break
 
-col_ds, col_anchor = st.columns([3, 2])
+col_client, col_ds, col_anchor = st.columns([2, 3, 2])
+
+with col_client:
+    _client_options = [_SENTINEL, *_authoring_clients]
+    _client_default_idx = 0
+    if _client_qp and _client_qp in _authoring_clients:
+        _client_default_idx = _client_options.index(_client_qp)
+    selected_client_for_authoring = st.selectbox(
+        "Client",
+        options=_client_options,
+        index=_client_default_idx,
+        key="dmd_pick_client",
+        help="GLOBAL_CORP = canonical template (operator builds once; clients "
+        "clone via the Cloning Center above).  Pick a real client to author "
+        "client-specific overrides.",
+    )
+
+# Determine which datasets the picked client is allowed to author.  A
+# dataset is HIDDEN if the client already has BOTH Silver+Gold non-archived
+# (full authoring already done; recreate path is Archive→re-author).
+def _client_already_has_full(scope_owner: str, ds_code: str) -> bool:
+    silver = _snap.silver_for(
+        scope_owner=scope_owner, dataset_code=ds_code, exclude_archived=True
+    )
+    gold = _snap.gold_for(
+        scope_owner=scope_owner, dataset_code=ds_code, exclude_archived=True
+    )
+    return bool(silver) and bool(gold)
+
+
 with col_ds:
-    selected_label = st.selectbox(
-        "Dataset",
-        options=list(ds_label_to_obj.keys()),
-        index=_default_idx if bronze_datasets else None,
-    )
-    # Push selection back to URL so reload preserves the choice.
-    if selected_label and bronze_datasets:
-        _selected_code = ds_label_to_obj[selected_label]["dataset_code"]
-        if st.query_params.get("dataset") != _selected_code:
-            st.query_params["dataset"] = _selected_code
-    selected_dataset = ds_label_to_obj[selected_label] if selected_label else None
-    selected_dataset_code = str(selected_dataset["dataset_code"]) if selected_dataset else ""
-    selected_dataset_display = str(selected_dataset["display_name"]) if selected_dataset else ""
-with col_anchor:
-    anchor_options = [a.value for a in GoldAnchor]
-    default_anchor = (
-        str(selected_dataset.get("default_anchor") or "CATALOG_ANCHOR")
-        if selected_dataset
-        else "CATALOG_ANCHOR"
-    )
-    default_idx = anchor_options.index(default_anchor) if default_anchor in anchor_options else 0
-    anchor = st.selectbox(
-        "Anchor",
-        options=anchor_options,
-        index=default_idx,
-        help="CATALOG_ANCHOR = vendor mapping spec is the truth. Specialized anchors "
-        "(FHIR/X12/etc.) override when applicable.",
-    )
+    if selected_client_for_authoring == _SENTINEL:
+        st.selectbox(
+            "Dataset",
+            options=["— pick a client first —"],
+            index=0,
+            disabled=True,
+            key="dmd_pick_dataset_disabled",
+        )
+        selected_dataset = None
+    else:
+        # Filter: only datasets the client doesn't already have fully authored.
+        _ds_eligible = [
+            d
+            for d in _snap.bronze_datasets
+            if not _client_already_has_full(
+                selected_client_for_authoring, str(d["dataset_code"])
+            )
+        ]
+        if not _ds_eligible:
+            st.selectbox(
+                "Dataset",
+                options=[
+                    f"— {selected_client_for_authoring} has fully authored every dataset; "
+                    f"archive one to author again —"
+                ],
+                index=0,
+                disabled=True,
+                key="dmd_pick_dataset_full",
+            )
+            selected_dataset = None
+        else:
+            ds_label_to_obj = {
+                _SENTINEL: None,
+            }
+            for d in _ds_eligible:
+                lbl = (
+                    f"{d['display_name']}  ({d['total_fields']} fields, "
+                    f"{d['category']})"
+                )
+                ds_label_to_obj[lbl] = d
+            _ds_options = list(ds_label_to_obj.keys())
 
-if not selected_dataset:
+            _ds_default_idx = 0
+            if _dataset_qp:
+                for i, lbl in enumerate(_ds_options):
+                    obj = ds_label_to_obj[lbl]
+                    if obj and obj.get("dataset_code") == _dataset_qp:
+                        _ds_default_idx = i
+                        break
+            _selected_ds_label = st.selectbox(
+                "Dataset",
+                options=_ds_options,
+                index=_ds_default_idx,
+                key="dmd_pick_dataset",
+                help=f"Showing only datasets {selected_client_for_authoring} "
+                f"hasn't fully authored yet ({len(_ds_eligible)} of "
+                f"{len(_snap.bronze_datasets)}).",
+            )
+            selected_dataset = ds_label_to_obj.get(_selected_ds_label)
+            # Sync URL on change so refresh + back-button preserve the choice.
+            if selected_dataset and st.query_params.get("dataset") != selected_dataset["dataset_code"]:
+                st.query_params["dataset"] = selected_dataset["dataset_code"]
+            if selected_client_for_authoring and st.query_params.get("client") != selected_client_for_authoring:
+                st.query_params["client"] = selected_client_for_authoring
+
+with col_anchor:
+    if not selected_dataset:
+        st.selectbox(
+            "Anchor",
+            options=["— pick a dataset first —"],
+            index=0,
+            disabled=True,
+            key="dmd_pick_anchor_disabled",
+        )
+        anchor = None
+    else:
+        anchor_options_raw = [a.value for a in GoldAnchor]
+        anchor_options = [_SENTINEL, *anchor_options_raw]
+        default_anchor = (
+            str(selected_dataset.get("default_anchor") or "CATALOG_ANCHOR")
+            if selected_dataset
+            else "CATALOG_ANCHOR"
+        )
+        _anc_default_idx = (
+            anchor_options.index(default_anchor)
+            if default_anchor in anchor_options
+            else 0
+        )
+        _anchor_pick = st.selectbox(
+            "Anchor",
+            options=anchor_options,
+            index=_anc_default_idx,
+            key="dmd_pick_anchor",
+            help="CATALOG_ANCHOR = vendor mapping spec is the truth. "
+            "Specialized anchors (FHIR / X12 / NCPDP / HEDIS) override "
+            "when applicable.",
+        )
+        anchor = _anchor_pick if _anchor_pick != _SENTINEL else None
+
+# Surface clear status of the gate.
+selected_dataset_code = (
+    str(selected_dataset["dataset_code"]) if selected_dataset else ""
+)
+selected_dataset_display = (
+    str(selected_dataset["display_name"]) if selected_dataset else ""
+)
+_authoring_unlocked = bool(
+    selected_client_for_authoring
+    and selected_client_for_authoring != _SENTINEL
+    and selected_dataset
+    and anchor
+)
+
+# Wire selected_client_for_authoring through under the legacy variable name
+# so downstream blocks (which reference 'selected_client') continue to work.
+selected_client = (
+    selected_client_for_authoring
+    if selected_client_for_authoring != _SENTINEL
+    else None
+)
+
+if not _authoring_unlocked:
+    # Friendly gating banner — tells the operator EXACTLY what's missing.
+    _missing: list[str] = []
+    if (
+        not selected_client_for_authoring
+        or selected_client_for_authoring == _SENTINEL
+    ):
+        _missing.append("Client")
+    if not selected_dataset:
+        _missing.append("Dataset")
+    if not anchor:
+        _missing.append("Anchor")
+    st.info(
+        f"🔒 **Authoring locked.**  Pick **{', then '.join(_missing)}** "
+        f"above to unlock the layer radio + the Bronze / Silver / Gold "
+        f"design panels."
+    )
     st.stop()
 
 
