@@ -1247,7 +1247,10 @@ def _checkbox_multiselect(
     )
 
     with st.popover(btn_label, use_container_width=True):
-        # Quick actions
+        # Quick actions — must update BOTH the selection list AND every
+        # per-checkbox session_state key, otherwise the rerun re-creates
+        # checkboxes from their stale session-state values and the
+        # reconcile loop below silently undoes the bulk action.
         qa1, qa2, _ = st.columns([1, 1, 2])
         if qa1.button(
             "Select all",
@@ -1255,7 +1258,8 @@ def _checkbox_multiselect(
             use_container_width=True,
             disabled=not eff_options,
         ):
-            # Keep custom-added entries on top of the full option list.
+            for opt in eff_options:
+                st.session_state[f"{key}_cb_{opt}"] = True
             custom = [s for s in selected if s not in eff_options]
             st.session_state[state_key] = list(eff_options) + custom
             st.rerun(scope="fragment")
@@ -1265,23 +1269,27 @@ def _checkbox_multiselect(
             use_container_width=True,
             disabled=not selected,
         ):
+            for opt in eff_options:
+                st.session_state[f"{key}_cb_{opt}"] = False
             st.session_state[state_key] = []
             st.rerun(scope="fragment")
 
         st.markdown("---")
 
-        # Render checkboxes for each option
+        # Render checkboxes for each option.  Initialize per-cb session_state
+        # keys exactly once so Streamlit's widget state matches the source-
+        # of-truth `selected` list on first paint.  After init we DON'T pass
+        # value= (Streamlit ignores it once the key exists, but being explicit
+        # avoids silent drift).
         if not eff_options:
             st.caption("_(No existing options.  Use 'Add new' below.)_")
         else:
             st.caption("**Existing clients:**")
             for opt in eff_options:
                 cb_key = f"{key}_cb_{opt}"
-                # Streamlit reruns on checkbox change; we read the new value
-                # and reconcile with the selected list.
-                checked_now = st.checkbox(
-                    opt, value=opt in selected, key=cb_key
-                )
+                if cb_key not in st.session_state:
+                    st.session_state[cb_key] = opt in selected
+                checked_now = st.checkbox(opt, key=cb_key)
                 if checked_now and opt not in selected:
                     selected.append(opt)
                 elif not checked_now and opt in selected:
