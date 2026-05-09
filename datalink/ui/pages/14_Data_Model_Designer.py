@@ -948,17 +948,17 @@ def _render_client_medallion_registry() -> None:
     )
 
 
-# Top-level collapsible — user wanted "expand and collapse" on this section.
-with st.expander(
-    "🤝 Client Medallion Registry Status",
-    expanded=True,
-):
-    st.caption(
-        "Per-client schema state across all datasets where the client "
-        "has authored anything.  Clients with no authored content are "
-        "hidden.  Filter, sort, and click rows to act — every action "
-        "buffers locally and submits as a batch via 🚀 Submit at the top."
-    )
+# Top-level h2 to match Global Medallion Registry styling.  The expander
+# under it is just for collapse/show — its label is muted so the section
+# title carries the visual weight.
+st.markdown("## 🤝 Client Medallion Registry Status")
+st.caption(
+    "Per-client schema state across all datasets where the client has "
+    "authored anything. Clients with no authored content are hidden. "
+    "Filter, sort, and click rows to act — every action buffers locally "
+    "and submits as a batch via 🚀 Submit at the top."
+)
+with st.expander("Show / hide grid", expanded=True):
     _render_client_medallion_registry()
 
 
@@ -1264,52 +1264,56 @@ def _checkbox_multiselect(
     )
 
     with st.popover(btn_label, use_container_width=True):
-        # Quick actions — must update BOTH the selection list AND every
-        # per-checkbox session_state key, otherwise the rerun re-creates
-        # checkboxes from their stale session-state values and the
-        # reconcile loop below silently undoes the bulk action.
-        qa1, qa2, _ = st.columns([1, 1, 2])
-        # 'Select all' enables when at least one option is unselected.
-        all_selected = (
-            bool(eff_options)
-            and all(opt in selected for opt in eff_options)
+        # ── PowerBI-slicer pattern ────────────────────────────────────
+        # Top: search input.  Below: a single dynamic master toggle whose
+        # label reflects the FILTERED-list state.  Then the checkbox list.
+        # Custom-added items + ➕ Add-new input live at the bottom.
+        # No clutter of always-visible quick-action buttons.
+
+        search = st.text_input(
+            "🔍 Search",
+            key=f"{key}_search",
+            placeholder="filter…",
+            label_visibility="collapsed",
         )
-        # 'Clear' enables when ANY item is selected (existing or custom).
-        any_selected = bool(selected)
-        if qa1.button(
-            "Select all",
-            key=f"{key}_selall",
-            use_container_width=True,
-            disabled=not eff_options or all_selected,
-        ):
-            for opt in eff_options:
-                st.session_state[f"{key}_cb_{opt}"] = True
-            custom = [s for s in selected if s not in eff_options]
-            st.session_state[state_key] = list(eff_options) + custom
-            st.rerun(scope="fragment")
-        if qa2.button(
-            "Clear",
-            key=f"{key}_clr",
-            use_container_width=True,
-            disabled=not any_selected,
-        ):
-            for opt in eff_options:
-                st.session_state[f"{key}_cb_{opt}"] = False
-            st.session_state[state_key] = []
-            st.rerun(scope="fragment")
+        s_lc = (search or "").strip().lower()
+        filtered = (
+            [o for o in eff_options if s_lc in o.lower()] if s_lc else list(eff_options)
+        )
 
-        st.markdown("---")
+        # Master toggle — single button, dynamic label.
+        n_sel_in_filt = sum(
+            1 for o in filtered if st.session_state.get(f"{key}_cb_{o}", False)
+        )
+        all_in_filt_selected = (
+            bool(filtered) and n_sel_in_filt == len(filtered)
+        )
+        if eff_options:
+            master_label = (
+                f"✕ Clear ({len(filtered)})"
+                if all_in_filt_selected
+                else f"☑️ Select all ({n_sel_in_filt} / {len(filtered)})"
+            )
+            if st.button(
+                master_label,
+                key=f"{key}_master",
+                use_container_width=True,
+                disabled=not filtered,
+            ):
+                new_state = not all_in_filt_selected
+                for opt in filtered:
+                    st.session_state[f"{key}_cb_{opt}"] = new_state
+                st.rerun(scope="fragment")
 
-        # Render checkboxes for each option.  Initialize per-cb session_state
-        # keys exactly once so Streamlit's widget state matches the source-
-        # of-truth `selected` list on first paint.  After init we DON'T pass
-        # value= (Streamlit ignores it once the key exists, but being explicit
-        # avoids silent drift).
-        if not eff_options:
-            st.caption("_(No existing options.  Use 'Add new' below.)_")
+        # Checkbox list — bare, dense, scannable.  No extra captions /
+        # decorations; the popover is its own visual frame.
+        if not filtered:
+            if eff_options:
+                st.caption(f"_(No matches for `{search}`)_")
+            else:
+                st.caption("_(No existing options — use ➕ below)_")
         else:
-            st.caption("**Existing clients:**")
-            for opt in eff_options:
+            for opt in filtered:
                 cb_key = f"{key}_cb_{opt}"
                 if cb_key not in st.session_state:
                     st.session_state[cb_key] = opt in selected
@@ -1319,26 +1323,27 @@ def _checkbox_multiselect(
                 elif not checked_now and opt in selected:
                     selected.remove(opt)
 
-        # Custom-added clients (typed in)
+        # Custom-added clients (typed in via ➕)
         _custom = [s for s in selected if s not in eff_options]
         if _custom:
-            st.markdown("---")
-            st.caption("**Custom (will be created on submit):**")
+            st.markdown("")  # tight separator
             for c in list(_custom):
                 rm_col, lbl_col = st.columns([1, 9])
-                if rm_col.button("✕", key=f"{key}_rm_{c}"):
+                if rm_col.button(
+                    "✕", key=f"{key}_rm_{c}", help="Remove this custom entry"
+                ):
                     selected.remove(c)
                     st.session_state[state_key] = selected
                     st.rerun(scope="fragment")
-                lbl_col.markdown(f"`{c}`")
+                lbl_col.markdown(f"`{c}` _new_")
 
-        # Add-new input
+        # Add-new input — bottom-anchored.
         if allow_new:
-            st.markdown("---")
             new_val = st.text_input(
-                "➕ Add new client_id",
+                "➕ Add new",
                 key=f"{key}_new",
                 placeholder=new_placeholder,
+                label_visibility="collapsed",
             )
             if new_val:
                 norm = new_val.strip().lower()
@@ -1348,8 +1353,6 @@ def _checkbox_multiselect(
                     and norm not in eff_options
                 ):
                     selected.append(norm)
-                    # Clear the input field by removing its session-state key
-                    # before the rerun so it doesn't re-fire.
                     del st.session_state[f"{key}_new"]
                     st.session_state[state_key] = selected
                     st.rerun(scope="fragment")
@@ -1919,13 +1922,59 @@ def _render_cloning_center() -> None:
                                     for b in blocked_by_target[target]:
                                         st.markdown(f"  - {b}")
 
-
-with st.expander("📦 Cloning Center", expanded=True):
-    st.caption(
-        "Industry-standard clone-from-template flow.  All clones buffer "
-        "locally and apply via 🚀 Submit at the top — concurrency-checked "
-        "per source row.  Client → Global is forbidden (Global is sacred)."
+    # ── Inline Submit dock ─────────────────────────────────────────────
+    # Right at the bottom of every clone-mode action area.  When buffered
+    # edits exist, the green button is one click away from where the
+    # operator just pressed Plan + Buffer (no scrolling to the top).
+    _pending_now = _dmd_top.dirty_count()
+    st.markdown(
+        f"<div style='margin-top:1rem;padding:.6rem .9rem;background:#f8fafc;"
+        f"border:1px solid #cbd5e1;border-radius:8px;'>"
+        f"<strong>{('✏️ ' + str(_pending_now) + ' unsaved edit' + ('s' if _pending_now != 1 else '')) if _pending_now else '💤 No pending edits'}</strong> "
+        f"&middot; submit applies all buffered clones with optimistic-concurrency check.</div>",
+        unsafe_allow_html=True,
     )
+    s_col1, s_col2, _ = st.columns([1.3, 1, 3])
+    with s_col1:
+        if st.button(
+            f"🚀 Submit {_pending_now} change{'s' if _pending_now != 1 else ''}",
+            type="primary",
+            use_container_width=True,
+            disabled=_pending_now == 0,
+            key="cc_inline_submit",
+            help="Apply every buffered clone in one batch.",
+        ):
+            report = _dmd_top.submit_all()
+            if report.all_clean:
+                st.toast(
+                    f"✅ {report.applied_count} clone"
+                    f"{'s' if report.applied_count != 1 else ''} applied.",
+                    icon="🚀",
+                )
+                st.rerun()
+            else:
+                st.session_state["__dmd_last_report__"] = report
+                st.rerun()
+    with s_col2:
+        if st.button(
+            "🗑️ Discard",
+            use_container_width=True,
+            disabled=_pending_now == 0,
+            key="cc_inline_discard",
+            help="Drop every buffered edit without writing.",
+        ):
+            _dmd_top.discard_edits()
+            st.rerun(scope="fragment")
+
+
+st.markdown("## 📦 Cloning Center")
+st.caption(
+    "Industry-standard clone-from-template flow. All clones buffer locally "
+    "and apply via 🚀 Submit (top of page OR inline at the bottom of this "
+    "section) — concurrency-checked per source row. Client → Global is "
+    "forbidden (Global is sacred)."
+)
+with st.expander("Show / hide cloning modes", expanded=True):
     _render_cloning_center()
 
 
