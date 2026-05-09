@@ -476,6 +476,25 @@ with st.expander(
         )
     else:
         rows = [_readiness_row(d) for d in _snap.bronze_datasets]
+
+        # Sort: most-authored first.  LIVE Silver+Gold → top, then partial,
+        # then DRAFT, then 'none'.  Within same tier, alphabetical by dataset.
+        def _readiness_sort_key(r: dict[str, Any]) -> tuple[int, str]:
+            silver = r.get("Silver") or ""
+            gold = r.get("Gold") or ""
+            score = 0
+            if silver.startswith("✓ LIVE"):
+                score -= 2
+            elif silver.startswith("◌ DRAFT"):
+                score -= 1
+            if gold.startswith("✓ LIVE"):
+                score -= 2
+            elif gold.startswith("◌ DRAFT"):
+                score -= 1
+            # Lower score = more authored = sorts first when ascending.
+            return (score, str(r.get("Dataset") or ""))
+
+        rows.sort(key=_readiness_sort_key)
         df = pd.DataFrame(rows)
         styled = df.style.map(_color_status, subset=["Bronze", "Silver", "Gold"])
         st.dataframe(styled, use_container_width=True, hide_index=True, height=520)
@@ -667,9 +686,13 @@ def _render_client_medallion_registry() -> None:
             key="cmr_filter_reach",
         )
     with f3:
+        # Default sort = Reach so the most-authored rows (🟢 All levels)
+        # surface at the top, matching the user's expectation that
+        # 'Membership for Aetna' should appear above untouched datasets.
+        _sort_options = ["Reach", "Client", "Dataset", "Latest activity"]
         _sort_by = st.selectbox(
             "Sort by",
-            options=["Client", "Dataset", "Reach", "Latest activity"],
+            options=_sort_options,
             index=0,
             key="cmr_sort_by",
         )
@@ -754,14 +777,33 @@ def _render_client_medallion_registry() -> None:
             == _filter_reach.split(" (")[0]  # match the emoji+label prefix
         ]
 
-    # Apply sort
+    # Apply sort.  Reach gets a custom ordinal so '🟢 All levels' surfaces
+    # FIRST (most authored), '🟡 Up to Silver' next, then '🟠 In progress',
+    # then anything else.  Client/Dataset/Latest activity stay alphabetical
+    # / chronological.
+    _reach_rank = {
+        "🟢 All levels": 0,
+        "🟡 Up to Silver": 1,
+        "🟠 In progress": 2,
+    }
     sort_key_map = {
         "Client": lambda r: (r["Client"], r["Dataset"]),
         "Dataset": lambda r: (r["Dataset"], r["Client"]),
-        "Reach": lambda r: (r["Reach"], r["Client"]),
-        "Latest activity": lambda r: (r["Latest activity"] or "", r["Client"]),
+        "Reach": lambda r: (
+            _reach_rank.get(str(r.get("Reach", "")), 99),
+            r["Client"],
+            r["Dataset"],
+        ),
+        "Latest activity": lambda r: (
+            # Reverse-chrono: newest first.  Pad short strings so
+            # tuple comparison stays stable.
+            r["Latest activity"] or "",
+            r["Client"],
+        ),
     }
-    _rows.sort(key=sort_key_map.get(_sort_by, sort_key_map["Client"]))
+    _rows.sort(key=sort_key_map.get(_sort_by, sort_key_map["Reach"]))
+    if _sort_by == "Latest activity":
+        _rows.reverse()  # newest first for activity
 
     if not _rows:
         st.caption(
@@ -1531,7 +1573,7 @@ _authoring_clients = ["GLOBAL_CORP", *list(_snap.distinct_clients)]
 _client_qp = st.query_params.get("client")
 _dataset_qp = st.query_params.get("dataset")
 
-col_client, col_ds, col_anchor = st.columns([2, 3, 2])
+col_client, col_anchor, col_ds = st.columns([2, 2, 3])
 
 with col_client:
     _client_options = [_SENTINEL, *_authoring_clients]
@@ -1543,22 +1585,66 @@ with col_client:
         options=_client_options,
         index=_client_default_idx,
         key="dmd_pick_client",
-        help="GLOBAL_CORP = canonical template (operator builds once; clients "
-        "clone via the Cloning Center above).  Pick a real client to author "
-        "client-specific overrides.",
+        help="GLOBAL_CORP = canonical template (operator builds once; "
+        "clients clone via the Cloning Center below).  Pick a real client "
+        "to author client-specific overrides.",
     )
 
-# Determine which datasets the picked client is allowed to author.  A
-# dataset is HIDDEN if the client already has BOTH Silver+Gold non-archived
-# (full authoring already done; recreate path is Archive→re-author).
-def _client_already_has_full(scope_owner: str, ds_code: str) -> bool:
-    silver = _snap.silver_for(
+
+# Anchor-aware authoring check.  A (client, dataset, anchor) tuple is
+# 'fully authored' when both Silver AND Gold non-archived rows exist for it
+# UNDER THAT ANCHOR.  Same dataset can be (re-)authored under a DIFFERENT
+# anchor — e.g. Membership/CATALOG vs Membership/FHIR are independent.
+def _has_full_authoring_under_anchor(
+    scope_owner: str, ds_code: str, anchor_value: str
+) -> bool:
+    silver_rows = _snap.silver_for(
         scope_owner=scope_owner, dataset_code=ds_code, exclude_archived=True
     )
-    gold = _snap.gold_for(
+    silver_match = any(
+        str(r.get("silver_anchor") or "") == anchor_value for r in silver_rows
+    )
+    gold_rows = _snap.gold_for(
         scope_owner=scope_owner, dataset_code=ds_code, exclude_archived=True
     )
-    return bool(silver) and bool(gold)
+    gold_match = any(
+        str(r.get("gold_anchor") or "") == anchor_value for r in gold_rows
+    )
+    return silver_match and gold_match
+
+
+with col_anchor:
+    # Anchor unlocks once a Client is picked.  Dataset list further down
+    # depends on (client, anchor) so anchor must come BEFORE dataset.
+    if selected_client_for_authoring == _SENTINEL:
+        st.selectbox(
+            "Anchor",
+            options=["— pick a client first —"],
+            index=0,
+            disabled=True,
+            key="dmd_pick_anchor_disabled",
+        )
+        anchor = None
+    else:
+        anchor_options_raw = [a.value for a in GoldAnchor]
+        anchor_options = [_SENTINEL, *anchor_options_raw]
+        # Default to CATALOG_ANCHOR when present; otherwise sentinel.
+        _anc_default_idx = (
+            anchor_options.index("CATALOG_ANCHOR")
+            if "CATALOG_ANCHOR" in anchor_options
+            else 0
+        )
+        _anchor_pick = st.selectbox(
+            "Anchor",
+            options=anchor_options,
+            index=_anc_default_idx,
+            key="dmd_pick_anchor",
+            help="CATALOG_ANCHOR = vendor mapping spec is the truth. "
+            "Specialized anchors (FHIR / X12 / NCPDP / HEDIS) override "
+            "when applicable.  Same dataset may be authored under "
+            "DIFFERENT anchors — they're independent.",
+        )
+        anchor = _anchor_pick if _anchor_pick != _SENTINEL else None
 
 
 with col_ds:
@@ -1568,24 +1654,35 @@ with col_ds:
             options=["— pick a client first —"],
             index=0,
             disabled=True,
-            key="dmd_pick_dataset_disabled",
+            key="dmd_pick_dataset_disabled_a",
+        )
+        selected_dataset = None
+    elif anchor is None:
+        st.selectbox(
+            "Dataset",
+            options=["— pick an anchor first —"],
+            index=0,
+            disabled=True,
+            key="dmd_pick_dataset_disabled_b",
         )
         selected_dataset = None
     else:
-        # Filter: only datasets the client doesn't already have fully authored.
+        # Filter: only datasets that haven't been fully authored under THIS
+        # (client, anchor) tuple.  Same dataset still appears for a DIFFERENT
+        # anchor — they're independent authoring slots.
         _ds_eligible = [
             d
             for d in _snap.bronze_datasets
-            if not _client_already_has_full(
-                selected_client_for_authoring, str(d["dataset_code"])
+            if not _has_full_authoring_under_anchor(
+                selected_client_for_authoring, str(d["dataset_code"]), anchor
             )
         ]
         if not _ds_eligible:
             st.selectbox(
                 "Dataset",
                 options=[
-                    f"— {selected_client_for_authoring} has fully authored every dataset; "
-                    f"archive one to author again —"
+                    f"— {selected_client_for_authoring} has fully authored every "
+                    f"dataset under {anchor}; archive one to author again —"
                 ],
                 index=0,
                 disabled=True,
@@ -1593,9 +1690,7 @@ with col_ds:
             )
             selected_dataset = None
         else:
-            ds_label_to_obj = {
-                _SENTINEL: None,
-            }
+            ds_label_to_obj = {_SENTINEL: None}
             for d in _ds_eligible:
                 lbl = (
                     f"{d['display_name']}  ({d['total_fields']} fields, "
@@ -1616,25 +1711,39 @@ with col_ds:
                 options=_ds_options,
                 index=_ds_default_idx,
                 key="dmd_pick_dataset",
-                help=f"Showing only datasets {selected_client_for_authoring} "
-                f"hasn't fully authored yet ({len(_ds_eligible)} of "
-                f"{len(_snap.bronze_datasets)}).",
+                help=(
+                    f"Showing only datasets {selected_client_for_authoring} "
+                    f"hasn't fully authored under {anchor} yet "
+                    f"({len(_ds_eligible)} of {len(_snap.bronze_datasets)})."
+                ),
             )
             selected_dataset = ds_label_to_obj.get(_selected_ds_label)
             # Sync URL on change so refresh + back-button preserve the choice.
-            if selected_dataset and st.query_params.get("dataset") != selected_dataset["dataset_code"]:
+            if (
+                selected_dataset
+                and st.query_params.get("dataset") != selected_dataset["dataset_code"]
+            ):
                 st.query_params["dataset"] = selected_dataset["dataset_code"]
-            if selected_client_for_authoring and st.query_params.get("client") != selected_client_for_authoring:
+            if (
+                selected_client_for_authoring
+                and st.query_params.get("client") != selected_client_for_authoring
+            ):
                 st.query_params["client"] = selected_client_for_authoring
 
-with col_anchor:
+
+# Block of code below was the OLD anchor selectbox; superseded by the
+# anchor block above (now positioned BEFORE dataset).  Kept here as a
+# no-op fallthrough to preserve the rest of the if/else structure that
+# the page expects.  Anchor is already resolved — the next line just
+# re-binds it as a noop.
+if False:
     if not selected_dataset:
         st.selectbox(
             "Anchor",
             options=["— pick a dataset first —"],
             index=0,
             disabled=True,
-            key="dmd_pick_anchor_disabled",
+            key="dmd_pick_anchor_disabled_legacy",
         )
         anchor = None
     else:
@@ -1654,7 +1763,7 @@ with col_anchor:
             "Anchor",
             options=anchor_options,
             index=_anc_default_idx,
-            key="dmd_pick_anchor",
+            key="dmd_pick_anchor_legacy",
             help="CATALOG_ANCHOR = vendor mapping spec is the truth. "
             "Specialized anchors (FHIR / X12 / NCPDP / HEDIS) override "
             "when applicable.",
