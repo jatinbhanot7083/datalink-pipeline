@@ -1217,6 +1217,128 @@ def _cc_build_gold_applier(
     return apply
 
 
+def _checkbox_multiselect(
+    *,
+    label: str,
+    options: list[str],
+    key: str,
+    exclude: list[str] | None = None,
+    allow_new: bool = True,
+    new_placeholder: str = "type a new client_id and press Enter",
+) -> list[str]:
+    """Modern multi-select dropdown with CHECKBOXES — opens as a popover,
+    operator can tick existing options OR type a brand-new client_id and
+    press Enter to add it inline.  Selection persists in session_state.
+
+    Returns the current selection list.
+
+    Pattern is the same one PowerBI / Looker / Notion use for tag-style
+    multi-select: click button → checkbox panel opens → tick → close.
+    """
+    state_key = f"__cms_{key}__"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = []
+    selected: list[str] = list(st.session_state[state_key])
+
+    eff_options = [o for o in options if not exclude or o not in exclude]
+
+    btn_label = (
+        f"☑️ {label} — {len(selected)} selected" if selected else f"☑️ {label}"
+    )
+
+    with st.popover(btn_label, use_container_width=True):
+        # Quick actions
+        qa1, qa2, _ = st.columns([1, 1, 2])
+        if qa1.button(
+            "Select all",
+            key=f"{key}_selall",
+            use_container_width=True,
+            disabled=not eff_options,
+        ):
+            # Keep custom-added entries on top of the full option list.
+            custom = [s for s in selected if s not in eff_options]
+            st.session_state[state_key] = list(eff_options) + custom
+            st.rerun(scope="fragment")
+        if qa2.button(
+            "Clear",
+            key=f"{key}_clr",
+            use_container_width=True,
+            disabled=not selected,
+        ):
+            st.session_state[state_key] = []
+            st.rerun(scope="fragment")
+
+        st.markdown("---")
+
+        # Render checkboxes for each option
+        if not eff_options:
+            st.caption("_(No existing options.  Use 'Add new' below.)_")
+        else:
+            st.caption("**Existing clients:**")
+            for opt in eff_options:
+                cb_key = f"{key}_cb_{opt}"
+                # Streamlit reruns on checkbox change; we read the new value
+                # and reconcile with the selected list.
+                checked_now = st.checkbox(
+                    opt, value=opt in selected, key=cb_key
+                )
+                if checked_now and opt not in selected:
+                    selected.append(opt)
+                elif not checked_now and opt in selected:
+                    selected.remove(opt)
+
+        # Custom-added clients (typed in)
+        _custom = [s for s in selected if s not in eff_options]
+        if _custom:
+            st.markdown("---")
+            st.caption("**Custom (will be created on submit):**")
+            for c in list(_custom):
+                rm_col, lbl_col = st.columns([1, 9])
+                if rm_col.button("✕", key=f"{key}_rm_{c}"):
+                    selected.remove(c)
+                    st.session_state[state_key] = selected
+                    st.rerun(scope="fragment")
+                lbl_col.markdown(f"`{c}`")
+
+        # Add-new input
+        if allow_new:
+            st.markdown("---")
+            new_val = st.text_input(
+                "➕ Add new client_id",
+                key=f"{key}_new",
+                placeholder=new_placeholder,
+            )
+            if new_val:
+                norm = new_val.strip().lower()
+                if (
+                    norm
+                    and norm not in selected
+                    and norm not in eff_options
+                ):
+                    selected.append(norm)
+                    # Clear the input field by removing its session-state key
+                    # before the rerun so it doesn't re-fire.
+                    del st.session_state[f"{key}_new"]
+                    st.session_state[state_key] = selected
+                    st.rerun(scope="fragment")
+
+    # Persist + show chips outside the popover so the operator sees the
+    # current selection without having to reopen the panel.
+    st.session_state[state_key] = selected
+    if selected:
+        st.markdown(
+            "Selected: "
+            + " ".join(
+                f'<span style="display:inline-block;background:#e0e7ff;'
+                f"color:#1e3a8a;padding:.15rem .55rem;border-radius:12px;"
+                f'margin-right:.3rem;font-size:.82rem;">{s}</span>'
+                for s in selected
+            ),
+            unsafe_allow_html=True,
+        )
+    return list(selected)
+
+
 @st.fragment
 def _render_cloning_center() -> None:
     """The 3-mode clone surface. All actions buffer; nothing writes here."""
@@ -1242,16 +1364,10 @@ def _render_cloning_center() -> None:
         )
         col1, col2 = st.columns([3, 1])
         with col1:
-            _full_targets = st.multiselect(
-                "Target clients (pick existing or type new + Enter)",
+            _full_targets = _checkbox_multiselect(
+                label="Target clients",
                 options=_snap.distinct_clients,
-                default=[],
-                key="cc_full_targets",
-                placeholder="aetna · bcbs · humana · (type to add new)",
-                accept_new_options=True,
-                help="Multi-select. Pick existing clients OR type a new "
-                "client_id and press Enter — same guard rails apply per "
-                "target.",
+                key="cc_full",
             )
         with col2:
             st.write("")  # vertical alignment
@@ -1405,15 +1521,10 @@ def _render_cloning_center() -> None:
                 key="cc_gd_dataset",
             )
         with col2:
-            _gd_targets = st.multiselect(
-                "Target clients (pick existing or type new + Enter)",
+            _gd_targets = _checkbox_multiselect(
+                label="Target clients",
                 options=_snap.distinct_clients,
-                default=[],
-                key="cc_gd_targets",
-                placeholder="aetna · bcbs · (type to add new)",
-                accept_new_options=True,
-                help="Multi-select. Each target gets its own buffered "
-                "clone — guard rails apply per target.",
+                key="cc_gd",
             )
         with col3:
             st.write("")
@@ -1611,16 +1722,11 @@ def _render_cloning_center() -> None:
                 _cc_tgt_options = [
                     c for c in _snap.distinct_clients if c != _cc_src_client
                 ]
-                _cc_tgt_clients = st.multiselect(
-                    "Target clients (pick existing or type new + Enter)",
+                _cc_tgt_clients = _checkbox_multiselect(
+                    label="Target clients",
                     options=_cc_tgt_options,
-                    default=[],
-                    key="cc_cc_targets",
-                    placeholder="bcbs · humana · (type to add new)",
-                    accept_new_options=True,
-                    help="Multi-select.  Source client is excluded from "
-                    "options.  Type a new client_id and press Enter to "
-                    "add a brand-new tenant.",
+                    key="cc_cc",
+                    exclude=[_cc_src_client] if _cc_src_client else None,
                 )
             _cc_go = st.button(
                 "📦 Buffer client → client clone(s)",
