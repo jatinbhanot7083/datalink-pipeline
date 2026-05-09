@@ -514,6 +514,158 @@ st.markdown("---")
 # ═════════════════════════════════════════════════════════════════════════════
 
 
+def _status_pill(s: str | None) -> str:
+    """Module-level helper so the schema inspector + other renderers
+    share a single pill mapping."""
+    return {
+        "DRAFT": "📝 DRAFT",
+        "PENDING_REVIEW": "🟡 PENDING",
+        "APPROVED": "✅ APPROVED",
+        "LIVE": "🟢 LIVE",
+        "ARCHIVED": "🗄️ ARCHIVED",
+        "REJECTED": "🔴 REJECTED",
+    }.get(str(s or ""), "—")
+
+
+def _render_schema_inspector(
+    *,
+    layer: str,
+    row: dict[str, Any],
+    cols: list[dict[str, Any]],
+    entity_id: str,
+) -> None:
+    """Comprehensive schema inspector — the *real* review surface.
+
+    Tabs:
+      * 📋 Columns — full column list with types + PII/PHI/BK flags
+      * 🧠 AI Proposal — narrative rationale the AI wrote (json + prose)
+      * 🔗 Lineage — forked-from / parent metadata
+      * 🗒️ Audit — created_by/at, approved_by/at, archived_at, version
+
+    Uses st.tabs so the popover stays compact.  All data comes from the
+    row dict + the page snapshot — no extra Snowflake queries.
+    """
+    layer_emoji = "🥈" if layer == "Silver" else "🥇"
+    st.markdown(
+        f"##### {layer_emoji} {layer} · {row.get('dataset_code')} · "
+        f"v{row.get('version')} · {_status_pill(row.get('status'))}"
+    )
+
+    tab_cols, tab_ai, tab_lineage, tab_audit = st.tabs(
+        ["📋 Columns", "🧠 AI Proposal", "🔗 Lineage", "🗒️ Audit"]
+    )
+
+    with tab_cols:
+        if not cols:
+            st.info(
+                f"No columns registered for this {layer} version.  This "
+                "usually means the schema was authored via Manual mode "
+                "without populating the column list."
+            )
+        else:
+            _cv = [
+                {
+                    "#": c.get("column_order"),
+                    "Column": c.get("gold_column_name") or c.get("column_name"),
+                    "Type": c.get("logical_type"),
+                    "Null": "✓" if c.get("nullable") else "—",
+                    "BK": "🔑" if c.get("is_business_key") else "",
+                    "PII": "🔒" if c.get("is_pii") else "",
+                    "PHI": "🩺" if c.get("is_phi") else "",
+                    "Description": (c.get("description") or "")[:120],
+                }
+                for c in cols
+            ]
+            st.dataframe(
+                pd.DataFrame(_cv),
+                use_container_width=True,
+                hide_index=True,
+                height=min(500, 80 + 35 * len(_cv)),
+            )
+            st.caption(
+                f"{len(_cv)} columns · "
+                f"{sum(1 for c in cols if c.get('is_business_key'))} BK · "
+                f"{sum(1 for c in cols if c.get('is_pii'))} PII · "
+                f"{sum(1 for c in cols if c.get('is_phi'))} PHI"
+            )
+
+    with tab_ai:
+        anchor_lbl = (
+            row.get("silver_anchor")
+            if layer == "Silver"
+            else row.get("gold_anchor")
+        )
+        rat = (row.get("ai_rationale") or "").strip()
+        if rat:
+            st.markdown(f"**Anchor:** `{anchor_lbl or '—'}`")
+            st.markdown("**Rationale:**")
+            st.markdown(rat)
+        else:
+            st.caption(
+                "_(No AI rationale recorded — schema was authored Manual or "
+                "Imported, not via AI Construct.)_"
+            )
+        # Token cost telemetry
+        tok = row.get("ai_token_count") or 0
+        lat = row.get("ai_latency_ms") or 0
+        if tok or lat:
+            st.markdown("---")
+            st.caption(
+                f"AI cost: **{tok:,} tokens** · "
+                f"latency: **{lat:,} ms**"
+            )
+        # Raw proposal JSON
+        raw_json = row.get("ai_proposal_json")
+        if raw_json:
+            with st.expander("🧬 Raw AI proposal JSON", expanded=False):
+                if isinstance(raw_json, str):
+                    try:
+                        st.json(json.loads(raw_json), expanded=False)
+                    except json.JSONDecodeError:
+                        st.code(raw_json, language="json")
+                else:
+                    st.json(raw_json, expanded=False)
+
+    with tab_lineage:
+        forked_v = row.get("forked_from_global_version")
+        source = row.get("source") or "—"
+        scope = row.get("scope_owner") or "—"
+        st.markdown(f"**Source:** `{source}`")
+        st.markdown(f"**Scope owner:** `{scope}`")
+        if forked_v is not None:
+            st.markdown(f"**Forked from:** Global v{forked_v}")
+            st.caption(
+                "_(Cloning Center INSERTed this row from a Global template.  "
+                "The forked version is what was live at clone time — used "
+                "by the Compatibility Advisor for migration impact.)_"
+            )
+        else:
+            st.caption(
+                "_(Not forked — this row was authored directly, not cloned "
+                "from a Global template.)_"
+            )
+
+    with tab_audit:
+        st.markdown(f"**Created by:** `{row.get('created_by') or '—'}`")
+        st.markdown(f"**Created at:** `{str(row.get('created_at') or '')[:19]}`")
+        if row.get("submitted_at"):
+            st.markdown(
+                f"**Submitted at:** `{str(row['submitted_at'])[:19]}`"
+            )
+        if row.get("approved_by"):
+            st.markdown(
+                f"**Approved by:** `{row['approved_by']}` at "
+                f"`{str(row.get('approved_at') or '')[:19]}`"
+            )
+        if row.get("archived_at"):
+            st.markdown(
+                f"**Archived at:** `{str(row['archived_at'])[:19]}`"
+            )
+        st.markdown(f"**Notes:** {row.get('notes') or '_(none)_'}")
+        st.markdown("---")
+        st.caption(f"silver/gold_dataset_id: `{entity_id}`")
+
+
 @st.fragment
 def _render_client_medallion_registry() -> None:
     # Phase 17.6 (Option B) — cells keyed by (client, dataset).  The unique
@@ -615,15 +767,9 @@ def _render_client_medallion_registry() -> None:
             key="cmr_sort_by",
         )
 
-    # Compute reach + status pills per cell.
-    def _status_pill(s: str | None) -> str:
-        return {
-            "DRAFT": "📝 DRAFT",
-            "PENDING_REVIEW": "🟡 PENDING",
-            "APPROVED": "✅ APPROVED",
-            "LIVE": "🟢 LIVE",
-            "REJECTED": "🔴 REJECTED",
-        }.get(str(s or ""), "—")
+    # Compute reach + status pills per cell.  _status_pill is defined at
+    # module level (just above _render_schema_inspector) so the inspector
+    # can use it too.
 
     def _reach(cell: dict[str, Any]) -> str:
         s = cell.get("silver")
@@ -794,12 +940,12 @@ def _render_client_medallion_registry() -> None:
             f"{str(row.get('created_at') or '')[:19]}"
         )
 
-        # Phase 17.6.5 — direct-write 2-step lifecycle:
-        #   DRAFT     → 📋 Review     → APPROVED
-        #   APPROVED  → ✅ Make LIVE  → LIVE
-        #   any non-archived → 🗄️ Archive
+        # Phase 17.6.6 — state-aware action panel.
+        # DRAFT     → 🚀 Make LIVE · 🗑️ Discard · 🗄️ Archive · 👁️ View
+        # LIVE      → 🗄️ Archive · 👁️ View      (locked for edits)
+        # ARCHIVED  → 👁️ View                    (history only)
         # Each click writes immediately to Snowflake, invalidates the
-        # snapshot, and reruns the page so the grid reflects new state.
+        # snapshot, and reruns the page.
         entity_id = str(
             row.get("silver_dataset_id" if layer == "Silver" else "gold_dataset_id")
         )
@@ -812,25 +958,52 @@ def _render_client_medallion_registry() -> None:
             "silver_dataset_id" if layer == "Silver" else "gold_dataset_id"
         )
 
-        def _direct_set_status(new_status: str, *, set_approved_by: bool) -> None:
-            set_clauses = [f"status = '{new_status}'"]
-            params = {"id": entity_id}
-            if set_approved_by:
-                set_clauses.append("approved_at = CURRENT_TIMESTAMP()")
-                set_clauses.append("approved_by = $by")
-                params["by"] = "ui:client_medallion"
+        def _direct_make_live() -> None:
             with _warehouse(readonly=False) as _wh_w:
                 _wh_w.execute(
                     f"UPDATE {layer_table} "
-                    f"SET {', '.join(set_clauses)} "
+                    f"SET status = 'LIVE', "
+                    f"    approved_at = CURRENT_TIMESTAMP(), "
+                    f"    approved_by = 'ui:client_medallion' "
                     f"WHERE {layer_id_col} = $id",
-                    params,
+                    {"id": entity_id},
                 )
             _dmd_top.invalidate()
-            st.toast(
-                f"✅ {layer} → {new_status}",
-                icon="🚀",
-            )
+            st.toast(f"🟢 {layer} now LIVE", icon="🚀")
+            st.rerun()
+
+        def _direct_discard() -> None:
+            """Hard delete — DRAFT only.  Removes the row + child rows.
+            Discard means 'this clone was a mistake' — wipe it."""
+            with _warehouse(readonly=False) as _wh_w:
+                if layer == "Silver":
+                    _wh_w.execute(
+                        f"DELETE FROM {CONTROL_SCHEMA}.bronze_to_silver_mappings "
+                        f"WHERE silver_dataset_id = $id",
+                        {"id": entity_id},
+                    )
+                    _wh_w.execute(
+                        f"DELETE FROM {CONTROL_SCHEMA}.global_silver_schema_columns "
+                        f"WHERE silver_dataset_id = $id",
+                        {"id": entity_id},
+                    )
+                    _wh_w.execute(
+                        f"DELETE FROM {CONTROL_SCHEMA}.global_silver_schema_tables "
+                        f"WHERE silver_dataset_id = $id",
+                        {"id": entity_id},
+                    )
+                else:
+                    _wh_w.execute(
+                        f"DELETE FROM {CONTROL_SCHEMA}.global_gold_schema_fields "
+                        f"WHERE gold_dataset_id = $id",
+                        {"id": entity_id},
+                    )
+                _wh_w.execute(
+                    f"DELETE FROM {layer_table} WHERE {layer_id_col} = $id",
+                    {"id": entity_id},
+                )
+            _dmd_top.invalidate()
+            st.toast(f"🗑️ Discarded {layer} v{row.get('version')}", icon="✅")
             st.rerun()
 
         def _direct_archive() -> None:
@@ -846,40 +1019,23 @@ def _render_client_medallion_registry() -> None:
             st.toast(f"🗄️ Archived {layer}", icon="✅")
             st.rerun()
 
-        ac1, ac2, ac3 = st.columns([1.5, 1, 1])
+        # Action button row — state-driven, no useless buttons.
+        ac1, ac2, ac3, ac4 = st.columns([1.4, 1, 1, 1])
+
         with ac1:
-            if status == "DRAFT":
+            # Make LIVE — only when row is in a pre-LIVE non-archived state
+            if status in ("DRAFT", "APPROVED", "PENDING_REVIEW"):
                 if st.button(
-                    "📋 Review",
-                    use_container_width=True,
-                    type="primary",
-                    key=f"cmr_review_{layer}_{entity_id}",
-                    help="Mark as APPROVED — you've reviewed the schema and "
-                    "approve it for downstream use.",
-                ):
-                    _direct_set_status("APPROVED", set_approved_by=True)
-            elif status == "APPROVED":
-                if st.button(
-                    "✅ Make LIVE",
+                    "🚀 Make LIVE",
                     use_container_width=True,
                     type="primary",
                     key=f"cmr_live_{layer}_{entity_id}",
-                    help="Promote APPROVED → LIVE.  Pipeline Architect will "
-                    "build physical Snowflake objects from this.",
+                    help="Promote this row directly to LIVE.  Once LIVE, "
+                    "the schema is locked for edits — only Archive is "
+                    "allowed.",
                 ):
-                    _direct_set_status("LIVE", set_approved_by=False)
-            elif status in ("PENDING_REVIEW",):
-                # Legacy 4-step still supported — collapse PENDING_REVIEW
-                # straight to APPROVED on click.
-                if st.button(
-                    "📋 Approve",
-                    use_container_width=True,
-                    type="primary",
-                    key=f"cmr_review_{layer}_{entity_id}",
-                ):
-                    _direct_set_status("APPROVED", set_approved_by=True)
+                    _direct_make_live()
             else:
-                # LIVE / ARCHIVED / REJECTED — terminal-ish; no advance button.
                 st.button(
                     {
                         "LIVE": "🟢 Already LIVE",
@@ -888,45 +1044,73 @@ def _render_client_medallion_registry() -> None:
                     }.get(status, status),
                     use_container_width=True,
                     disabled=True,
-                    key=f"cmr_terminal_{layer}_{entity_id}",
+                    key=f"cmr_locked_{layer}_{entity_id}",
+                    help="LIVE / ARCHIVED schemas are locked for edits.  "
+                    "View the schema (right) to inspect, archive (and "
+                    "re-author) if you need changes.",
                 )
+
         with ac2:
-            if status != "ARCHIVED" and st.button(
-                "🗄️ Archive",
-                use_container_width=True,
-                key=f"cmr_archive_{layer}_{entity_id}",
-                help="Soft-delete this version. Row preserved for audit. "
-                "Frees the (client, dataset) slot for re-authoring.",
-            ):
-                _direct_archive()
+            # Discard — DRAFT only.  Hard delete.
+            if status == "DRAFT":
+                if st.button(
+                    "🗑️ Discard",
+                    use_container_width=True,
+                    key=f"cmr_discard_{layer}_{entity_id}",
+                    help="Hard-delete this DRAFT.  Use only if the clone "
+                    "was a mistake — the row + its children are removed.",
+                ):
+                    _direct_discard()
+            else:
+                st.button(
+                    "🗑️ Discard",
+                    use_container_width=True,
+                    disabled=True,
+                    key=f"cmr_discard_disabled_{layer}_{entity_id}",
+                    help="Discard is for DRAFT only.  Use Archive for "
+                    "non-DRAFT rows.",
+                )
+
         with ac3:
+            # Archive — any non-archived state.
+            if status != "ARCHIVED":
+                if st.button(
+                    "🗄️ Archive",
+                    use_container_width=True,
+                    key=f"cmr_archive_{layer}_{entity_id}",
+                    help="Soft-delete.  Row stays in DB for audit.  Frees "
+                    "the (client, dataset) slot for re-authoring.",
+                ):
+                    _direct_archive()
+            else:
+                st.button(
+                    "🗄️ Archived",
+                    use_container_width=True,
+                    disabled=True,
+                    key=f"cmr_archive_disabled_{layer}_{entity_id}",
+                )
+
+        with ac4:
+            # 👁️ View Schema — comprehensive: columns + AI proposal +
+            # lineage.  Uses st.popover so the inspection panel doesn't
+            # push the grid layout around.
             cols_dict = (
                 _snap.silver_columns_by_dataset.get(entity_id, [])
                 if layer == "Silver"
                 else _snap.gold_fields_by_dataset.get(entity_id, [])
             )
             with st.popover(
-                f"👁️ Columns ({len(cols_dict)})",
+                "👁️ View Schema",
                 use_container_width=True,
+                help="Open a full schema inspector — columns, AI proposal, "
+                "lineage, DDL preview.",
             ):
-                if not cols_dict:
-                    st.info(f"No columns registered for this {layer} version.")
-                else:
-                    _cv = [
-                        {
-                            "#": c.get("column_order"),
-                            "Column": c.get("gold_column_name") or c.get("column_name"),
-                            "Type": c.get("logical_type"),
-                            "Null": "✓" if c.get("nullable") else "—",
-                            "BK": "🔑" if c.get("is_business_key") else "",
-                            "PII": "🔒" if c.get("is_pii") else "",
-                            "PHI": "🩺" if c.get("is_phi") else "",
-                        }
-                        for c in cols_dict
-                    ]
-                    st.dataframe(
-                        pd.DataFrame(_cv), use_container_width=True, hide_index=True
-                    )
+                _render_schema_inspector(
+                    layer=layer,
+                    row=row,
+                    cols=cols_dict,
+                    entity_id=entity_id,
+                )
 
     with s_col:
         _layer_action_panel("Silver", _silver)
@@ -1390,19 +1574,59 @@ def _checkbox_multiselect(
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def _cc_run_silver_clone_now(source_silver_id: str, target_client: str) -> None:
-    """Direct-write Silver clone.  Wraps the existing applier in a
-    warehouse_ctx so the click handler doesn't have to."""
+def _cc_run_silver_clone_now(
+    source_silver_id: str, target_client: str, *, target_status: str = "DRAFT"
+) -> None:
+    """Direct-write Silver clone.  Lands as DRAFT by default; pass
+    target_status='LIVE' for save-and-make-live.  Sets approved_by/at
+    when target_status='LIVE' so audit trail is intact."""
     applier = _cc_build_silver_applier(source_silver_id, target_client)
     with _warehouse(readonly=False) as _wh_w:
         applier(_wh_w)
+        if target_status != "DRAFT":
+            # Locate the just-inserted row by created_by + most-recent
+            # created_at scoped to (target_client, this dataset).  The
+            # applier writes created_by='ui:cloning_center'.
+            _wh_w.execute(
+                f"UPDATE {CONTROL_SCHEMA}.global_silver_schema_datasets "
+                f"SET status = $st, "
+                f"    approved_at = CURRENT_TIMESTAMP(), "
+                f"    approved_by = 'ui:cloning_center' "
+                f"WHERE silver_dataset_id = ("
+                f"  SELECT silver_dataset_id "
+                f"  FROM {CONTROL_SCHEMA}.global_silver_schema_datasets "
+                f"  WHERE scope_owner = $owner "
+                f"    AND created_by = 'ui:cloning_center' "
+                f"    AND status = 'DRAFT' "
+                f"  ORDER BY created_at DESC LIMIT 1"
+                f")",
+                {"st": target_status, "owner": target_client},
+            )
 
 
-def _cc_run_gold_clone_now(source_gold_id: str, target_client: str) -> None:
-    """Direct-write Gold clone."""
+def _cc_run_gold_clone_now(
+    source_gold_id: str, target_client: str, *, target_status: str = "DRAFT"
+) -> None:
+    """Direct-write Gold clone — DRAFT or LIVE."""
     applier = _cc_build_gold_applier(source_gold_id, target_client)
     with _warehouse(readonly=False) as _wh_w:
         applier(_wh_w)
+        if target_status != "DRAFT":
+            _wh_w.execute(
+                f"UPDATE {CONTROL_SCHEMA}.global_gold_schema_datasets "
+                f"SET status = $st, "
+                f"    approved_at = CURRENT_TIMESTAMP(), "
+                f"    approved_by = 'ui:cloning_center' "
+                f"WHERE gold_dataset_id = ("
+                f"  SELECT gold_dataset_id "
+                f"  FROM {CONTROL_SCHEMA}.global_gold_schema_datasets "
+                f"  WHERE scope_owner = $owner "
+                f"    AND created_by = 'ui:cloning_center' "
+                f"    AND status = 'DRAFT' "
+                f"  ORDER BY created_at DESC LIMIT 1"
+                f")",
+                {"st": target_status, "owner": target_client},
+            )
 
 
 @st.fragment
@@ -1438,7 +1662,7 @@ def _render_cloning_center() -> None:
             "client.  Datasets the target already has (any non-archived "
             "Silver+Gold) are silently SKIPPED — never overwritten."
         )
-        col1, col2 = st.columns([3, 1.4])
+        col1, col2, col3 = st.columns([3, 1.3, 1.3])
         with col1:
             if not _snap.distinct_clients:
                 _full_target = st.text_input(
@@ -1465,14 +1689,28 @@ def _render_cloning_center() -> None:
                 else:
                     _full_target = _pick
         with col2:
-            st.write("")  # vertical alignment
-            _full_go = st.button(
-                "📦 Clone all Globals → client",
+            st.write("")
+            _full_save_draft = st.button(
+                "💾 Save as Draft",
+                use_container_width=True,
+                disabled=not _full_target,
+                key="cc_full_save_draft",
+                help="Clone every LIVE Global Silver+Gold to the target as "
+                "DRAFT.  You'll review + Make LIVE in the registry above.",
+            )
+        with col3:
+            st.write("")
+            _full_save_live = st.button(
+                "🚀 Save & Make LIVE",
                 type="primary",
                 use_container_width=True,
                 disabled=not _full_target,
-                key="cc_full_clone",
+                key="cc_full_save_live",
+                help="Clone + immediately mark the new rows LIVE.  Skip the "
+                "review step.  Use only if you trust the source.",
             )
+        _full_go = _full_save_draft or _full_save_live
+        _full_target_status = "LIVE" if _full_save_live else "DRAFT"
 
         if _full_go and _full_target:
             target = _cc_target_client_normalized(_full_target)
@@ -1491,7 +1729,9 @@ def _render_cloning_center() -> None:
                         continue
                     try:
                         _cc_run_silver_clone_now(
-                            str(src.get("silver_dataset_id")), target
+                            str(src.get("silver_dataset_id")),
+                            target,
+                            target_status=_full_target_status,
                         )
                         cloned.append(f"Silver {ds} v{src.get('version')}")
                     except Exception as exc:
@@ -1506,7 +1746,9 @@ def _render_cloning_center() -> None:
                         continue
                     try:
                         _cc_run_gold_clone_now(
-                            str(src.get("gold_dataset_id")), target
+                            str(src.get("gold_dataset_id")),
+                            target,
+                            target_status=_full_target_status,
                         )
                         cloned.append(f"Gold {ds} v{src.get('version')}")
                     except Exception as exc:
@@ -1543,7 +1785,7 @@ def _render_cloning_center() -> None:
             "client.  Source must be LIVE (not DRAFT/APPROVED).  Either "
             "layer alone is cloned if the other doesn't qualify."
         )
-        col1, col2, col3 = st.columns([2, 2, 1.4])
+        col1, col2, col3, col4 = st.columns([2, 2, 1.3, 1.3])
         with col1:
             _live_ds = sorted(
                 {
@@ -1585,8 +1827,21 @@ def _render_cloning_center() -> None:
                     _gd_target = _pick
         with col3:
             st.write("")
-            _gd_go = st.button(
-                "📦 Clone",
+            _gd_save_draft = st.button(
+                "💾 Save as Draft",
+                use_container_width=True,
+                disabled=not (
+                    _gd_dataset
+                    and _gd_dataset != "— Select —"
+                    and _gd_target
+                ),
+                key="cc_gd_save_draft",
+                help="Clone source LIVE Silver+Gold to target as DRAFT.",
+            )
+        with col4:
+            st.write("")
+            _gd_save_live = st.button(
+                "🚀 Save & Make LIVE",
                 type="primary",
                 use_container_width=True,
                 disabled=not (
@@ -1594,8 +1849,11 @@ def _render_cloning_center() -> None:
                     and _gd_dataset != "— Select —"
                     and _gd_target
                 ),
-                key="cc_gd_clone",
+                key="cc_gd_save_live",
+                help="Clone + immediately mark LIVE.  Skip review.",
             )
+        _gd_go = _gd_save_draft or _gd_save_live
+        _gd_target_status = "LIVE" if _gd_save_live else "DRAFT"
 
         if _gd_go:
             target = _cc_target_client_normalized(_gd_target)
@@ -1614,7 +1872,9 @@ def _render_cloning_center() -> None:
                 if _src_s and not _cc_silver_blocks(target, ds):
                     try:
                         _cc_run_silver_clone_now(
-                            str(_src_s["silver_dataset_id"]), target
+                            str(_src_s["silver_dataset_id"]),
+                            target,
+                            target_status=_gd_target_status,
                         )
                         cloned_layers.append(f"Silver v{_src_s.get('version')}")
                     except Exception as exc:
@@ -1635,7 +1895,9 @@ def _render_cloning_center() -> None:
                 if _src_g and not _cc_gold_blocks(target, ds):
                     try:
                         _cc_run_gold_clone_now(
-                            str(_src_g["gold_dataset_id"]), target
+                            str(_src_g["gold_dataset_id"]),
+                            target,
+                            target_status=_gd_target_status,
                         )
                         cloned_layers.append(f"Gold v{_src_g.get('version')}")
                     except Exception as exc:
@@ -1683,7 +1945,7 @@ def _render_cloning_center() -> None:
                 "or B to seed a client from Global first."
             )
         else:
-            col1, col2, col3, col4 = st.columns([1.5, 2, 2, 1.2])
+            col1, col2, col3, col4, col5 = st.columns([1.5, 2, 2, 1.3, 1.3])
             with col1:
                 _src_client = st.selectbox(
                     "Source client",
@@ -1749,8 +2011,20 @@ def _render_cloning_center() -> None:
                     _cc_target = _tgt_pick
             with col4:
                 st.write("")
-                _cc_go = st.button(
-                    "📦 Clone",
+                _cc_save_draft = st.button(
+                    "💾 Save as Draft",
+                    use_container_width=True,
+                    disabled=not (
+                        _src_client != "— Select —"
+                        and _cc_dataset != "— Select —"
+                        and _cc_target
+                    ),
+                    key="cc_cc_save_draft",
+                )
+            with col5:
+                st.write("")
+                _cc_save_live = st.button(
+                    "🚀 Save & Make LIVE",
                     type="primary",
                     use_container_width=True,
                     disabled=not (
@@ -1758,8 +2032,10 @@ def _render_cloning_center() -> None:
                         and _cc_dataset != "— Select —"
                         and _cc_target
                     ),
-                    key="cc_cc_clone",
+                    key="cc_cc_save_live",
                 )
+            _cc_go = _cc_save_draft or _cc_save_live
+            _cc_target_status = "LIVE" if _cc_save_live else "DRAFT"
 
             if _cc_go:
                 target = _cc_target_client_normalized(_cc_target)
@@ -1786,7 +2062,9 @@ def _render_cloning_center() -> None:
                     if _src_s_pick and not _cc_silver_blocks(target, ds):
                         try:
                             _cc_run_silver_clone_now(
-                                str(_src_s_pick["silver_dataset_id"]), target
+                                str(_src_s_pick["silver_dataset_id"]),
+                                target,
+                                target_status=_cc_target_status,
                             )
                             cloned_layers.append(
                                 f"Silver v{_src_s_pick.get('version')}"
@@ -1815,7 +2093,9 @@ def _render_cloning_center() -> None:
                     if _src_g_pick and not _cc_gold_blocks(target, ds):
                         try:
                             _cc_run_gold_clone_now(
-                                str(_src_g_pick["gold_dataset_id"]), target
+                                str(_src_g_pick["gold_dataset_id"]),
+                                target,
+                                target_status=_cc_target_status,
                             )
                             cloned_layers.append(
                                 f"Gold v{_src_g_pick.get('version')}"
