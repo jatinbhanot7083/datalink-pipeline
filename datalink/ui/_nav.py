@@ -712,9 +712,7 @@ def render_page_client_filter(
     # for the transition window — the migration script renames them.
     _legacy_global = "__global__"
     _global_corp = "GLOBAL_CORP"
-    clients = [
-        c for c in _list_real_clients() if c not in (_legacy_global, _global_corp)
-    ]
+    clients = [c for c in _list_real_clients() if c not in (_legacy_global, _global_corp)]
     global_option = "🌍 GLOBAL_CORP  (build template — AI runs ONCE per dataset)"
     options = [sentinel_label, global_option, *clients]
 
@@ -899,13 +897,19 @@ def render_sidebar(active: str | None = None) -> None:
                 unsafe_allow_html=True,
             )
 
-        # ---- Refresh now — clear poisoned cache without container restart ----
-        # Operator escape hatch: a transient Snowflake error (e.g. warehouse
-        # cold-start) gets memoised in the negative cache for 120s by
-        # design (don't spam Snowflake on flapping connections). Symptom
-        # = empty dropdowns / zero metrics that "should" have data.
-        # Clicking this button blows the positive + negative caches and
-        # reruns the page.
+        # ---- Refresh now — clear EVERY cache without container restart ----
+        # Operator escape hatch.  Three caches get cleared in one click:
+        #   1. datalink.ui._query positive cache   (warehouse SELECT results)
+        #   2. datalink.ui._query negative cache   (failed queries / missing
+        #      tables; default TTL 120s — symptom = empty dropdowns / zero
+        #      metrics that "should" have data after a Snowflake hiccup or
+        #      after a DAG just created BRONZE_* tables)
+        #   3. Streamlit's @st.cache_data decorator cache  (44 sites across
+        #      DMD/PA/CT/Exec/DQ/PHI/etc. — TTL 20-60s.  Without this clear,
+        #      Refresh used to leave stale dataframes in memory.)
+        # Plus invalidate the page-level snapshots (_dmd_data, _pa_data)
+        # that wrap their own cache_data layers so the next page render
+        # repopulates from Snowflake.
         st.markdown(
             '<div class="dl-nav-section">Maintenance</div>',
             unsafe_allow_html=True,
@@ -915,16 +919,41 @@ def render_sidebar(active: str | None = None) -> None:
             key="sidebar_refresh_cache",
             use_container_width=True,
             help=(
-                "Clear in-process query cache and rerun the page. Use when "
-                "a dropdown looks empty or a metric reads zero unexpectedly "
-                "— a transient Snowflake error may have poisoned the cache "
-                "for 120s. This is faster than a container restart."
+                "Clears EVERY cache: warehouse query cache (positive + "
+                "negative), Streamlit's @st.cache_data across all pages, "
+                "and per-page snapshots (DMD, Pipeline Architect, Control "
+                "Tower).  Use when a dropdown looks empty, a metric reads "
+                "zero unexpectedly, or you just ran a pipeline / approved "
+                "a DMD change and want immediate visibility."
             ),
         ):
             from datalink.ui._query import clear_query_cache
 
             clear_query_cache()
-            st.toast("🔄 Query cache cleared. Rerunning…", icon="✅")
+            # Streamlit's own cache — covers every @st.cache_data decorator
+            # across the entire app (44 sites as of Phase 21).
+            try:
+                st.cache_data.clear()
+            except Exception:
+                pass
+            # Page-snapshot invalidations — explicit calls so the next page
+            # load definitely re-fetches.  Import lazily so the nav module
+            # doesn't pull in these helpers on every page render.
+            for mod_name, fn_name in [
+                ("datalink.ui._dmd_data", "invalidate"),
+                ("datalink.ui._pa_data", "invalidate"),
+            ]:
+                try:
+                    import importlib
+
+                    mod = importlib.import_module(mod_name)
+                    getattr(mod, fn_name)()
+                except Exception:
+                    pass
+            st.toast(
+                "🔄 All caches cleared (warehouse + Streamlit + page snapshots). " "Rerunning…",
+                icon="✅",
+            )
             st.rerun()
 
         # ---- Footer ----

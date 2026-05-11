@@ -1,16 +1,26 @@
-"""Cost & Token Telemetry — Phase 16.4 (Wave 4 #16).
+"""Cost & Token Telemetry — Phase 21 (factory-pattern repoint).
 
-Real-time AI spend visibility. Pulls from CONTROL.agent_proposals where
-every proposal carries token counts + estimated cost (computed at save time
-from Anthropic's published pricing).
+Real-time AI spend visibility.  Sources:
+
+  * CONTROL.agent_reasoning_log — canonical: every AgentBase.run() writes
+                                  one row with tokens_used + duration_ms.
+                                  Captures EVERY agent invocation across
+                                  Pipeline Architect, DQ AI Architect,
+                                  Schema Designers, etc.
+  * CONTROL.agent_proposals     — legacy table (Phase 16.4) kept for
+                                  back-compat; UNIONed with reasoning_log
+                                  so historical proposals don't disappear.
+
+Cost is computed on the fly from token counts using a configurable per-1K
+rate (default ~$0.003 — Haiku 4.5 blended in/out).  Phase-16 rows that
+already carry estimated_cost_usd preserve that value.
 
 Panels:
   * Headline KPIs: today / 7-day / 30-day / total spend
-  * Spend by agent_type (Pipeline Architect vs Silver Designer vs DQ Proposer)
-  * Spend by client (which tenant burns the most LLM tokens)
-  * Spend by dataset (which datasets are AI-expensive)
+  * Spend by agent (DqSuiteArchitectAgent, PipelineArchitectAgent, …)
+  * Spend by crew (dq_ai_architect, pipeline_architect, …)
   * Daily trend chart (last 30 days)
-  * Most expensive individual proposals (top 10)
+  * Most expensive individual invocations (top 10)
   * Budget alerts (configurable threshold)
 """
 
@@ -46,6 +56,42 @@ st.caption(
 )
 
 
+# Phase 21 — token → USD conversion rate.  Haiku 4.5 blended (in/out).
+# Override via env var for other models.
+import os as _os
+
+_TOKEN_RATE = float(_os.environ.get("DATALINK_AI_TOKEN_RATE_USD", "0.000003"))
+
+
+# Unified UNION subquery — every cost loader reuses this so the same
+# logic powers KPIs, breakdowns, and trends.  reasoning_log is the
+# canonical source; agent_proposals UNIONed for historical rows.
+def _union_sql(token_rate: float = _TOKEN_RATE) -> str:
+    return f"""
+        SELECT invocation_id AS id,
+               agent_name    AS agent,
+               crew_name     AS crew,
+               ts            AS at,
+               COALESCE(tokens_used, 0)             AS tokens,
+               COALESCE(tokens_used, 0) * {token_rate} AS cost,
+               duration_ms                          AS latency_ms,
+               'reasoning_log' AS source
+          FROM {CONTROL_SCHEMA}.agent_reasoning_log
+         WHERE tokens_used IS NOT NULL
+        UNION ALL
+        SELECT proposal_id AS id,
+               agent_type  AS agent,
+               agent_type  AS crew,
+               created_at  AS at,
+               COALESCE(total_tokens, 0)            AS tokens,
+               COALESCE(estimated_cost_usd,
+                        COALESCE(total_tokens, 0) * {token_rate}) AS cost,
+               latency_ms,
+               'agent_proposals' AS source
+          FROM {CONTROL_SCHEMA}.agent_proposals
+    """
+
+
 @st.cache_data(ttl=20)  # type: ignore[misc]
 def _spend_kpis():
     with warehouse_ctx(readonly=True) as wh:
@@ -54,17 +100,15 @@ def _spend_kpis():
                 iter(
                     wh.query(
                         f"""
+                WITH ai AS ({_union_sql()})
                 SELECT
-                  COALESCE(SUM(CASE WHEN created_at > DATEADD(day, -1, CURRENT_TIMESTAMP())
-                                   THEN estimated_cost_usd END), 0) AS spend_24h,
-                  COALESCE(SUM(CASE WHEN created_at > DATEADD(day, -7, CURRENT_TIMESTAMP())
-                                   THEN estimated_cost_usd END), 0) AS spend_7d,
-                  COALESCE(SUM(CASE WHEN created_at > DATEADD(day, -30, CURRENT_TIMESTAMP())
-                                   THEN estimated_cost_usd END), 0) AS spend_30d,
-                  COALESCE(SUM(estimated_cost_usd), 0) AS spend_all,
-                  COALESCE(SUM(total_tokens), 0) AS tokens_all,
+                  COALESCE(SUM(CASE WHEN at > DATEADD(day,  -1, CURRENT_TIMESTAMP()) THEN cost END), 0) AS spend_24h,
+                  COALESCE(SUM(CASE WHEN at > DATEADD(day,  -7, CURRENT_TIMESTAMP()) THEN cost END), 0) AS spend_7d,
+                  COALESCE(SUM(CASE WHEN at > DATEADD(day, -30, CURRENT_TIMESTAMP()) THEN cost END), 0) AS spend_30d,
+                  COALESCE(SUM(cost),   0) AS spend_all,
+                  COALESCE(SUM(tokens), 0) AS tokens_all,
                   COUNT(*) AS proposals_all
-                FROM {CONTROL_SCHEMA}.agent_proposals
+                FROM ai
                 """
                     )
                 )
@@ -80,13 +124,14 @@ def _by_agent():
             return list(
                 wh.query(
                     f"""
-                SELECT agent_type, COUNT(*) AS proposals,
-                       SUM(total_tokens) AS tokens,
-                       SUM(estimated_cost_usd) AS cost,
-                       AVG(estimated_cost_usd) AS avg_cost,
+                WITH ai AS ({_union_sql()})
+                SELECT agent AS agent_type, COUNT(*) AS proposals,
+                       SUM(tokens) AS tokens,
+                       SUM(cost)   AS cost,
+                       AVG(cost)   AS avg_cost,
                        AVG(latency_ms) AS avg_latency_ms
-                FROM {CONTROL_SCHEMA}.agent_proposals
-                GROUP BY agent_type ORDER BY cost DESC NULLS LAST
+                FROM ai
+                GROUP BY agent ORDER BY cost DESC NULLS LAST
                 """
                 )
             )
@@ -96,16 +141,20 @@ def _by_agent():
 
 @st.cache_data(ttl=20)  # type: ignore[misc]
 def _by_scope():
+    """Phase-21 'scope' = crew_name (which agent flow ran).  Replaces the
+    Phase-16 ``scope_key`` (per-client tag) since factory-pattern AI
+    agents aren't client-scoped."""
     with warehouse_ctx(readonly=True) as wh:
         try:
             return list(
                 wh.query(
                     f"""
-                SELECT scope_key, COUNT(*) AS proposals,
-                       SUM(total_tokens) AS tokens,
-                       SUM(estimated_cost_usd) AS cost
-                FROM {CONTROL_SCHEMA}.agent_proposals
-                GROUP BY scope_key ORDER BY cost DESC NULLS LAST LIMIT 30
+                WITH ai AS ({_union_sql()})
+                SELECT crew AS scope_key, COUNT(*) AS proposals,
+                       SUM(tokens) AS tokens,
+                       SUM(cost)   AS cost
+                FROM ai
+                GROUP BY crew ORDER BY cost DESC NULLS LAST LIMIT 30
                 """
                 )
             )
@@ -120,12 +169,13 @@ def _daily_trend():
             return list(
                 wh.query(
                     f"""
-                SELECT DATE_TRUNC('day', created_at) AS day,
-                       SUM(total_tokens) AS tokens,
-                       SUM(estimated_cost_usd) AS cost,
-                       COUNT(*) AS proposals
-                FROM {CONTROL_SCHEMA}.agent_proposals
-                WHERE created_at > DATEADD(day, -30, CURRENT_TIMESTAMP())
+                WITH ai AS ({_union_sql()})
+                SELECT DATE_TRUNC('day', at) AS day,
+                       SUM(tokens) AS tokens,
+                       SUM(cost)   AS cost,
+                       COUNT(*)    AS proposals
+                FROM ai
+                WHERE at > DATEADD(day, -30, CURRENT_TIMESTAMP())
                 GROUP BY day ORDER BY day
                 """
                 )
@@ -141,11 +191,14 @@ def _top_expensive():
             return list(
                 wh.query(
                     f"""
-                SELECT proposal_id, agent_type, scope_key, version, status,
-                       total_tokens, estimated_cost_usd, latency_ms,
-                       created_at, created_by
-                FROM {CONTROL_SCHEMA}.agent_proposals
-                ORDER BY estimated_cost_usd DESC NULLS LAST LIMIT 10
+                WITH ai AS ({_union_sql()})
+                SELECT id AS proposal_id, agent AS agent_type,
+                       crew AS scope_key, NULL AS version,
+                       'COMPLETED' AS status,
+                       tokens AS total_tokens, cost AS estimated_cost_usd,
+                       latency_ms, at AS created_at, source AS created_by
+                FROM ai
+                ORDER BY cost DESC NULLS LAST LIMIT 10
                 """
                 )
             )

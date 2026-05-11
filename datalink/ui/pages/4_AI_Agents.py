@@ -35,15 +35,11 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
+# Phase 21 — Snowflake-only.  DuckDB warehouse path bootstrap removed;
+# all queries go through warehouse_ctx / query_silent against CONTROL.*
+from datalink.ui._query import query_silent as _wh_query_silent
 
-# Phase 6 fix: bootstrap warehouse file + CONTROL schema before any read-only open.
-from datalink.ui._bootstrap import ensure_warehouse_exists  # noqa: E402
-
-# Phase 7 Day 2: warehouse access centralised in datalink.ui._query.
-from datalink.ui._query import query_silent as _wh_query_silent  # noqa: E402
-
-ensure_warehouse_exists(WAREHOUSE_PATH)
+WAREHOUSE_PATH = "CONTROL (Snowflake)"  # cosmetic — only displayed in footer
 
 st.set_page_config(
     page_title="DataLink — AI Agents",
@@ -485,7 +481,7 @@ kpi = _try_query(
       COALESCE(AVG(duration_ms), 0)                         AS avg_ms,
       MAX(ts)                                               AS last_ts
     FROM CONTROL.agent_reasoning_log
-    WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days' {crew_filter}
+    WHERE ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP()) {crew_filter}
     """,
     crew_params,
 )
@@ -569,7 +565,7 @@ crew_df = _try_query(
            COALESCE(AVG(duration_ms), 0) AS avg_ms,
            COALESCE(SUM(CASE WHEN phi_check LIKE 'error%' THEN 1 ELSE 0 END), 0) AS errors
     FROM CONTROL.agent_reasoning_log
-    WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+    WHERE ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
     GROUP BY crew_name
     """
 )
@@ -670,7 +666,7 @@ feed_df = _try_query(
     SELECT ts, agent_name, crew_name, input_preview, output_preview,
            tokens_used, duration_ms, phi_check
     FROM CONTROL.agent_reasoning_log
-    WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days' {crew_filter}
+    WHERE ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP()) {crew_filter}
     ORDER BY ts DESC
     LIMIT 25
     """,
@@ -822,7 +818,7 @@ agent_df = _try_query(
            COALESCE(SUM(CASE WHEN phi_check LIKE 'error%' THEN 1 ELSE 0 END), 0) AS errors,
            MAX(ts) AS last_ts
     FROM CONTROL.agent_reasoning_log
-    WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days' {crew_filter}
+    WHERE ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP()) {crew_filter}
     GROUP BY agent_name
     """,
     crew_params,
@@ -881,7 +877,7 @@ with col_left:
         f"""
         SELECT ts, agent_name, crew_name, duration_ms
         FROM CONTROL.agent_reasoning_log
-        WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days' {crew_filter}
+        WHERE ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP()) {crew_filter}
         ORDER BY ts DESC LIMIT 500
         """,
         crew_params,
@@ -908,7 +904,7 @@ with col_right:
         f"""
         SELECT DATE_TRUNC('day', ts) AS d, SUM(tokens_used) AS tokens
         FROM CONTROL.agent_reasoning_log
-        WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days' {crew_filter}
+        WHERE ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP()) {crew_filter}
         GROUP BY d ORDER BY d
         """,
         crew_params,
@@ -970,7 +966,7 @@ with st.expander("🔧 Raw reasoning log (for engineers) — click to expand", e
         SELECT ts, agent_name, crew_name, input_preview, output_preview,
                tokens_used, duration_ms, phi_check
         FROM CONTROL.agent_reasoning_log
-        WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days' {crew_filter}
+        WHERE ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP()) {crew_filter}
         ORDER BY ts DESC LIMIT 100
         """,
         crew_params,

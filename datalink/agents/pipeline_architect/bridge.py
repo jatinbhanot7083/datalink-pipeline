@@ -635,6 +635,19 @@ def propose_pipeline(
     proposal["tokens_used"] = int(result.tokens_used)
     proposal["duration_ms"] = duration_ms
 
+    # Phase 20.1 — emit AI metrics (silent no-op if collector unreachable).
+    try:
+        from datalink.observability.metrics import record_ai_proposal
+
+        record_ai_proposal(
+            agent="pipeline_architect",
+            tokens=int(result.tokens_used or 0),
+            duration_s=float(duration_ms or 0) / 1000.0,
+            outcome="success",
+        )
+    except Exception:
+        pass
+
     # Phase 15.7 — when Gold LIVE, override the Phase 15 Silver/Gold/Bronze
     # artifacts with Gold-driven DV2 versions. The agent's Phase 15
     # builders still ran (for narrative compat) but the structural truth
@@ -948,15 +961,37 @@ def approve_and_deploy(
     artifact_paths["gold_dbt"] = str(gold_dbt_path.relative_to(repo_root))
 
     # --- 4. Airflow DAG -----------------------------------------------------
-    dag_filename = f"{client_id.lower()}_{dataset_code}_pipeline.py"
-    dag_path = repo_root / "dags" / dag_filename
-    dag_path.parent.mkdir(parents=True, exist_ok=True)
-    dag_path.write_text(
-        str(proposal.get("airflow_dag_py") or ""),
-        encoding="utf-8",
+    # Phase 17.10 — DO NOT write a hand-written `<client>_<dataset>_pipeline.py`.
+    # The dataset factory (`dags/_factory_<dataset>.py`) emits the SAME DAG
+    # by reading the LIVE pipeline_instances row at scheduler load time.
+    # Two paths producing the same DAG ID = Airflow import-error + a
+    # cluttered DAG bag.  We instead ensure the dataset's factory file
+    # exists (lazy regen for this single dataset).  approve_and_deploy
+    # still records the proposed DAG body in the proposal payload for
+    # operator review in the UI; it just doesn't write it to disk.
+    artifact_paths["airflow_dag"] = (
+        f"dags/_factory_{dataset_code}.py " "(factory pattern — ensured below)"
     )
-    _chown_to_host_user(dag_path)
-    artifact_paths["airflow_dag"] = str(dag_path.relative_to(repo_root))
+    try:
+        _factory_path = repo_root / "dags" / f"_factory_{dataset_code}.py"
+        if not _factory_path.exists():
+            # Render from the canonical template used by the regen script.
+            from scripts.regenerate_dag_factories import (
+                render as _render_factory,
+            )
+
+            ds_display = dataset_code.replace("_", " ").title()
+            _factory_path.write_text(_render_factory(dataset_code, ds_display))
+            _chown_to_host_user(_factory_path)
+            _log.info(
+                "deploy.factory_file_created", path=str(_factory_path), dataset_code=dataset_code
+            )
+    except Exception as _exc:
+        _log.warning(
+            "deploy.factory_ensure_failed",
+            dataset_code=dataset_code,
+            err=str(_exc)[:120],
+        )
 
     # --- 4.5 (Phase 16.1, Wave 1 Item 2) — Execute DDLs against Snowflake ---
     # Old behavior: deploy emitted SQL files but never ran them. Operator had

@@ -119,8 +119,10 @@ def build_dag_for_instance(
         bronze_land_task,
         bronze_validate_task,
         gold_dbt_task,
+        gold_dq_task,
         onprem_push_task,
         silver_dbt_task,
+        silver_dq_task,
     )
 
     client_id = str(instance.get("client_id") or "").strip()
@@ -188,9 +190,26 @@ def build_dag_for_instance(
         dag=dag,
     )
 
+    # Phase 19.6 — silver_dq: factory-pattern DQ check between silver_dbt
+    # and gold_dbt.  Loads the LIVE suite for (dataset, SILVER); no-op
+    # when no suite is authored.  Same pattern for gold_dq below.
+    silver_dq = PythonOperator(
+        task_id="silver_dq",
+        python_callable=silver_dq_task,
+        op_kwargs={"client_id": client_id, "dataset_code": dataset_code},
+        dag=dag,
+    )
+
     gold_dbt = PythonOperator(
         task_id="gold_dbt",
         python_callable=gold_dbt_task,
+        op_kwargs={"client_id": client_id, "dataset_code": dataset_code},
+        dag=dag,
+    )
+
+    gold_dq = PythonOperator(
+        task_id="gold_dq",
+        python_callable=gold_dq_task,
         op_kwargs={"client_id": client_id, "dataset_code": dataset_code},
         dag=dag,
     )
@@ -208,7 +227,17 @@ def build_dag_for_instance(
 
     end = EmptyOperator(task_id="end", dag=dag)
 
-    start >> bronze_land >> bronze_validate >> silver_dbt >> gold_dbt >> onprem_push >> end
+    (
+        start
+        >> bronze_land
+        >> bronze_validate
+        >> silver_dbt
+        >> silver_dq
+        >> gold_dbt
+        >> gold_dq
+        >> onprem_push
+        >> end
+    )
 
     return dag
 

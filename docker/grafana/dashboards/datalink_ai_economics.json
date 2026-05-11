@@ -1,0 +1,329 @@
+{
+  "uid": "dl-ai-economics",
+  "title": "DataLink \u2014 AI Economics",
+  "description": "Phase 20.2 \u2014 token spend, proposal volume, and latency for AI agents (DQ Architect, Pipeline Architect).",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "datalink",
+    "phase20"
+  ],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Total Tokens (7d)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(datalink_ai_tokens_total[7d]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "tokens"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Est. Spend (7d, Haiku 4.5)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(datalink_ai_tokens_total[7d])) * 0.000003",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "usd"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 3,
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "purple"
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Proposals (7d)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(datalink_ai_proposals_total[7d]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "proposals"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Latency p95 (1h)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(datalink_ai_latency_seconds_bucket[1h])))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "p95"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "decimals": 1
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Tokens / hour by Agent",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (agent) (rate(datalink_ai_tokens_total[5m])) * 3600",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "{{agent}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30,
+            "stacking": {
+              "mode": "normal"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Proposals by Agent (7d)",
+      "type": "piechart",
+      "gridPos": {
+        "h": 9,
+        "w": 6,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (agent) (increase(datalink_ai_proposals_total[7d]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "{{agent}}"
+        }
+      ],
+      "options": {
+        "pieType": "donut",
+        "legend": {
+          "displayMode": "list",
+          "placement": "right"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {},
+        "overrides": []
+      }
+    },
+    {
+      "id": 12,
+      "title": "Latency p50 / p95 by Agent",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 9,
+        "w": 6,
+        "x": 18,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (agent, le) (rate(datalink_ai_latency_seconds_bucket[5m])))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "p50 {{agent}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (agent, le) (rate(datalink_ai_latency_seconds_bucket[5m])))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "p95 {{agent}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Proposal Outcomes (success vs failed) (7d)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (agent, outcome) (increase(datalink_ai_proposals_total[1h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "{{agent}} ({{outcome}})",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80
+          }
+        }
+      }
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

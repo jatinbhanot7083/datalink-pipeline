@@ -74,8 +74,8 @@ def _client_pipelines_with_phi():
                 f"""
             WITH phi_per_dataset AS (
               SELECT d.dataset_code,
-                     COUNT(*) FILTER (WHERE f.is_phi = TRUE)  AS phi_cols,
-                     COUNT(*) FILTER (WHERE f.is_pii = TRUE)  AS pii_cols
+                     COUNT(CASE WHEN f.is_phi = TRUE THEN 1 END)  AS phi_cols,
+                     COUNT(CASE WHEN f.is_pii = TRUE THEN 1 END)  AS pii_cols
                 FROM {CONTROL_SCHEMA}.global_bronze_catalog_fields f
                 JOIN {CONTROL_SCHEMA}.global_bronze_catalog_datasets d
                   ON d.dataset_id = f.dataset_id

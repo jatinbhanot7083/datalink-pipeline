@@ -45,16 +45,25 @@ st.caption(
 )
 
 with warehouse_ctx(readonly=True) as wh:
+    # Phase 21 — fix column names to match the real Phase-17 schema:
+    #   silver_schema_datasets has silver_pattern (not pattern), created_by (not designed_by)
+    #   gold_schema_datasets   has created_by (not designed_by)
+    # Also surface scope_owner so the marketplace shows which client owns
+    # each asset (key for the "clone from peer" workflow).
     silver_assets = list(
         wh.query(
             f"""
-        SELECT s.silver_dataset_id, s.dataset_code, s.version, s.pattern,
-               s.designed_by, s.created_at, s.status,
+        SELECT s.silver_dataset_id, s.dataset_code, s.version,
+               s.silver_pattern AS pattern,
+               s.silver_anchor,
+               s.scope_owner,
+               s.created_by AS designed_by,
+               s.created_at, s.status,
                (SELECT COUNT(*) FROM {CONTROL_SCHEMA}.global_silver_schema_tables
                  WHERE silver_dataset_id = s.silver_dataset_id) AS table_count
           FROM {CONTROL_SCHEMA}.global_silver_schema_datasets s
          WHERE s.status = 'LIVE'
-         ORDER BY s.dataset_code
+         ORDER BY s.scope_owner, s.dataset_code
         """
         )
     )
@@ -62,12 +71,14 @@ with warehouse_ctx(readonly=True) as wh:
         wh.query(
             f"""
         SELECT g.gold_dataset_id, g.dataset_code, g.version, g.gold_anchor,
-               g.designed_by, g.created_at, g.status,
+               g.scope_owner,
+               g.created_by AS designed_by,
+               g.created_at, g.status,
                (SELECT COUNT(*) FROM {CONTROL_SCHEMA}.global_gold_schema_fields
                  WHERE gold_dataset_id = g.gold_dataset_id) AS column_count
           FROM {CONTROL_SCHEMA}.global_gold_schema_datasets g
          WHERE g.status = 'LIVE'
-         ORDER BY g.dataset_code
+         ORDER BY g.scope_owner, g.dataset_code
         """
         )
     )
@@ -99,37 +110,41 @@ with kpis[3]:
 
 st.markdown("---")
 
-# Silver schemas
+# Silver schemas — show scope_owner (GLOBAL_CORP template vs client clone)
 st.markdown("### 🥈 Silver schemas (cross-client reusable)")
 if silver_assets:
     df = pd.DataFrame(
         [
             {
+                "Owner": s.get("scope_owner") or "—",
                 "Dataset": s["dataset_code"],
                 "Version": f"v{s['version']}",
-                "Pattern": s["pattern"],
+                "Pattern": s.get("pattern") or "—",
+                "Anchor": s.get("silver_anchor") or "—",
                 "Tables": s["table_count"],
-                "Designed by": s["designed_by"],
+                "Designed by": s.get("designed_by") or "—",
                 "Created": str(s["created_at"])[:19],
             }
             for s in silver_assets
         ]
     )
     st.dataframe(df, use_container_width=True, hide_index=True)
+    st.caption("🌍 `GLOBAL_CORP` rows are the canonical templates clients clone from.")
 else:
     st.info("No LIVE Silver schemas yet — author one in Data Model Designer.")
 
-# Gold schemas
+# Gold schemas — show scope_owner too
 st.markdown("### 🥇 Gold schemas (cross-client reusable)")
 if gold_assets:
     df = pd.DataFrame(
         [
             {
+                "Owner": g.get("scope_owner") or "—",
                 "Dataset": g["dataset_code"],
                 "Version": f"v{g['version']}",
                 "Anchor": g["gold_anchor"],
                 "Columns": g["column_count"],
-                "Designed by": g["designed_by"],
+                "Designed by": g.get("designed_by") or "—",
                 "Created": str(g["created_at"])[:19],
             }
             for g in gold_assets

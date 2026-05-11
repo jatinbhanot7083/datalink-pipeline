@@ -41,16 +41,17 @@ def test_orchestration_package_structure() -> None:
 
 
 @pytest.mark.phase
+@pytest.mark.skip(
+    reason="Phase 17.10 — superseded by the dataset-factory pattern "
+    "(dags/_factory_<dataset>.py + CONTROL.client_pipeline_instances). "
+    "The 3 hand-written Phase-5 DAGs (bronze_ingest_dag.py, "
+    "silver_transform_dag.py, gold_um_push_dag.py) and _dag_builder.py "
+    "have been removed; one DAG per (client, dataset) is now emitted "
+    "dynamically by the factory at scheduler load time."
+)
 def test_three_dag_files_exist() -> None:
-    """The 3 DAG files documented in docs/architecture.md §7 must exist."""
-    dags = REPO_ROOT / "dags"
-    for fn in ("bronze_ingest_dag.py", "silver_transform_dag.py", "gold_um_push_dag.py"):
-        p = dags / fn
-        assert p.exists(), f"missing DAG file: {p}"
-        txt = p.read_text()
-        # Every DAG must import build_dag from _dag_builder and reference a Pipeline.
-        assert "build_dag(" in txt, f"{fn} does not call build_dag()"
-        assert "_PIPELINE" in txt, f"{fn} does not reference a pipeline dataclass"
+    """OBSOLETE — kept for archaeology, skipped permanently."""
+    pass
 
 
 @pytest.mark.phase

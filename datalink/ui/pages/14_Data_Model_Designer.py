@@ -256,6 +256,7 @@ from datalink.ui import _dmd_data as _dmd  # noqa: E402
 
 _snap = _dmd.get_snapshot()
 
+
 # Global counts — only schemas whose scope_owner is GLOBAL_CORP (or legacy
 # __global__ during the 17.1 transition).
 def _is_global_scope(s: dict[str, Any]) -> bool:
@@ -264,7 +265,6 @@ def _is_global_scope(s: dict[str, Any]) -> bool:
 
 _g_silver = [s for s in _snap.silver_schemas if _is_global_scope(s)]
 _g_gold = [g for g in _snap.gold_schemas if _is_global_scope(g)]
-
 st.markdown("## 🌍 Global Medallion Registry Status")
 st.caption(
     "Canonical templates that real clients clone from — zero LLM cost. "
@@ -273,13 +273,9 @@ st.caption(
 
 bronze_count = len(_snap.bronze_datasets)
 g_silver_live_count = sum(1 for s in _g_silver if s.get("status") == "LIVE")
-g_silver_draft_count = sum(
-    1 for s in _g_silver if s.get("status") in ("DRAFT", "PENDING_REVIEW")
-)
+g_silver_draft_count = sum(1 for s in _g_silver if s.get("status") in ("DRAFT", "PENDING_REVIEW"))
 g_gold_live_count = sum(1 for g in _g_gold if g.get("status") == "LIVE")
-g_gold_draft_count = sum(
-    1 for g in _g_gold if g.get("status") in ("DRAFT", "PENDING_REVIEW")
-)
+g_gold_draft_count = sum(1 for g in _g_gold if g.get("status") in ("DRAFT", "PENDING_REVIEW"))
 
 c1, c2, c3 = st.columns(3)
 c1.markdown(
@@ -408,6 +404,13 @@ with st.expander(
         styled = df.style.map(_color_status, subset=["Bronze", "Silver", "Gold"])
         st.dataframe(styled, use_container_width=True, hide_index=True, height=520)
 
+        # 👁️ Inspect a Global schema — placeholder reserved here so the
+        # picker renders visually inside the Global drill-down expander.
+        # The actual picker function (_render_global_inspect_picker) is
+        # defined further down, AFTER _render_schema_inspector exists, and
+        # filled into this slot via `with _global_inspect_slot.container():`.
+        _global_inspect_slot = st.empty()
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # Phase 17.6 — 🔍 Compatibility Advisor (top-level, lives under Global
@@ -423,9 +426,7 @@ with st.expander(
 _g_versions_by_ds: dict[str, list[dict[str, Any]]] = {}
 for r in _g_gold:
     _g_versions_by_ds.setdefault(str(r["dataset_code"]), []).append(r)
-_compat_eligible_ds = sorted(
-    [ds for ds, vs in _g_versions_by_ds.items() if len(vs) >= 2]
-)
+_compat_eligible_ds = sorted([ds for ds, vs in _g_versions_by_ds.items() if len(vs) >= 2])
 
 if _compat_eligible_ds:
     st.markdown("### 🔍 Compatibility Advisor")
@@ -441,9 +442,7 @@ if _compat_eligible_ds:
             key="compat_advisor_dataset",
             help="Only datasets with ≥ 2 GLOBAL Gold versions appear here.",
         )
-    _ds_versions = sorted(
-        [int(v["version"]) for v in _g_versions_by_ds[_adv_ds]], reverse=True
-    )
+    _ds_versions = sorted([int(v["version"]) for v in _g_versions_by_ds[_adv_ds]], reverse=True)
     with cc2:
         _adv_to = st.selectbox(
             "To version",
@@ -493,9 +492,7 @@ if _compat_eligible_ds:
                     hide_index=True,
                 )
             else:
-                st.caption(
-                    "_(No column-level deltas — versions are structurally identical.)_"
-                )
+                st.caption("_(No column-level deltas — versions are structurally identical.)_")
 
 st.markdown("---")
 
@@ -551,11 +548,67 @@ def _render_schema_inspector(
         f"v{row.get('version')} · {_status_pill(row.get('status'))}"
     )
 
-    tab_cols, tab_ai, tab_lineage, tab_audit = st.tabs(
-        ["📋 Columns", "🧠 AI Proposal", "🔗 Lineage", "🗒️ Audit"]
+    tab_cols, tab_ai, tab_ddl, tab_dbt, tab_lineage, tab_audit = st.tabs(
+        [
+            "📋 Columns",
+            "🧠 AI Proposal",
+            "🛠️ DDL Preview",
+            "📄 dbt Model",
+            "🔗 Lineage",
+            "🗒️ Audit",
+        ]
     )
 
     with tab_cols:
+        # Phase 17.6 — fall back to GLOBAL_CORP source columns for clones
+        # whose own column list is empty (e.g. older clones that predate
+        # the AI-fields-carry-forward fix, or rows whose columns weren't
+        # populated yet).  This makes the View Schema useful even on
+        # imperfect data.
+        _cols_source_note = ""
+        if not cols and str(row.get("source") or "").upper() == "CLONE":
+            forked_v_c = row.get("forked_from_global_version")
+            if forked_v_c is not None:
+                try:
+                    if layer == "Silver":
+                        src_row = next(
+                            (
+                                s
+                                for s in _snap.silver_schemas
+                                if str(s.get("scope_owner") or "") == "GLOBAL_CORP"
+                                and str(s.get("dataset_code")) == str(row.get("dataset_code"))
+                                and int(s.get("version") or 0) == int(forked_v_c)
+                            ),
+                            None,
+                        )
+                        if src_row:
+                            cols = _snap.silver_columns_by_dataset.get(
+                                str(src_row.get("silver_dataset_id")), []
+                            )
+                    else:
+                        src_row = next(
+                            (
+                                g
+                                for g in _snap.gold_schemas
+                                if str(g.get("scope_owner") or "") == "GLOBAL_CORP"
+                                and str(g.get("dataset_code")) == str(row.get("dataset_code"))
+                                and int(g.get("version") or 0) == int(forked_v_c)
+                            ),
+                            None,
+                        )
+                        if src_row:
+                            cols = _snap.gold_fields_by_dataset.get(
+                                str(src_row.get("gold_dataset_id")), []
+                            )
+                    if cols:
+                        _cols_source_note = (
+                            f"_(Sourced from GLOBAL_CORP v{forked_v_c} — "
+                            "this clone predates the column-carry-forward "
+                            "fix.)_"
+                        )
+                except Exception:
+                    pass
+
         if not cols:
             st.info(
                 f"No columns registered for this {layer} version.  This "
@@ -563,6 +616,8 @@ def _render_schema_inspector(
                 "without populating the column list."
             )
         else:
+            if _cols_source_note:
+                st.caption(_cols_source_note)
             _cv = [
                 {
                     "#": c.get("column_order"),
@@ -590,14 +645,66 @@ def _render_schema_inspector(
             )
 
     with tab_ai:
-        anchor_lbl = (
-            row.get("silver_anchor")
-            if layer == "Silver"
-            else row.get("gold_anchor")
-        )
+        anchor_lbl = row.get("silver_anchor") if layer == "Silver" else row.get("gold_anchor")
         rat = (row.get("ai_rationale") or "").strip()
+        raw_json = row.get("ai_proposal_json")
+        tok = row.get("ai_token_count") or 0
+        lat = row.get("ai_latency_ms") or 0
+
+        # Phase 17.6 — fall-back: if THIS row has no AI fields but it's a
+        # CLONE (forked_from_global_version is set), reach back to the
+        # GLOBAL_CORP source row for the same dataset_code at the forked
+        # version and surface ITS proposal.  Covers older clones that
+        # predate the AI-fields-carry-forward fix.
+        forked_v = row.get("forked_from_global_version")
+        is_clone_without_ai = (
+            (str(row.get("source") or "").upper() == "CLONE")
+            and forked_v is not None
+            and not rat
+            and not raw_json
+        )
+        _fallback_used = False
+        if is_clone_without_ai:
+            try:
+                if layer == "Silver":
+                    src = next(
+                        (
+                            s
+                            for s in _snap.silver_schemas
+                            if str(s.get("scope_owner") or "") == "GLOBAL_CORP"
+                            and str(s.get("dataset_code")) == str(row.get("dataset_code"))
+                            and int(s.get("version") or 0) == int(forked_v)
+                        ),
+                        None,
+                    )
+                else:
+                    src = next(
+                        (
+                            g
+                            for g in _snap.gold_schemas
+                            if str(g.get("scope_owner") or "") == "GLOBAL_CORP"
+                            and str(g.get("dataset_code")) == str(row.get("dataset_code"))
+                            and int(g.get("version") or 0) == int(forked_v)
+                        ),
+                        None,
+                    )
+                if src is not None:
+                    rat = (src.get("ai_rationale") or "").strip()
+                    raw_json = src.get("ai_proposal_json")
+                    tok = src.get("ai_token_count") or 0
+                    lat = src.get("ai_latency_ms") or 0
+                    _fallback_used = bool(rat or raw_json)
+            except Exception:
+                pass
+
         if rat:
             st.markdown(f"**Anchor:** `{anchor_lbl or '—'}`")
+            if _fallback_used:
+                st.caption(
+                    f"_(Sourced from GLOBAL_CORP v{forked_v} — this clone "
+                    "predates the AI-fields-carry-forward fix; new clones "
+                    "will own their own copy.)_"
+                )
             st.markdown("**Rationale:**")
             st.markdown(rat)
         else:
@@ -606,16 +713,10 @@ def _render_schema_inspector(
                 "Imported, not via AI Construct.)_"
             )
         # Token cost telemetry
-        tok = row.get("ai_token_count") or 0
-        lat = row.get("ai_latency_ms") or 0
         if tok or lat:
             st.markdown("---")
-            st.caption(
-                f"AI cost: **{tok:,} tokens** · "
-                f"latency: **{lat:,} ms**"
-            )
+            st.caption(f"AI cost: **{tok:,} tokens** · " f"latency: **{lat:,} ms**")
         # Raw proposal JSON
-        raw_json = row.get("ai_proposal_json")
         if raw_json:
             with st.expander("🧬 Raw AI proposal JSON", expanded=False):
                 if isinstance(raw_json, str):
@@ -625,6 +726,95 @@ def _render_schema_inspector(
                         st.code(raw_json, language="json")
                 else:
                     st.json(raw_json, expanded=False)
+
+    # ── 🛠️ DDL Preview ─────────────────────────────────────────────────
+    # Generated on the fly from the column list — no Snowflake round-trip.
+    # Even if the row was authored Manual or Cloned, the operator can still
+    # see "what would be created in the warehouse" if this version were
+    # deployed.  This is the canonical answer to "I cannot see DDLs".
+    with tab_ddl:
+        if not cols:
+            st.info(
+                "No columns to render DDL for. Populate the column list "
+                "first (or clone from a Global template that has columns)."
+            )
+        else:
+            scope = str(row.get("scope_owner") or "global").lower()
+            ds = str(row.get("dataset_code") or "dataset").lower()
+            if layer == "Silver":
+                table_name = f"{scope}_{ds}_silver"
+            else:
+                table_name = str(row.get("gold_table_name") or f"{scope}_{ds}_gold").lower()
+            _ddl_lines: list[str] = [f"CREATE TABLE {table_name} ("]
+            _col_lines: list[str] = []
+            for c in cols:
+                cname = c.get("gold_column_name") or c.get("column_name") or "col"
+                ctype = (c.get("logical_type") or "TEXT").upper()
+                # Snowflake-style type mapping (best-effort)
+                ctype_sf = {
+                    "TEXT": "VARCHAR",
+                    "STRING": "VARCHAR",
+                    "INTEGER": "NUMBER(38,0)",
+                    "INT": "NUMBER(38,0)",
+                    "DECIMAL": "NUMBER(18,4)",
+                    "FLOAT": "FLOAT",
+                    "BOOLEAN": "BOOLEAN",
+                    "DATE": "DATE",
+                    "TIMESTAMP": "TIMESTAMP_NTZ",
+                    "DATETIME": "TIMESTAMP_NTZ",
+                }.get(ctype, ctype)
+                null_clause = "" if c.get("nullable") else " NOT NULL"
+                comment = (c.get("description") or "").replace("'", "''")[:240]
+                comment_clause = f" COMMENT '{comment}'" if comment else ""
+                _col_lines.append(f"    {cname:<30s} {ctype_sf}{null_clause}{comment_clause}")
+            # Primary key — use business_keys if present
+            bks = [
+                c.get("gold_column_name") or c.get("column_name")
+                for c in cols
+                if c.get("is_business_key")
+            ]
+            if bks:
+                _col_lines.append(f"    ,PRIMARY KEY ({', '.join(bks)})")
+            _ddl_lines.append(",\n".join(_col_lines))
+            _ddl_lines.append(");")
+            ddl_text = "\n".join(_ddl_lines)
+            st.caption(
+                "_Generated from the column list — this is what gets emitted "
+                "to the warehouse on deploy. Not the literal stored DDL._"
+            )
+            st.code(ddl_text, language="sql")
+
+    # ── 📄 dbt Model ────────────────────────────────────────────────────
+    # Generate a minimal dbt model SELECT — Bronze→Silver / Silver→Gold
+    # SELECT * style, materialized=table.  Not the production version (the
+    # real dbt project lives in dbt/ and is rendered by the deploy step),
+    # but sufficient for "show me what dbt would do."
+    with tab_dbt:
+        if not cols:
+            st.info(
+                "No columns yet — dbt model preview needs columns to " "render the SELECT list."
+            )
+        else:
+            scope = str(row.get("scope_owner") or "global").lower()
+            ds = str(row.get("dataset_code") or "dataset").lower()
+            model_name = f"{ds}_silver" if layer == "Silver" else f"{ds}_gold"
+            _select_cols = []
+            for c in cols:
+                cname = c.get("gold_column_name") or c.get("column_name") or "col"
+                _select_cols.append(f"    {cname}")
+            ref_table = f"ref('{ds}_bronze')" if layer == "Silver" else f"ref('{ds}_silver')"
+            dbt_sql = (
+                "{{ config(materialized='table', schema='" + scope + "') }}\n\n"
+                f"-- {layer} model for {ds} (scope: {scope})\n"
+                f"-- Generated preview — production dbt project lives in dbt/\n\n"
+                "SELECT\n" + ",\n".join(_select_cols) + f"\nFROM {{{{ {ref_table} }}}}\n"
+            )
+            st.caption(
+                f"_Preview of `models/{layer.lower()}/{scope}/{model_name}.sql` — "
+                "the deploy step writes the production version with full "
+                "transform expressions._"
+            )
+            st.code(dbt_sql, language="sql")
 
     with tab_lineage:
         forked_v = row.get("forked_from_global_version")
@@ -649,21 +839,120 @@ def _render_schema_inspector(
         st.markdown(f"**Created by:** `{row.get('created_by') or '—'}`")
         st.markdown(f"**Created at:** `{str(row.get('created_at') or '')[:19]}`")
         if row.get("submitted_at"):
-            st.markdown(
-                f"**Submitted at:** `{str(row['submitted_at'])[:19]}`"
-            )
+            st.markdown(f"**Submitted at:** `{str(row['submitted_at'])[:19]}`")
         if row.get("approved_by"):
             st.markdown(
                 f"**Approved by:** `{row['approved_by']}` at "
                 f"`{str(row.get('approved_at') or '')[:19]}`"
             )
         if row.get("archived_at"):
-            st.markdown(
-                f"**Archived at:** `{str(row['archived_at'])[:19]}`"
-            )
+            st.markdown(f"**Archived at:** `{str(row['archived_at'])[:19]}`")
         st.markdown(f"**Notes:** {row.get('notes') or '_(none)_'}")
         st.markdown("---")
         st.caption(f"silver/gold_dataset_id: `{entity_id}`")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Phase 17.6 — 👁️ Inspect a Global schema (picker fills the placeholder
+# reserved at the top of the page inside the Global Medallion Registry
+# drill-down expander).  Defined HERE so it can call _render_schema_inspector
+# above; INVOKED via _global_inspect_slot.container() so it visually appears
+# in its reserved slot at the top.
+# ─────────────────────────────────────────────────────────────────────────────
+def _render_global_inspect_picker() -> None:
+    """Render the dataset → layer → version picker + 👁️ View Schema popover
+    for GLOBAL_CORP-scoped schemas.  Same inspector the Client grid uses —
+    keeps the experience uniform and lets operators see exactly what gets
+    cloned BEFORE they clone."""
+    st.markdown("#### 👁️ Inspect a Global schema")
+    st.caption(
+        "Pick a dataset + layer + version to view its columns, AI "
+        "rationale, generated DDL, and dbt model. This is what gets "
+        "carried forward when you clone to a client."
+    )
+
+    _g_inspect_dsets = sorted(
+        {str(s.get("dataset_code")) for s in _g_silver if s.get("dataset_code")}
+        | {str(g.get("dataset_code")) for g in _g_gold if g.get("dataset_code")}
+    )
+    if not _g_inspect_dsets:
+        st.info(
+            "No Global Silver/Gold schemas exist yet — nothing to "
+            "inspect. Author at least one to populate this picker."
+        )
+        return
+
+    gi1, gi2, gi3, gi4 = st.columns([2, 1, 1, 1])
+    with gi1:
+        _gi_ds = st.selectbox(
+            "Dataset",
+            options=_g_inspect_dsets,
+            key="global_inspect_ds",
+        )
+    _has_silver = any(str(s.get("dataset_code")) == _gi_ds for s in _g_silver)
+    _has_gold = any(str(g.get("dataset_code")) == _gi_ds for g in _g_gold)
+    _layer_opts: list[str] = []
+    if _has_silver:
+        _layer_opts.append("Silver")
+    if _has_gold:
+        _layer_opts.append("Gold")
+    with gi2:
+        _gi_layer = st.selectbox(
+            "Layer",
+            options=_layer_opts,
+            key="global_inspect_layer",
+        )
+    if _gi_layer == "Silver":
+        _candidates = [s for s in _g_silver if str(s.get("dataset_code")) == _gi_ds]
+    else:
+        _candidates = [g for g in _g_gold if str(g.get("dataset_code")) == _gi_ds]
+    _candidates_sorted = sorted(
+        _candidates,
+        key=lambda r: int(r.get("version") or 0),
+        reverse=True,
+    )
+    _ver_labels = [
+        f"v{r.get('version')} · {_status_pill(r.get('status'))}" for r in _candidates_sorted
+    ]
+    with gi3:
+        _gi_ver_idx = st.selectbox(
+            "Version",
+            options=list(range(len(_ver_labels))),
+            format_func=lambda i: _ver_labels[i] if _ver_labels else "—",
+            key="global_inspect_ver_idx",
+        )
+    _gi_row = _candidates_sorted[_gi_ver_idx] if _candidates_sorted else None
+    with gi4:
+        if _gi_row is not None:
+            _entity_id = (
+                str(_gi_row.get("silver_dataset_id"))
+                if _gi_layer == "Silver"
+                else str(_gi_row.get("gold_dataset_id"))
+            )
+            _gi_cols = (
+                _snap.silver_columns_by_dataset.get(_entity_id, [])
+                if _gi_layer == "Silver"
+                else _snap.gold_fields_by_dataset.get(_entity_id, [])
+            )
+            with st.popover(
+                "👁️ View Schema",
+                use_container_width=True,
+                help="Open the comprehensive inspector — columns, AI "
+                "proposal, DDL, dbt model, lineage, audit.",
+            ):
+                _render_schema_inspector(
+                    layer=_gi_layer,
+                    row=_gi_row,
+                    cols=_gi_cols,
+                    entity_id=_entity_id,
+                )
+
+
+# Fill the placeholder reserved earlier inside the Global Medallion Registry
+# drill-down expander.  This makes the picker render at its visual home
+# (top of the page) while still being able to call _render_schema_inspector.
+with _global_inspect_slot.container():
+    _render_global_inspect_picker()
 
 
 @st.fragment
@@ -796,9 +1085,7 @@ def _render_client_medallion_registry() -> None:
             str((s or {}).get("created_at") or ""),
             str((g or {}).get("created_at") or ""),
         )[:19]
-        anchor_label = (
-            ", ".join(sorted(cell.get("anchors") or set())) or "—"
-        )
+        anchor_label = ", ".join(sorted(cell.get("anchors") or set())) or "—"
         _rows.append(
             {
                 "Client": cell["client_id"],
@@ -833,8 +1120,7 @@ def _render_client_medallion_registry() -> None:
         _rows = [
             r
             for r in _rows
-            if r["Reach"]
-            == _filter_reach.split(" (")[0]  # match the emoji+label prefix
+            if r["Reach"] == _filter_reach.split(" (")[0]  # match the emoji+label prefix
         ]
 
     # Apply sort.  Reach gets a custom ordinal so '🟢 All levels' surfaces
@@ -866,9 +1152,7 @@ def _render_client_medallion_registry() -> None:
         _rows.reverse()  # newest first for activity
 
     if not _rows:
-        st.caption(
-            "_(No rows match the current filters.  Adjust filter chips above.)_"
-        )
+        st.caption("_(No rows match the current filters.  Adjust filter chips above.)_")
         return
 
     # Display table — drop hidden columns
@@ -909,17 +1193,11 @@ def _render_client_medallion_registry() -> None:
         None,
     )
     _gold = next(
-        (
-            g
-            for g in _snap.gold_schemas
-            if str(g.get("gold_dataset_id")) == _sel_row["__gold_id"]
-        ),
+        (g for g in _snap.gold_schemas if str(g.get("gold_dataset_id")) == _sel_row["__gold_id"]),
         None,
     )
 
-    st.markdown(
-        f"### Actions for **{_sel_row['Client']} / {_sel_row['Dataset']}**"
-    )
+    st.markdown(f"### Actions for **{_sel_row['Client']} / {_sel_row['Dataset']}**")
 
     # Phase 17.6.5 — buffered-Submit strip removed.  Action buttons below
     # write directly to Snowflake when clicked.
@@ -946,17 +1224,13 @@ def _render_client_medallion_registry() -> None:
         # ARCHIVED  → 👁️ View                    (history only)
         # Each click writes immediately to Snowflake, invalidates the
         # snapshot, and reruns the page.
-        entity_id = str(
-            row.get("silver_dataset_id" if layer == "Silver" else "gold_dataset_id")
-        )
+        entity_id = str(row.get("silver_dataset_id" if layer == "Silver" else "gold_dataset_id"))
         layer_table = (
             f"{CONTROL_SCHEMA}.global_silver_schema_datasets"
             if layer == "Silver"
             else f"{CONTROL_SCHEMA}.global_gold_schema_datasets"
         )
-        layer_id_col = (
-            "silver_dataset_id" if layer == "Silver" else "gold_dataset_id"
-        )
+        layer_id_col = "silver_dataset_id" if layer == "Silver" else "gold_dataset_id"
 
         def _direct_make_live() -> None:
             with _warehouse(readonly=False) as _wh_w:
@@ -1067,8 +1341,7 @@ def _render_client_medallion_registry() -> None:
                     use_container_width=True,
                     disabled=True,
                     key=f"cmr_discard_disabled_{layer}_{entity_id}",
-                    help="Discard is for DRAFT only.  Use Archive for "
-                    "non-DRAFT rows.",
+                    help="Discard is for DRAFT only.  Use Archive for " "non-DRAFT rows.",
                 )
 
         with ac3:
@@ -1117,19 +1390,11 @@ def _render_client_medallion_registry() -> None:
     with g_col:
         _layer_action_panel("Gold", _gold)
 
-    # Edit deep-link spans both layers
-    st.markdown("")
-    edit_href = (
-        f"/Data_Model_Designer?dataset={_sel_row['__dataset_code']}"
-        f"&client={_sel_row['__client_id']}"
-    )
-    st.markdown(
-        f'<a href="{edit_href}" target="_self" '
-        f'style="display:inline-block;background:#1d4ed8;color:#fff;'
-        f"padding:.45rem .9rem;border-radius:6px;text-decoration:none;"
-        f'font-weight:600;">✏️ Edit in authoring view</a>',
-        unsafe_allow_html=True,
-    )
+    # (Phase 17.6) The "Edit in authoring view" deep-link button used to
+    # live here. It was a no-op in this surface: the dataset picker below
+    # filters out fully-authored (client, dataset) pairs, and LIVE rows
+    # are locked for edits anyway.  👁️ View Schema covers all read needs;
+    # to change a LIVE row, archive it and re-author from the picker.
 
 
 # Top-level h2 to match Global Medallion Registry styling.  The expander
@@ -1169,6 +1434,23 @@ st.markdown("---")
 # on every source row.
 # ═════════════════════════════════════════════════════════════════════════════
 import uuid as _cc_uuid  # noqa: E402
+
+
+def _cc_pick(d: dict, *keys: str, default: Any = None) -> Any:
+    """First-non-None lookup across multiple keys.  The naive
+    ``d.get(k1) or d.get(k2)`` pattern collapses to ``default`` whenever
+    the value is legitimately ``False``, ``0``, or ``""`` — which broke
+    the clone applier on every NOT NULL BOOLEAN column whose source value
+    was ``False`` (e.g. ``nullable=False`` for a NOT NULL column).
+
+    Walks keys in order, returns the first value that is not ``None``,
+    falls back to ``default`` if every key is missing.
+    """
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return default
 
 
 def _cc_target_client_normalized(s: str) -> str | None:
@@ -1222,20 +1504,35 @@ def _cc_source_eligible(row: dict[str, Any] | None) -> str | None:
 
 
 def _cc_build_silver_applier(
-    source_silver_id: str, target_client: str
+    source_silver_id: str, target_client: str, new_id: str
 ) -> Callable[[Any], None]:
-    """Return an apply(wh) callable that runs the multi-table Silver clone."""
+    """Return an apply(wh) callable that runs the multi-table Silver clone.
+
+    ``new_id`` is generated by the caller so failures can be cleaned up
+    via a cascade DELETE keyed on the same ID — Snowflake autocommits each
+    statement, so a half-clone otherwise leaves a zombie DRAFT.
+    """
 
     def apply(wh: Any) -> None:
-        new_id = str(_cc_uuid.uuid4())
         # 1. Header — start at v1 under target client.
+        # Phase 17.6 fix — carry forward the source row's AI fields
+        # (ai_proposal_json, ai_rationale, ai_token_count, ai_latency_ms)
+        # AND import_format + is_overkill_flag so the cloned row owns its
+        # OWN copy of the proposal.  The "Cloned from..." marker now lives
+        # in the notes column where it belongs — it must NOT overwrite
+        # ai_rationale or the View Schema AI Proposal tab goes blank.
         wh.execute(
             f"INSERT INTO {CONTROL_SCHEMA}.global_silver_schema_datasets "
             f"(silver_dataset_id, dataset_code, silver_pattern, version, "
-            f" status, silver_anchor, source, scope_owner, "
+            f" status, silver_anchor, source, scope_owner, import_format, "
+            f" is_overkill_flag, ai_proposal_json, ai_rationale, "
+            f" ai_token_count, ai_latency_ms, "
             f" forked_from_global_version, notes, created_by, created_at) "
             f"SELECT $newid, dataset_code, silver_pattern, 1, 'DRAFT', "
-            f"       silver_anchor, 'CLONE', $owner, version, "
+            f"       silver_anchor, 'CLONE', $owner, import_format, "
+            f"       is_overkill_flag, ai_proposal_json, ai_rationale, "
+            f"       ai_token_count, ai_latency_ms, "
+            f"       version, "
             f"       'Cloned from ' || scope_owner || ' v' || version || "
             f"           ' on ' || CAST(CURRENT_TIMESTAMP() AS VARCHAR), "
             f"       $by, CURRENT_TIMESTAMP() "
@@ -1272,14 +1569,16 @@ def _cc_build_silver_applier(
                 {
                     "tid": new_tid,
                     "sid": new_id,
-                    "ds": t.get("dataset_code") or t.get("DATASET_CODE"),
-                    "tn": t.get("table_name") or t.get("TABLE_NAME"),
-                    "tk": t.get("table_kind") or t.get("TABLE_KIND"),
-                    "ptid": t.get("parent_silver_table_id") or t.get("PARENT_SILVER_TABLE_ID"),
-                    "bk": t.get("business_keys_json") or t.get("BUSINESS_KEYS_JSON"),
-                    "lh": t.get("linked_hub_ids_json") or t.get("LINKED_HUB_IDS_JSON"),
-                    "ord": t.get("table_order") or t.get("TABLE_ORDER"),
-                    "desc": t.get("description") or t.get("DESCRIPTION"),
+                    "ds": _cc_pick(t, "dataset_code", "DATASET_CODE"),
+                    "tn": _cc_pick(t, "table_name", "TABLE_NAME"),
+                    "tk": _cc_pick(t, "table_kind", "TABLE_KIND"),
+                    "ptid": _cc_pick(t, "parent_silver_table_id", "PARENT_SILVER_TABLE_ID"),
+                    "bk": _cc_pick(t, "business_keys_json", "BUSINESS_KEYS_JSON"),
+                    "lh": _cc_pick(t, "linked_hub_ids_json", "LINKED_HUB_IDS_JSON"),
+                    # table_order is INTEGER NOT NULL DEFAULT 0 — protect
+                    # against `0 or None == None` collapse.
+                    "ord": _cc_pick(t, "table_order", "TABLE_ORDER", default=0),
+                    "desc": _cc_pick(t, "description", "DESCRIPTION"),
                 },
             )
         # 3. Columns — remap silver_column_id, point to new silver_table_id
@@ -1309,16 +1608,20 @@ def _cc_build_silver_applier(
                     "cid": new_cid,
                     "tid": table_remap.get(old_tid, old_tid),
                     "sid": new_id,
-                    "ord": c.get("column_order") or c.get("COLUMN_ORDER"),
-                    "name": c.get("column_name") or c.get("COLUMN_NAME"),
-                    "type": c.get("logical_type") or c.get("LOGICAL_TYPE"),
-                    "null": c.get("nullable") or c.get("NULLABLE"),
-                    "bk": c.get("is_business_key") or c.get("IS_BUSINESS_KEY"),
-                    "hk": c.get("is_hash_key") or c.get("IS_HASH_KEY"),
-                    "hd": c.get("is_hash_diff") or c.get("IS_HASH_DIFF"),
-                    "pii": c.get("is_pii") or c.get("IS_PII"),
-                    "phi": c.get("is_phi") or c.get("IS_PHI"),
-                    "desc": c.get("description") or c.get("DESCRIPTION"),
+                    # Defaults match the table DDL so the clone never
+                    # writes NULL into a NOT NULL column even if the source
+                    # row is somehow missing a boolean.  `nullable` defaults
+                    # TRUE; every is_* flag defaults FALSE.
+                    "ord": _cc_pick(c, "column_order", "COLUMN_ORDER", default=0),
+                    "name": _cc_pick(c, "column_name", "COLUMN_NAME"),
+                    "type": _cc_pick(c, "logical_type", "LOGICAL_TYPE", default="TEXT"),
+                    "null": _cc_pick(c, "nullable", "NULLABLE", default=True),
+                    "bk": _cc_pick(c, "is_business_key", "IS_BUSINESS_KEY", default=False),
+                    "hk": _cc_pick(c, "is_hash_key", "IS_HASH_KEY", default=False),
+                    "hd": _cc_pick(c, "is_hash_diff", "IS_HASH_DIFF", default=False),
+                    "pii": _cc_pick(c, "is_pii", "IS_PII", default=False),
+                    "phi": _cc_pick(c, "is_phi", "IS_PHI", default=False),
+                    "desc": _cc_pick(c, "description", "DESCRIPTION"),
                 },
             )
         # 4. Bronze→Silver mappings
@@ -1343,13 +1646,15 @@ def _cc_build_silver_applier(
                     "mid": str(_cc_uuid.uuid4()),
                     "cid": col_remap.get(old_mid_col, old_mid_col),
                     "sid": new_id,
-                    "tn": m.get("silver_table_name") or m.get("SILVER_TABLE_NAME"),
-                    "cn": m.get("silver_column_name") or m.get("SILVER_COLUMN_NAME"),
-                    "bsc": m.get("bronze_source_columns") or m.get("BRONZE_SOURCE_COLUMNS"),
-                    "tk": m.get("transform_kind") or m.get("TRANSFORM_KIND"),
-                    "sql": m.get("transform_sql") or m.get("TRANSFORM_SQL"),
-                    "rat": m.get("rationale") or m.get("RATIONALE"),
-                    "conf": m.get("confidence") or m.get("CONFIDENCE"),
+                    "tn": _cc_pick(m, "silver_table_name", "SILVER_TABLE_NAME"),
+                    "cn": _cc_pick(m, "silver_column_name", "SILVER_COLUMN_NAME"),
+                    "bsc": _cc_pick(m, "bronze_source_columns", "BRONZE_SOURCE_COLUMNS"),
+                    "tk": _cc_pick(m, "transform_kind", "TRANSFORM_KIND"),
+                    "sql": _cc_pick(m, "transform_sql", "TRANSFORM_SQL"),
+                    "rat": _cc_pick(m, "rationale", "RATIONALE"),
+                    # confidence is DECIMAL nullable — `0` is a legit value
+                    # so `or` would corrupt it to None.
+                    "conf": _cc_pick(m, "confidence", "CONFIDENCE"),
                     "by": "ui:cloning_center",
                 },
             )
@@ -1358,19 +1663,28 @@ def _cc_build_silver_applier(
 
 
 def _cc_build_gold_applier(
-    source_gold_id: str, target_client: str
+    source_gold_id: str, target_client: str, new_id: str
 ) -> Callable[[Any], None]:
-    """Apply(wh) for Gold clone — simpler, just header + fields."""
+    """Apply(wh) for Gold clone — simpler, just header + fields.
+
+    ``new_id`` is generated by the caller so a mid-clone failure can be
+    rolled back via cascade DELETE keyed on the same ID.
+    """
 
     def apply(wh: Any) -> None:
-        new_id = str(_cc_uuid.uuid4())
+        # Phase 17.6 fix — carry forward AI fields + import_format so the
+        # cloned Gold row owns its own copy of the proposal narrative.
+        # The "Cloned from…" stamp goes in notes, NOT ai_rationale.
         wh.execute(
             f"INSERT INTO {CONTROL_SCHEMA}.global_gold_schema_datasets "
             f"(gold_dataset_id, dataset_code, gold_table_name, version, "
-            f" status, gold_anchor, source, scope_owner, "
+            f" status, gold_anchor, source, scope_owner, import_format, "
+            f" ai_proposal_json, ai_rationale, ai_token_count, ai_latency_ms, "
             f" forked_from_global_version, notes, created_by, created_at) "
             f"SELECT $newid, dataset_code, gold_table_name, 1, 'DRAFT', "
-            f"       gold_anchor, 'CLONE', $owner, version, "
+            f"       gold_anchor, 'CLONE', $owner, import_format, "
+            f"       ai_proposal_json, ai_rationale, ai_token_count, ai_latency_ms, "
+            f"       version, "
             f"       'Cloned from ' || scope_owner || ' v' || version || "
             f"           ' on ' || CAST(CURRENT_TIMESTAMP() AS VARCHAR), "
             f"       $by, CURRENT_TIMESTAMP() "
@@ -1430,22 +1744,14 @@ def _checkbox_multiselect(
     # state_key.  Computed BEFORE rendering anything so button disabled-
     # states always reflect the live selection.
     selected: list[str] = [
-        opt
-        for opt in eff_options
-        if st.session_state.get(f"{key}_cb_{opt}", False)
+        opt for opt in eff_options if st.session_state.get(f"{key}_cb_{opt}", False)
     ]
-    selected += [
-        s
-        for s in st.session_state.get(state_key, [])
-        if s not in eff_options
-    ]
+    selected += [s for s in st.session_state.get(state_key, []) if s not in eff_options]
     # Mirror back to state_key so other code that reads it sees the
     # current truth.
     st.session_state[state_key] = list(selected)
 
-    btn_label = (
-        f"☑️ {label} — {len(selected)} selected" if selected else f"☑️ {label}"
-    )
+    btn_label = f"☑️ {label} — {len(selected)} selected" if selected else f"☑️ {label}"
 
     with st.popover(btn_label, use_container_width=True):
         # ── PowerBI-slicer pattern ────────────────────────────────────
@@ -1461,17 +1767,11 @@ def _checkbox_multiselect(
             label_visibility="collapsed",
         )
         s_lc = (search or "").strip().lower()
-        filtered = (
-            [o for o in eff_options if s_lc in o.lower()] if s_lc else list(eff_options)
-        )
+        filtered = [o for o in eff_options if s_lc in o.lower()] if s_lc else list(eff_options)
 
         # Master toggle — single button, dynamic label.
-        n_sel_in_filt = sum(
-            1 for o in filtered if st.session_state.get(f"{key}_cb_{o}", False)
-        )
-        all_in_filt_selected = (
-            bool(filtered) and n_sel_in_filt == len(filtered)
-        )
+        n_sel_in_filt = sum(1 for o in filtered if st.session_state.get(f"{key}_cb_{o}", False))
+        all_in_filt_selected = bool(filtered) and n_sel_in_filt == len(filtered)
         if eff_options:
             master_label = (
                 f"✕ Clear ({len(filtered)})"
@@ -1513,9 +1813,7 @@ def _checkbox_multiselect(
             st.markdown("")  # tight separator
             for c in list(_custom):
                 rm_col, lbl_col = st.columns([1, 9])
-                if rm_col.button(
-                    "✕", key=f"{key}_rm_{c}", help="Remove this custom entry"
-                ):
+                if rm_col.button("✕", key=f"{key}_rm_{c}", help="Remove this custom entry"):
                     selected.remove(c)
                     st.session_state[state_key] = selected
                     st.rerun(scope="fragment")
@@ -1531,11 +1829,7 @@ def _checkbox_multiselect(
             )
             if new_val:
                 norm = new_val.strip().lower()
-                if (
-                    norm
-                    and norm not in selected
-                    and norm not in eff_options
-                ):
+                if norm and norm not in selected and norm not in eff_options:
                     selected.append(norm)
                     del st.session_state[f"{key}_new"]
                     st.session_state[state_key] = selected
@@ -1579,53 +1873,84 @@ def _cc_run_silver_clone_now(
 ) -> None:
     """Direct-write Silver clone.  Lands as DRAFT by default; pass
     target_status='LIVE' for save-and-make-live.  Sets approved_by/at
-    when target_status='LIVE' so audit trail is intact."""
-    applier = _cc_build_silver_applier(source_silver_id, target_client)
+    when target_status='LIVE' so audit trail is intact.
+
+    Snowflake autocommits each statement — so a mid-clone failure (e.g.
+    NOT NULL violation on column N+1) would otherwise leave a half-cloned
+    DRAFT row + partial children.  We capture new_id up front, run the
+    applier in try/except, and cascade-DELETE on any exception so the
+    operator can retry cleanly.
+    """
+    new_id = str(_cc_uuid.uuid4())
+    applier = _cc_build_silver_applier(source_silver_id, target_client, new_id)
     with _warehouse(readonly=False) as _wh_w:
-        applier(_wh_w)
+        try:
+            applier(_wh_w)
+        except Exception:
+            # Best-effort cleanup of any rows the applier managed to
+            # insert before failing.  Order: children → parent.
+            for stmt in (
+                f"DELETE FROM {CONTROL_SCHEMA}.bronze_to_silver_mappings "
+                f"WHERE silver_dataset_id = $sid",
+                f"DELETE FROM {CONTROL_SCHEMA}.global_silver_schema_columns "
+                f"WHERE silver_dataset_id = $sid",
+                f"DELETE FROM {CONTROL_SCHEMA}.global_silver_schema_tables "
+                f"WHERE silver_dataset_id = $sid",
+                f"DELETE FROM {CONTROL_SCHEMA}.global_silver_schema_datasets "
+                f"WHERE silver_dataset_id = $sid",
+            ):
+                try:
+                    _wh_w.execute(stmt, {"sid": new_id})
+                except Exception:
+                    pass  # cleanup is best-effort; never mask original error
+            raise
         if target_status != "DRAFT":
-            # Locate the just-inserted row by created_by + most-recent
-            # created_at scoped to (target_client, this dataset).  The
-            # applier writes created_by='ui:cloning_center'.
+            # Promote the JUST-cloned row by ID — no fragile "most-recent
+            # DRAFT" lookup that could promote the wrong row when two
+            # operators clone concurrently.
             _wh_w.execute(
                 f"UPDATE {CONTROL_SCHEMA}.global_silver_schema_datasets "
                 f"SET status = $st, "
                 f"    approved_at = CURRENT_TIMESTAMP(), "
                 f"    approved_by = 'ui:cloning_center' "
-                f"WHERE silver_dataset_id = ("
-                f"  SELECT silver_dataset_id "
-                f"  FROM {CONTROL_SCHEMA}.global_silver_schema_datasets "
-                f"  WHERE scope_owner = $owner "
-                f"    AND created_by = 'ui:cloning_center' "
-                f"    AND status = 'DRAFT' "
-                f"  ORDER BY created_at DESC LIMIT 1"
-                f")",
-                {"st": target_status, "owner": target_client},
+                f"WHERE silver_dataset_id = $sid",
+                {"st": target_status, "sid": new_id},
             )
 
 
 def _cc_run_gold_clone_now(
     source_gold_id: str, target_client: str, *, target_status: str = "DRAFT"
 ) -> None:
-    """Direct-write Gold clone — DRAFT or LIVE."""
-    applier = _cc_build_gold_applier(source_gold_id, target_client)
+    """Direct-write Gold clone — DRAFT or LIVE.
+
+    Same rollback-on-failure pattern as Silver: capture new_id up front,
+    cascade-DELETE on any exception so partial clones never linger.
+    """
+    new_id = str(_cc_uuid.uuid4())
+    applier = _cc_build_gold_applier(source_gold_id, target_client, new_id)
     with _warehouse(readonly=False) as _wh_w:
-        applier(_wh_w)
+        try:
+            applier(_wh_w)
+        except Exception:
+            for stmt in (
+                f"DELETE FROM {CONTROL_SCHEMA}.global_gold_schema_fields "
+                f"WHERE gold_dataset_id = $gid",
+                f"DELETE FROM {CONTROL_SCHEMA}.global_gold_schema_datasets "
+                f"WHERE gold_dataset_id = $gid",
+            ):
+                try:
+                    _wh_w.execute(stmt, {"gid": new_id})
+                except Exception:
+                    pass
+            raise
         if target_status != "DRAFT":
             _wh_w.execute(
                 f"UPDATE {CONTROL_SCHEMA}.global_gold_schema_datasets "
                 f"SET status = $st, "
                 f"    approved_at = CURRENT_TIMESTAMP(), "
                 f"    approved_by = 'ui:cloning_center' "
-                f"WHERE gold_dataset_id = ("
-                f"  SELECT gold_dataset_id "
-                f"  FROM {CONTROL_SCHEMA}.global_gold_schema_datasets "
-                f"  WHERE scope_owner = $owner "
-                f"    AND created_by = 'ui:cloning_center' "
-                f"    AND status = 'DRAFT' "
-                f"  ORDER BY created_at DESC LIMIT 1"
-                f")",
-                {"st": target_status, "owner": target_client},
+                f"WHERE gold_dataset_id = $gid",
+                {"st": target_status, "gid": new_id},
             )
 
 
@@ -1648,12 +1973,8 @@ def _render_cloning_center() -> None:
     )
 
     # Build the universe of LIVE-only sources we can clone from.
-    _g_silver_live = [
-        s for s in _g_silver if str(s.get("status")) == "LIVE"
-    ]
-    _g_gold_live = [
-        g for g in _g_gold if str(g.get("status")) == "LIVE"
-    ]
+    _g_silver_live = [s for s in _g_silver if str(s.get("status")) == "LIVE"]
+    _g_gold_live = [g for g in _g_gold if str(g.get("status")) == "LIVE"]
 
     # ─── Mode A — Full Global → ONE client ─────────────────────────────
     if _mode.startswith("📦 Full Global"):
@@ -1735,10 +2056,7 @@ def _render_cloning_center() -> None:
                         )
                         cloned.append(f"Silver {ds} v{src.get('version')}")
                     except Exception as exc:
-                        st.error(
-                            f"Silver {ds} clone failed: "
-                            f"{type(exc).__name__}: {exc}"
-                        )
+                        st.error(f"Silver {ds} clone failed: " f"{type(exc).__name__}: {exc}")
                 for src in _g_gold_live:
                     ds = str(src.get("dataset_code"))
                     if _cc_gold_blocks(target, ds):
@@ -1752,10 +2070,7 @@ def _render_cloning_center() -> None:
                         )
                         cloned.append(f"Gold {ds} v{src.get('version')}")
                     except Exception as exc:
-                        st.error(
-                            f"Gold {ds} clone failed: "
-                            f"{type(exc).__name__}: {exc}"
-                        )
+                        st.error(f"Gold {ds} clone failed: " f"{type(exc).__name__}: {exc}")
                 if cloned:
                     _dmd_top.invalidate()
                     st.toast(
@@ -1767,9 +2082,7 @@ def _render_cloning_center() -> None:
                     )
                     st.rerun()
                 if skipped:
-                    with st.expander(
-                        f"Skipped ({len(skipped)})", expanded=False
-                    ):
+                    with st.expander(f"Skipped ({len(skipped)})", expanded=False):
                         for s in skipped:
                             st.markdown(f"  - {s}")
                 if not cloned and not skipped:
@@ -1787,12 +2100,7 @@ def _render_cloning_center() -> None:
         )
         col1, col2, col3, col4 = st.columns([2, 2, 1.3, 1.3])
         with col1:
-            _live_ds = sorted(
-                {
-                    str(s.get("dataset_code"))
-                    for s in _g_silver_live + _g_gold_live
-                }
-            )
+            _live_ds = sorted({str(s.get("dataset_code")) for s in _g_silver_live + _g_gold_live})
             _gd_dataset = st.selectbox(
                 "Global dataset (LIVE)",
                 options=["— Select —", *_live_ds] if _live_ds else ["(no LIVE Globals)"],
@@ -1830,11 +2138,7 @@ def _render_cloning_center() -> None:
             _gd_save_draft = st.button(
                 "💾 Save as Draft",
                 use_container_width=True,
-                disabled=not (
-                    _gd_dataset
-                    and _gd_dataset != "— Select —"
-                    and _gd_target
-                ),
+                disabled=not (_gd_dataset and _gd_dataset != "— Select —" and _gd_target),
                 key="cc_gd_save_draft",
                 help="Clone source LIVE Silver+Gold to target as DRAFT.",
             )
@@ -1844,11 +2148,7 @@ def _render_cloning_center() -> None:
                 "🚀 Save & Make LIVE",
                 type="primary",
                 use_container_width=True,
-                disabled=not (
-                    _gd_dataset
-                    and _gd_dataset != "— Select —"
-                    and _gd_target
-                ),
+                disabled=not (_gd_dataset and _gd_dataset != "— Select —" and _gd_target),
                 key="cc_gd_save_live",
                 help="Clone + immediately mark LIVE.  Skip review.",
             )
@@ -1878,9 +2178,7 @@ def _render_cloning_center() -> None:
                         )
                         cloned_layers.append(f"Silver v{_src_s.get('version')}")
                     except Exception as exc:
-                        st.error(
-                            f"Silver clone failed: {type(exc).__name__}: {exc}"
-                        )
+                        st.error(f"Silver clone failed: {type(exc).__name__}: {exc}")
                 elif _src_s and _cc_silver_blocks(target, ds):
                     blockers.append(
                         "Silver — target already has it.  Archive in the "
@@ -1901,13 +2199,9 @@ def _render_cloning_center() -> None:
                         )
                         cloned_layers.append(f"Gold v{_src_g.get('version')}")
                     except Exception as exc:
-                        st.error(
-                            f"Gold clone failed: {type(exc).__name__}: {exc}"
-                        )
+                        st.error(f"Gold clone failed: {type(exc).__name__}: {exc}")
                 elif _src_g and _cc_gold_blocks(target, ds):
-                    blockers.append(
-                        "Gold — target already has it.  Archive first."
-                    )
+                    blockers.append("Gold — target already has it.  Archive first.")
 
                 if cloned_layers:
                     _dmd_top.invalidate()
@@ -1921,12 +2215,7 @@ def _render_cloning_center() -> None:
                 if blockers:
                     for b in blockers:
                         st.warning(f"⚠️ {b}")
-                if (
-                    not cloned_layers
-                    and not blockers
-                    and not _src_s
-                    and not _src_g
-                ):
+                if not cloned_layers and not blockers and not _src_s and not _src_g:
                     st.info(
                         f"No LIVE Global Silver or Gold for `{ds}` — "
                         f"author + promote one first."
@@ -1970,24 +2259,17 @@ def _render_cloning_center() -> None:
                         and str(g.get("status")) == "LIVE"
                     ]
                     _src_ds_options = sorted(
-                        {
-                            str(r.get("dataset_code"))
-                            for r in _src_silver_for + _src_gold_for
-                        }
+                        {str(r.get("dataset_code")) for r in _src_silver_for + _src_gold_for}
                     )
                 _cc_dataset = st.selectbox(
                     "Dataset (LIVE in source)",
-                    options=["— Select —", *_src_ds_options]
-                    if _src_ds_options
-                    else ["(none)"],
+                    options=["— Select —", *_src_ds_options] if _src_ds_options else ["(none)"],
                     index=0,
                     disabled=not _src_ds_options,
                     key="cc_cc_dataset",
                 )
             with col3:
-                _tgt_options = [
-                    c for c in _snap.distinct_clients if c != _src_client
-                ]
+                _tgt_options = [c for c in _snap.distinct_clients if c != _src_client]
                 _tgt_pick_options = [
                     "— Select —",
                     *_tgt_options,
@@ -2015,9 +2297,7 @@ def _render_cloning_center() -> None:
                     "💾 Save as Draft",
                     use_container_width=True,
                     disabled=not (
-                        _src_client != "— Select —"
-                        and _cc_dataset != "— Select —"
-                        and _cc_target
+                        _src_client != "— Select —" and _cc_dataset != "— Select —" and _cc_target
                     ),
                     key="cc_cc_save_draft",
                 )
@@ -2028,9 +2308,7 @@ def _render_cloning_center() -> None:
                     type="primary",
                     use_container_width=True,
                     disabled=not (
-                        _src_client != "— Select —"
-                        and _cc_dataset != "— Select —"
-                        and _cc_target
+                        _src_client != "— Select —" and _cc_dataset != "— Select —" and _cc_target
                     ),
                     key="cc_cc_save_live",
                 )
@@ -2066,18 +2344,11 @@ def _render_cloning_center() -> None:
                                 target,
                                 target_status=_cc_target_status,
                             )
-                            cloned_layers.append(
-                                f"Silver v{_src_s_pick.get('version')}"
-                            )
+                            cloned_layers.append(f"Silver v{_src_s_pick.get('version')}")
                         except Exception as exc:
-                            st.error(
-                                f"Silver clone failed: "
-                                f"{type(exc).__name__}: {exc}"
-                            )
+                            st.error(f"Silver clone failed: " f"{type(exc).__name__}: {exc}")
                     elif _src_s_pick and _cc_silver_blocks(target, ds):
-                        blockers.append(
-                            "Silver — target already has it.  Archive first."
-                        )
+                        blockers.append("Silver — target already has it.  Archive first.")
 
                     _src_g_pick = max(
                         [
@@ -2097,18 +2368,11 @@ def _render_cloning_center() -> None:
                                 target,
                                 target_status=_cc_target_status,
                             )
-                            cloned_layers.append(
-                                f"Gold v{_src_g_pick.get('version')}"
-                            )
+                            cloned_layers.append(f"Gold v{_src_g_pick.get('version')}")
                         except Exception as exc:
-                            st.error(
-                                f"Gold clone failed: "
-                                f"{type(exc).__name__}: {exc}"
-                            )
+                            st.error(f"Gold clone failed: " f"{type(exc).__name__}: {exc}")
                     elif _src_g_pick and _cc_gold_blocks(target, ds):
-                        blockers.append(
-                            "Gold — target already has it.  Archive first."
-                        )
+                        blockers.append("Gold — target already has it.  Archive first.")
 
                     if cloned_layers:
                         _dmd_top.invalidate()
@@ -2122,10 +2386,7 @@ def _render_cloning_center() -> None:
                         for b in blockers:
                             st.warning(f"⚠️ {b}")
                     if not cloned_layers and not blockers:
-                        st.info(
-                            f"No LIVE source rows for `{ds}` under "
-                            f"`{_src_client}`."
-                        )
+                        st.info(f"No LIVE source rows for `{ds}` under " f"`{_src_client}`.")
 
 
 # Cloning Center invocation moved to the END of the file per user request:
@@ -2191,9 +2452,7 @@ def _has_full_authoring(scope_owner: str, ds_code: str) -> bool:
     silver_rows = _snap.silver_for(
         scope_owner=scope_owner, dataset_code=ds_code, exclude_archived=True
     )
-    gold_rows = _snap.gold_for(
-        scope_owner=scope_owner, dataset_code=ds_code, exclude_archived=True
-    )
+    gold_rows = _snap.gold_for(scope_owner=scope_owner, dataset_code=ds_code, exclude_archived=True)
     return bool(silver_rows) and bool(gold_rows)
 
 
@@ -2214,9 +2473,7 @@ with col_anchor:
         anchor_options = [_SENTINEL, *anchor_options_raw]
         # Default to CATALOG_ANCHOR when present; otherwise sentinel.
         _anc_default_idx = (
-            anchor_options.index("CATALOG_ANCHOR")
-            if "CATALOG_ANCHOR" in anchor_options
-            else 0
+            anchor_options.index("CATALOG_ANCHOR") if "CATALOG_ANCHOR" in anchor_options else 0
         )
         _anchor_pick = st.selectbox(
             "Anchor",
@@ -2261,9 +2518,7 @@ with col_ds:
         _ds_eligible = [
             d
             for d in _snap.bronze_datasets
-            if not _has_full_authoring(
-                selected_client_for_authoring, str(d["dataset_code"])
-            )
+            if not _has_full_authoring(selected_client_for_authoring, str(d["dataset_code"]))
         ]
         if not _ds_eligible:
             st.selectbox(
@@ -2281,10 +2536,7 @@ with col_ds:
         else:
             ds_label_to_obj = {_SENTINEL: None}
             for d in _ds_eligible:
-                lbl = (
-                    f"{d['display_name']}  ({d['total_fields']} fields, "
-                    f"{d['category']})"
-                )
+                lbl = f"{d['display_name']}  ({d['total_fields']} fields, " f"{d['category']})"
                 ds_label_to_obj[lbl] = d
             _ds_options = list(ds_label_to_obj.keys())
 
@@ -2346,9 +2598,7 @@ if False:
             else "CATALOG_ANCHOR"
         )
         _anc_default_idx = (
-            anchor_options.index(default_anchor)
-            if default_anchor in anchor_options
-            else 0
+            anchor_options.index(default_anchor) if default_anchor in anchor_options else 0
         )
         _anchor_pick = st.selectbox(
             "Anchor",
@@ -2362,12 +2612,8 @@ if False:
         anchor = _anchor_pick if _anchor_pick != _SENTINEL else None
 
 # Surface clear status of the gate.
-selected_dataset_code = (
-    str(selected_dataset["dataset_code"]) if selected_dataset else ""
-)
-selected_dataset_display = (
-    str(selected_dataset["display_name"]) if selected_dataset else ""
-)
+selected_dataset_code = str(selected_dataset["dataset_code"]) if selected_dataset else ""
+selected_dataset_display = str(selected_dataset["display_name"]) if selected_dataset else ""
 _authoring_unlocked = bool(
     selected_client_for_authoring
     and selected_client_for_authoring != _SENTINEL
@@ -2378,18 +2624,13 @@ _authoring_unlocked = bool(
 # Wire selected_client_for_authoring through under the legacy variable name
 # so downstream blocks (which reference 'selected_client') continue to work.
 selected_client = (
-    selected_client_for_authoring
-    if selected_client_for_authoring != _SENTINEL
-    else None
+    selected_client_for_authoring if selected_client_for_authoring != _SENTINEL else None
 )
 
 if not _authoring_unlocked:
     # Friendly gating banner — tells the operator EXACTLY what's missing.
     _missing: list[str] = []
-    if (
-        not selected_client_for_authoring
-        or selected_client_for_authoring == _SENTINEL
-    ):
+    if not selected_client_for_authoring or selected_client_for_authoring == _SENTINEL:
         _missing.append("Client")
     if not selected_dataset:
         _missing.append("Dataset")
@@ -2405,8 +2646,6 @@ if not _authoring_unlocked:
 # Cloning Center is invoked AFTER this conditional so it always shows,
 # even when no Client/Dataset/Anchor is picked yet.
 if _authoring_unlocked:
-
-
     # ---------------------------------------------------------------------------
     # Layer navigation — radio-as-tabs
     # ---------------------------------------------------------------------------
@@ -2438,7 +2677,9 @@ if _authoring_unlocked:
                 if _global_silver_live:
                     pills.append('<span class="dmd-pill dmd-pill-live">Silver-LIVE (global)</span>')
                 else:
-                    pills.append('<span class="dmd-pill dmd-pill-dev">Silver-MISSING (global)</span>')
+                    pills.append(
+                        '<span class="dmd-pill dmd-pill-dev">Silver-MISSING (global)</span>'
+                    )
                 if _global_gold_live:
                     pills.append('<span class="dmd-pill dmd-pill-live">Gold-LIVE (global)</span>')
                 else:
@@ -2594,7 +2835,6 @@ if _authoring_unlocked:
         None,
     )
 
-
     # ===========================================================================
     # 🥉 BRONZE TAB — read-only
     # ===========================================================================
@@ -2629,7 +2869,6 @@ if _authoring_unlocked:
                     }
                 )
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
 
     # ===========================================================================
     # 🥈 SILVER TAB — designable, 3 modes, version history
@@ -2776,7 +3015,9 @@ if _authoring_unlocked:
                 type="primary",
                 key="silver_ai_propose",
                 disabled=not _silver_ai_confirm,
-                help=None if _silver_ai_confirm else "🔒 Tick the AI-spend confirm box above to enable.",
+                help=None
+                if _silver_ai_confirm
+                else "🔒 Tick the AI-spend confirm box above to enable.",
             ):
                 with (
                     st.spinner(
@@ -2833,7 +3074,9 @@ if _authoring_unlocked:
             ac1, ac2, ac3, ac4 = st.columns([1, 1, 1, 4])
             with ac1:
                 if st.button(
-                    "➕ Add HUB", use_container_width=True, key=f"man_add_hub_{selected_dataset_code}"
+                    "➕ Add HUB",
+                    use_container_width=True,
+                    key=f"man_add_hub_{selected_dataset_code}",
                 ):
                     man_tables.append(
                         {
@@ -2870,7 +3113,9 @@ if _authoring_unlocked:
                     st.rerun()
             with ac2:
                 if st.button(
-                    "➕ Add SAT", use_container_width=True, key=f"man_add_sat_{selected_dataset_code}"
+                    "➕ Add SAT",
+                    use_container_width=True,
+                    key=f"man_add_sat_{selected_dataset_code}",
                 ):
                     man_tables.append(
                         {
@@ -2907,7 +3152,9 @@ if _authoring_unlocked:
                     st.rerun()
             with ac3:
                 if st.button(
-                    "➕ Add LINK", use_container_width=True, key=f"man_add_link_{selected_dataset_code}"
+                    "➕ Add LINK",
+                    use_container_width=True,
+                    key=f"man_add_link_{selected_dataset_code}",
                 ):
                     man_tables.append(
                         {
@@ -2973,7 +3220,9 @@ if _authoring_unlocked:
                             + [
                                 {
                                     "name": str(
-                                        f.get("bronze_column_name") or f.get("gold_column_name") or ""
+                                        f.get("bronze_column_name")
+                                        or f.get("gold_column_name")
+                                        or ""
                                     ),
                                     "logical_type": str(f.get("logical_type") or "VARCHAR").upper(),
                                     "nullable": False,
@@ -3258,7 +3507,9 @@ if _authoring_unlocked:
 
                         payload = _json.loads(sample_text)
                         if isinstance(payload, list) and payload:
-                            headers = list(payload[0].keys()) if isinstance(payload[0], dict) else []
+                            headers = (
+                                list(payload[0].keys()) if isinstance(payload[0], dict) else []
+                            )
                             rows = [
                                 [str(payload[i].get(h, "")) for h in headers]
                                 for i in range(min(5, len(payload)))
@@ -3395,7 +3646,6 @@ if _authoring_unlocked:
                         st.error(f"Approve failed: {exc}")
                         st.exception(exc)
 
-
     # ===========================================================================
     # 🥇 GOLD TAB — designable, 3 modes (existing flow, gated on Silver-LIVE)
     # ===========================================================================
@@ -3492,7 +3742,9 @@ if _authoring_unlocked:
                 type="primary",
                 key="gold_ai_propose",
                 disabled=not _gold_ai_confirm,
-                help=None if _gold_ai_confirm else "🔒 Tick the AI-spend confirm box above to enable.",
+                help=None
+                if _gold_ai_confirm
+                else "🔒 Tick the AI-spend confirm box above to enable.",
             ):
                 with (
                     st.spinner(f"Agent constructing Gold for {selected_dataset_display}..."),
@@ -3658,7 +3910,9 @@ if _authoring_unlocked:
             st.markdown("---")
             st.markdown("#### 📋 Gold proposal — review")
             st.markdown(f"**Rationale:** {gold_proposal.get('rationale', '')}")
-            with st.expander(f"Gold columns ({len(gold_proposal['proposed_columns'])})", expanded=True):
+            with st.expander(
+                f"Gold columns ({len(gold_proposal['proposed_columns'])})", expanded=True
+            ):
                 col_rows = []
                 for c in gold_proposal["proposed_columns"]:
                     col_rows.append(
@@ -3729,12 +3983,13 @@ if _authoring_unlocked:
                             gold_dataset_id=gid,
                             actor=f"ui:{st.session_state.get('client_id', 'operator')}",
                         )
-                        st.success(f"🎉 LIVE — Gold schema for `{selected_dataset_code}` is now LIVE.")
+                        st.success(
+                            f"🎉 LIVE — Gold schema for `{selected_dataset_code}` is now LIVE."
+                        )
                         st.session_state.pop(GOLD_PROPOSAL_KEY, None)
                     except Exception as exc:
                         st.error(f"Approve failed: {exc}")
                         st.exception(exc)
-
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -25,7 +25,6 @@ The page has four sections:
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterator
 from contextlib import contextmanager
 from typing import Any
@@ -45,11 +44,9 @@ from datalink.pipeline.control_policy import (
 from datalink.quality.control import PipelineControl
 from datalink.quality.registry import ApprovalMode
 
-WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
-
-from datalink.ui._bootstrap import ensure_warehouse_exists  # noqa: E402
-
-ensure_warehouse_exists(WAREHOUSE_PATH)
+# Phase 21 — Snowflake-only.  DuckDB warehouse bootstrap removed; the
+# `_warehouse()` helper below uses the centralized Snowflake-aware
+# warehouse_ctx from datalink.ui._query.
 
 st.set_page_config(
     page_title="DataLink — Pipeline Control",

@@ -1,53 +1,41 @@
-"""DQ Review — reviewer-facing queue + diff + approve/reject actions.
+"""DQ Review — Phase 19.3 (factory-pattern, peer review).
 
-Paired with /DQ_Author. Every submission lands here; the reviewer:
-  1. Sees the queue of every PENDING_REVIEW suite (across all clients).
-  2. Picks one → sees side-by-side diff between the LIVE version and the
-     submitted version (new expectations / removed / threshold changes).
-  3. Approves (+ activates = promotes to LIVE and archives the old LIVE)
-     OR requests changes (back to DRAFT with notes) OR rejects (terminal).
+Reviewer-facing queue for DQ suites awaiting promotion.  Per (dataset, layer):
+  * See the DRAFT / PENDING_REVIEW suite next to the current LIVE (if any)
+  * Side-by-side expectations diff (added / changed / removed)
+  * Approve & Promote → DRAFT becomes LIVE; prior LIVE archived
+  * Reject + notes → DRAFT becomes ARCHIVED with reviewer feedback
 
-No direct file edits — everything audit-logged in CONTROL.dq_suite_audit_log.
+No client filter — suites are universal in the factory pattern.
 """
 
 from __future__ import annotations
 
 import json
-import os
+import sys
+import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
-import pandas as pd
 import streamlit as st
 
-from datalink.quality.registry import (
-    SuiteRegistry,
-    SuiteVersion,
-)
-from datalink.ui._query import warehouse_ctx
-
-# ============================================================================
-# CONFIG + THEME
-# ============================================================================
-
-WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
-
-# Phase 6 fix: bootstrap warehouse file + CONTROL schema before any
-# read-only connection attempt (fresh-boot fix).
-from datalink.ui._bootstrap import ensure_warehouse_exists  # noqa: E402
-
-ensure_warehouse_exists(WAREHOUSE_PATH)
+ROOT = Path(__file__).resolve().parents[3]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 st.set_page_config(
-    page_title="DataLink — DQ Review",
-    page_icon="👁️",
+    page_title="DQ Review",
+    page_icon="✅",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# Shared sidebar nav (defined in datalink/ui/_nav.py).
+from datalink.agents.dq_ai_architect import approve_and_promote  # noqa: E402
+from datalink.quality.control import CONTROL_SCHEMA, create_control_tables  # noqa: E402
 from datalink.ui._nav import render_sidebar  # noqa: E402
+from datalink.ui._query import warehouse_ctx  # noqa: E402
 
 render_sidebar(active="DQ Review")
 
@@ -58,305 +46,319 @@ st.markdown(
     f"""
     <style>
       h1 {{color: {_NAVY}; border-bottom: 3px solid {_GOLD}; padding-bottom: .4rem;}}
-      h2 {{color: {_NAVY}; margin-top: 1.5rem;}}
-      .diff-add {{background:#d1fae5;padding:.2rem .5rem;border-radius:3px}}
-      .diff-remove {{background:#fee2e2;padding:.2rem .5rem;border-radius:3px;text-decoration:line-through}}
-      .diff-change {{background:#fef3c7;padding:.2rem .5rem;border-radius:3px}}
-      .badge-HIGH {{background:#b91c1c;color:#fff;padding:.1rem .4rem;border-radius:3px;font-size:.8rem}}
-      .badge-MEDIUM {{background:#d97706;color:#fff;padding:.1rem .4rem;border-radius:3px;font-size:.8rem}}
-      .badge-LOW {{background:#047857;color:#fff;padding:.1rem .4rem;border-radius:3px;font-size:.8rem}}
+      h2 {{color: {_NAVY}; margin-top: 1.2rem;}}
     </style>
     """,
     unsafe_allow_html=True,
 )
 
 
-# ============================================================================
-# REGISTRY HELPERS (same pattern as DQ_Author)
-# ============================================================================
-
-
 @contextmanager
-def _registry(*, readonly: bool = True) -> Iterator[SuiteRegistry]:
-    """Open + close a fresh SuiteRegistry connection per operation.
-
-    Phase 7 Day 2: backend lifecycle now delegated to
-    ``datalink.ui._query.warehouse_ctx`` so DuckDB vs Snowflake is a
-    config flip, not a per-page code change.
-
-    The short-lived pattern is still required for DuckDB: Streamlit
-    re-runs the script on every interaction, and DuckDB disallows
-    concurrent read-only / read-write handles to the same file in one
-    process.
-    """
+def _warehouse(*, readonly: bool = True) -> Iterator[Any]:
     with warehouse_ctx(readonly=readonly) as wh:
-        yield SuiteRegistry(wh)  # type: ignore[arg-type]
+        yield wh
 
 
-# ============================================================================
-# DIFF ENGINE — compare two expectation lists
-# ============================================================================
+with _warehouse(readonly=False) as _wh_boot:
+    create_control_tables(_wh_boot)
 
 
-def _exp_fingerprint(e: dict[str, Any]) -> str:
-    """A stable identifier for matching expectations across versions.
-    Uses expectation_type + column (or column_A for pairwise checks)."""
-    t = e.get("expectation_type", "")
-    kw = e.get("kwargs", {}) or {}
-    col = kw.get("column") or kw.get("column_A") or kw.get("column_list", ["<table>"])[0]
-    return f"{t}::{col}"
+st.markdown("# ✅ DQ Review")
+st.caption(
+    "Peer-review queue for DQ suites awaiting promotion.  Compare the "
+    "DRAFT against the current LIVE for the same `(dataset, layer)`, "
+    "approve to promote, or reject with notes."
+)
 
 
-def _diff_suites(
-    old: list[dict[str, Any]] | None,
-    new: list[dict[str, Any]],
-) -> dict[str, list[dict[str, Any]]]:
-    """Return {added, removed, changed} lists of expectations."""
-    old = old or []
-    old_by_fp = {_exp_fingerprint(e): e for e in old}
-    new_by_fp = {_exp_fingerprint(e): e for e in new}
-    old_keys = set(old_by_fp)
-    new_keys = set(new_by_fp)
-    added = [new_by_fp[k] for k in new_keys - old_keys]
-    removed = [old_by_fp[k] for k in old_keys - new_keys]
-    changed: list[dict[str, Any]] = []
-    for k in old_keys & new_keys:
-        if json.dumps(old_by_fp[k], sort_keys=True) != json.dumps(new_by_fp[k], sort_keys=True):
-            changed.append({"old": old_by_fp[k], "new": new_by_fp[k]})
-    return {"added": added, "removed": removed, "changed": changed}
-
-
-def _exp_row(e: dict[str, Any]) -> str:
-    """Short human-readable description of one expectation."""
-    t = e.get("expectation_type", "")
-    kw = e.get("kwargs", {}) or {}
-    col = kw.get("column") or kw.get("column_A") or "—"
-    severity = (e.get("meta", {}) or {}).get("severity", "")
-    dim = (e.get("meta", {}) or {}).get("dq_dimension", "")
-    extra = ", ".join(
-        f"{k}={v}"
-        for k, v in kw.items()
-        if k not in {"column", "column_A", "column_B", "column_list"}
-    )
-    extra_s = f" ({extra})" if extra else ""
-    sev_html = f'<span class="badge-{severity}">{severity}</span>' if severity else ""
-    dim_html = f"<code>{dim}</code>" if dim else ""
-    return f"{t} on <b>{col}</b>{extra_s} {sev_html} {dim_html}"
-
-
-# ============================================================================
-# RENDER PANELS (defined before page logic runs)
-# ============================================================================
-
-
-def _render_review_panel(selected: SuiteVersion) -> None:
-    """The bottom half of the page — diff + action buttons for the picked suite."""
-    st.markdown(f"## Review: `{selected.client_id}` / `{selected.suite_name}` v{selected.version}")
-
-    # Open a fresh read connection just for this panel's reads.
-    with _registry(readonly=True) as reg:
-        live = reg.get_live(selected.client_id, selected.suite_name)
-    live_exps = live.expectations if live else []
-
-    diff = _diff_suites(live_exps, selected.expectations)
-    c_add, c_rem, c_chg = len(diff["added"]), len(diff["removed"]), len(diff["changed"])
-    st.markdown(
-        f"**Diff vs LIVE** (v{live.version if live else '—'}): "
-        f"<span class='diff-add'>+{c_add} added</span> · "
-        f"<span class='diff-remove'>−{c_rem} removed</span> · "
-        f"<span class='diff-change'>~{c_chg} changed</span>",
-        unsafe_allow_html=True,
-    )
-
-    with st.expander(f"➕ Added ({c_add})", expanded=c_add > 0):
-        for e in diff["added"]:
-            st.markdown("- " + _exp_row(e), unsafe_allow_html=True)
-    with st.expander(f"➖ Removed ({c_rem})", expanded=c_rem > 0):
-        for e in diff["removed"]:
-            st.markdown("- " + _exp_row(e), unsafe_allow_html=True)
-    with st.expander(f"🔀 Changed ({c_chg})", expanded=c_chg > 0):
-        for pair in diff["changed"]:
-            st.markdown("**was:** " + _exp_row(pair["old"]), unsafe_allow_html=True)
-            st.markdown("**now:** " + _exp_row(pair["new"]), unsafe_allow_html=True)
-            st.markdown("---")
-
-    st.markdown("### Full expectation list in this draft")
-    full_df = pd.DataFrame(
-        [
-            {
-                "expectation_type": e.get("expectation_type", ""),
-                "column": (e.get("kwargs", {}) or {}).get(
-                    "column", (e.get("kwargs", {}) or {}).get("column_A", "—")
-                ),
-                "dq_dimension": (e.get("meta", {}) or {}).get("dq_dimension", ""),
-                "severity": (e.get("meta", {}) or {}).get("severity", ""),
-                "description": (e.get("meta", {}) or {}).get("description", ""),
-            }
-            for e in selected.expectations
-        ]
-    )
-    st.dataframe(full_df, use_container_width=True, hide_index=True)
-
-    st.markdown("### Reviewer actions")
-    actor = st.text_input(
-        "Your identity (reviewer)",
-        value=st.session_state.get("user", "reviewer@local"),
-        key=f"actor_{selected.suite_id}",
-    )
-    notes = st.text_area(
-        "Review notes",
-        key=f"notes_{selected.suite_id}",
-        placeholder="e.g. LGTM — aligns with DataQuality_Metrics.docx §1.4 Accuracy.",
-    )
-    a, b, c = st.columns(3)
-    with a:
-        if st.button(
-            "✅ Approve & Activate → LIVE",
-            use_container_width=True,
-            type="primary",
-            key=f"approve_{selected.suite_id}",
-        ):
-            try:
-                with _registry(readonly=False) as reg:
-                    reg.approve(selected.suite_id, actor=actor, notes=notes)
-                    reg.activate(selected.suite_id, actor=actor)
-                st.success(
-                    f"Activated v{selected.version} as LIVE for "
-                    f"`{selected.client_id}`/`{selected.suite_name}`. "
-                    f"Previous LIVE v{live.version if live else '?'} archived."
+# ---------------------------------------------------------------------------
+# Pickers
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=30)
+def _pending_suites() -> list[dict[str, Any]]:
+    with warehouse_ctx(readonly=True) as wh:
+        try:
+            return list(
+                wh.query(
+                    f"""
+                    SELECT suite_id, suite_name, dataset_code, layer, version, status,
+                           expectations, dq_dimensions, ai_rationale,
+                           ai_token_count, created_by, created_at
+                      FROM {CONTROL_SCHEMA}.dq_suites
+                     WHERE dataset_code IS NOT NULL AND layer IS NOT NULL
+                       AND status IN ('DRAFT', 'PENDING_REVIEW')
+                     ORDER BY created_at DESC
+                    """
                 )
-                st.rerun()
-            except Exception as e:
-                st.error(f"Approve failed: {e}")
-    with b:
-        if st.button(
-            "📝 Request Changes → DRAFT",
-            use_container_width=True,
-            key=f"request_{selected.suite_id}",
-        ):
-            if not notes.strip():
-                st.error("Please leave review notes explaining what to change.")
-            else:
-                try:
-                    with _registry(readonly=False) as reg:
-                        reg.request_changes(selected.suite_id, actor=actor, notes=notes)
-                    st.success("Sent back to DRAFT for author revisions.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Request-changes failed: {e}")
-    with c:
-        if st.button(
-            "❌ Reject (terminal)", use_container_width=True, key=f"reject_{selected.suite_id}"
-        ):
-            if not notes.strip():
-                st.error("Please leave review notes explaining the rejection.")
-            else:
-                try:
-                    with _registry(readonly=False) as reg:
-                        reg.reject(selected.suite_id, actor=actor, notes=notes)
-                    st.success("Rejected. A new draft will need to be started from scratch.")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"Reject failed: {e}")
-
-    with st.expander("🧾 Audit log for this suite"):
-        _show_audit(selected.suite_id)
-
-
-def _show_audit(suite_id: str) -> None:
-    try:
-        with warehouse_ctx(readonly=True) as wh:
-            # Positional param is valid for DuckDB; Day 3 will reconcile
-            # paramstyle differences when Snowflake support lands.
-            rows = wh.query(
-                "SELECT ts, from_status, to_status, actor, notes "
-                "FROM CONTROL.dq_suite_audit_log "
-                "WHERE suite_id = ? "
-                "ORDER BY ts DESC",
-                [suite_id],
             )
-        df = pd.DataFrame(rows)
-        if df.empty:
-            st.info("No audit entries yet.")
-        else:
-            st.dataframe(df, use_container_width=True, hide_index=True)
-    except Exception as e:
-        st.error(f"Audit log read failed: {e}")
+        except Exception:
+            return []
 
 
-# ============================================================================
-# PAGE RENDER (top-to-bottom execution)
-# ============================================================================
+@st.cache_data(ttl=30)
+def _live_suite_for(dataset_code: str, layer: str) -> dict[str, Any] | None:
+    with warehouse_ctx(readonly=True) as wh:
+        try:
+            rows = list(
+                wh.query(
+                    f"""
+                    SELECT suite_id, suite_name, version, expectations,
+                           ai_rationale, activated_at, reviewed_by
+                      FROM {CONTROL_SCHEMA}.dq_suites
+                     WHERE LOWER(dataset_code) = LOWER($ds)
+                       AND UPPER(layer) = UPPER($lyr)
+                       AND status = 'LIVE'
+                     ORDER BY version DESC LIMIT 1
+                    """,
+                    {"ds": dataset_code, "lyr": layer},
+                )
+            )
+            return rows[0] if rows else None
+        except Exception:
+            return None
 
 
-st.markdown(
-    f"<h1>👁️ <span style='color:{_GOLD}'>DQ Review</span></h1>",
-    unsafe_allow_html=True,
+pending = _pending_suites()
+qp = st.query_params
+
+# Allow ?suite_id=X deep-link from Suite Registry
+deep_pick = qp.get("suite_id") if isinstance(qp, dict) else None
+
+m1, m2, m3 = st.columns(3)
+m1.metric("📝 DRAFT pending review", len(pending))
+m2.metric("Distinct datasets", len({p.get("dataset_code") for p in pending}))
+m3.metric(
+    "Distinct (dataset, layer) pairs",
+    len({(p.get("dataset_code"), p.get("layer")) for p in pending}),
 )
 
-st.markdown(
-    '<p style="color:#4a5a7e">Every submission from /DQ_Author lands here. '
-    "Review the diff vs the current LIVE, then approve + activate, request changes, or reject. "
-    "All actions are audit-logged in <code>CONTROL.dq_suite_audit_log</code>.</p>",
-    unsafe_allow_html=True,
-)
-
-try:
-    with _registry(readonly=True) as reg:
-        queue = reg.list_pending_reviews()
-except Exception as e:
-    st.error(f"Can't reach the warehouse: {e}")
+if not pending:
+    st.success(
+        "🎉 No suites awaiting review.  All caught up.  Use **🧪 DQ AI Architect** "
+        "to design new suites."
+    )
     st.stop()
 
-# Phase 6 Commit 2: suites ending with `__review` are the ONLY ones a human
-# needs to look at. Agent-authored auto-approved suites fast-track to LIVE
-# without appearing here. Human-authored suites (source=ui, source=baseline)
-# still surface normally. Filter logic:
-#   * suite_name ends with "__review"     → ALWAYS show (human-flag requires review)
-#   * suite_name starts with "auto_"      → AGENT-AUTHORED auto-approve bucket; never
-#                                            should appear here, but belt-and-braces hide
-#   * other suites (ui / baseline)        → show as-is
-queue = [
-    v for v in queue if v.suite_name.endswith("__review") or not v.suite_name.startswith("auto_")
-]
 
-st.markdown("## Pending Reviews")
+# Build picker
+options = {
+    f"{p.get('suite_name')} · v{p.get('version')} · "
+    f"{p.get('status')} · created {(str(p.get('created_at') or ''))[:19]}": str(p.get("suite_id"))
+    for p in pending
+}
 
-if not queue:
-    st.success(
-        "✓ Inbox zero. No suites awaiting human sign-off. "
-        "When agents flag rules for human review (or an analyst submits a suite), "
-        "they appear here. Agent-authored auto-approved rules go LIVE directly — "
-        "they do NOT appear on this page."
+# Find label that matches deep_pick
+default_label = "— select a suite —"
+if deep_pick:
+    for label, sid in options.items():
+        if sid == deep_pick:
+            default_label = label
+            break
+
+pick_labels = ["— select a suite —", *options.keys()]
+default_idx = pick_labels.index(default_label) if default_label in pick_labels else 0
+
+picked_label = st.selectbox(
+    "Suite to review",
+    options=pick_labels,
+    index=default_idx,
+    key="dqr_pick",
+)
+
+if picked_label == "— select a suite —":
+    st.info("Pick a suite above to start review.")
+    st.stop()
+
+picked_suite_id = options[picked_label]
+picked = next(p for p in pending if str(p.get("suite_id")) == picked_suite_id)
+ds = picked.get("dataset_code")
+layer = picked.get("layer")
+version = picked.get("version")
+
+try:
+    new_exps = json.loads(picked.get("expectations") or "[]")
+except Exception:
+    new_exps = []
+
+live = _live_suite_for(ds, layer)
+try:
+    live_exps = json.loads((live or {}).get("expectations") or "[]")
+except Exception:
+    live_exps = []
+
+
+# ---------------------------------------------------------------------------
+# Header strip
+# ---------------------------------------------------------------------------
+st.markdown(f"## 📝 Reviewing `{picked.get('suite_name')}` · v{version}")
+strip_cols = st.columns(4)
+strip_cols[0].metric("Dataset", ds)
+strip_cols[1].metric("Layer", layer)
+strip_cols[2].metric("Expectations (this DRAFT)", len(new_exps))
+strip_cols[3].metric(
+    "Expectations (current LIVE)",
+    len(live_exps) if live else "(none yet)",
+)
+
+
+# ---------------------------------------------------------------------------
+# Diff
+# ---------------------------------------------------------------------------
+def _exp_signature(e: dict[str, Any]) -> str:
+    """Stable identifier for a single expectation (for set diff)."""
+    et = str(e.get("expectation_type") or "")
+    kwargs = e.get("kwargs") or {}
+    col = str(kwargs.get("column") or kwargs.get("column_list") or "")
+    extras = sorted(
+        f"{k}={v}"
+        for k, v in kwargs.items()
+        if k not in ("column", "column_list") and v is not None
     )
-else:
-    st.write(f"**{len(queue)}** suite(s) awaiting approval:")
-    queue_df = pd.DataFrame(
-        [
-            {
-                "client_id": v.client_id,
-                "suite_name": v.suite_name,
-                "version": v.version,
-                "submitted_by": v.created_by,
-                "submitted_at": v.submitted_at.strftime("%Y-%m-%d %H:%M")
-                if v.submitted_at
-                else "—",
-                "expectations": len(v.expectations),
-                "source": v.source.value,
-                "suite_id": v.suite_id[:8],
-            }
-            for v in queue
-        ]
-    )
-    st.dataframe(queue_df, use_container_width=True, hide_index=True)
+    return f"{et}|{col}|{';'.join(extras)}"
 
-    selected_label = st.selectbox(
-        "Pick one to review",
-        options=[f"{v.client_id} / {v.suite_name} v{v.version} ({v.suite_id[:8]})" for v in queue],
-        index=0,
-    )
-    selected_id = selected_label.split("(")[-1].rstrip(")")
-    selected = next((v for v in queue if v.suite_id.startswith(selected_id)), None)
 
-    if selected is not None:
-        _render_review_panel(selected)
+live_sigs = {_exp_signature(e): e for e in live_exps}
+new_sigs = {_exp_signature(e): e for e in new_exps}
+added = [new_sigs[s] for s in new_sigs.keys() - live_sigs.keys()]
+removed = [live_sigs[s] for s in live_sigs.keys() - new_sigs.keys()]
+unchanged = [new_sigs[s] for s in new_sigs.keys() & live_sigs.keys()]
+
+dc1, dc2, dc3 = st.columns(3)
+dc1.metric("➕ Added", len(added))
+dc2.metric("➖ Removed", len(removed))
+dc3.metric("🔁 Unchanged", len(unchanged))
+
+
+tab_diff, tab_full, tab_rationale = st.tabs(["📑 Diff", "✅ Full DRAFT suite", "🤖 AI Rationale"])
+
+with tab_diff:
+    if added:
+        st.markdown("### ➕ Added in DRAFT")
+        for e in added:
+            meta = e.get("meta") or {}
+            st.markdown(
+                f"- `{e.get('expectation_type')}` on "
+                f"`{(e.get('kwargs') or {}).get('column', '—')}`  "
+                f"· **{meta.get('dq_dimension', '—')}** / {meta.get('severity', '—')}"
+                f" — {meta.get('description', '')[:160]}"
+            )
+    if removed:
+        st.markdown("### ➖ Removed from LIVE")
+        for e in removed:
+            meta = e.get("meta") or {}
+            st.markdown(
+                f"- `{e.get('expectation_type')}` on "
+                f"`{(e.get('kwargs') or {}).get('column', '—')}`  "
+                f"· **{meta.get('dq_dimension', '—')}** / {meta.get('severity', '—')}"
+            )
+    if not added and not removed:
+        st.info(
+            "No structural diff vs current LIVE — DRAFT proposes the same "
+            "expectation set.  Promotion is still meaningful if metadata "
+            "(rationale, kwargs detail) changed."
+        )
+
+with tab_full:
+    for i, e in enumerate(new_exps):
+        meta = e.get("meta") or {}
+        with st.container(border=True):
+            st.markdown(
+                f"**{i+1}.** `{e.get('expectation_type')}` on "
+                f"`{(e.get('kwargs') or {}).get('column', '—')}`  "
+                f"· {meta.get('dq_dimension', '—')} / {meta.get('severity', '—')}"
+            )
+            if meta.get("description"):
+                st.caption(meta["description"])
+            if meta.get("rationale"):
+                st.markdown(f"_{meta['rationale']}_")
+
+with tab_rationale:
+    rat = (picked.get("ai_rationale") or "").strip()
+    if rat:
+        st.markdown(rat)
+    else:
+        st.caption("_(no rationale recorded)_")
+
+
+# ---------------------------------------------------------------------------
+# Approve / Reject
+# ---------------------------------------------------------------------------
+st.markdown("---")
+ac1, ac2 = st.columns([1, 1])
+
+with ac1:
+    notes_a = st.text_input(
+        "Approval notes (optional)",
+        value="",
+        key="dqr_approve_notes",
+        placeholder="e.g., 'reviewed by jbhanot — promote'",
+    )
+    if st.button(
+        "🚀 Approve & Promote (LIVE)",
+        type="primary",
+        use_container_width=True,
+        key="dqr_approve",
+    ):
+        try:
+            with _warehouse(readonly=False) as wh:
+                _r = approve_and_promote(
+                    warehouse=wh,
+                    suite_id=picked_suite_id,
+                    actor="ui:dq_review",
+                    notes=notes_a,
+                )
+            st.toast(
+                f"🚀 Promoted {ds}/{layer} v{version}",
+                icon="✅",
+            )
+            _pending_suites.clear()
+            _live_suite_for.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Promote failed: {type(exc).__name__}: {exc}")
+
+with ac2:
+    notes_r = st.text_input(
+        "Rejection notes (REQUIRED)",
+        value="",
+        key="dqr_reject_notes",
+        placeholder="e.g., 'too aggressive — relax phone-format regex'",
+    )
+    if st.button(
+        "🚫 Reject (Archive DRAFT)",
+        use_container_width=True,
+        key="dqr_reject",
+        disabled=not notes_r.strip(),
+        help="Archives the DRAFT with reviewer feedback.  No change to LIVE.",
+    ):
+        try:
+            with _warehouse(readonly=False) as wh:
+                wh.execute(
+                    f"""
+                    UPDATE {CONTROL_SCHEMA}.dq_suites
+                       SET status = 'ARCHIVED',
+                           archived_at = CURRENT_TIMESTAMP(),
+                           reviewed_by = $by, reviewed_at = CURRENT_TIMESTAMP(),
+                           review_notes = $notes
+                     WHERE suite_id = $id
+                    """,
+                    {"id": picked_suite_id, "by": "ui:dq_review", "notes": notes_r},
+                )
+                wh.execute(
+                    f"""
+                    INSERT INTO {CONTROL_SCHEMA}.dq_suite_audit_log
+                      (audit_id, suite_id, from_status, to_status, actor, notes)
+                    VALUES ($aid, $sid, $from, 'ARCHIVED', 'ui:dq_review', $notes)
+                    """,
+                    {
+                        "aid": str(uuid.uuid4()),
+                        "sid": picked_suite_id,
+                        "from": picked.get("status"),
+                        "notes": notes_r,
+                    },
+                )
+            st.toast(f"🚫 Rejected {ds}/{layer} v{version}", icon="🗄")
+            _pending_suites.clear()
+            st.rerun()
+        except Exception as exc:
+            st.error(f"Reject failed: {type(exc).__name__}: {exc}")

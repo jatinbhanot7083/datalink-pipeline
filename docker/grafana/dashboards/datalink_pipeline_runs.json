@@ -1,0 +1,473 @@
+{
+  "uid": "dl-pipeline-runs",
+  "title": "DataLink \u2014 Pipeline Runs",
+  "description": "Phase 20.2 \u2014 pipeline-run telemetry across the factory pattern.  Counts, durations, rows-per-layer, by-dataset and by-client breakdowns.",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "datalink",
+    "phase20"
+  ],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Total Runs (24h)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(datalink_pipeline_runs_total[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "runs"
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "palette-classic"
+          }
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Success Rate (24h)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 4,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "100 * sum(increase(datalink_pipeline_runs_total{status=\"SUCCESS\"}[24h])) / clamp_min(sum(increase(datalink_pipeline_runs_total[24h])),1)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "pct"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red"
+              },
+              {
+                "color": "orange",
+                "value": 80
+              },
+              {
+                "color": "green",
+                "value": 95
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Active Datasets",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 8,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "count(count by (dataset) (datalink_pipeline_runs_total))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "datasets"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Active Clients",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "count(count by (client) (datalink_pipeline_runs_total))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "clients"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "title": "Bronze Rows / hr",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 16,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(datalink_bronze_rows_loaded_total[1h])) * 3600",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "rows/hr"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 6,
+      "title": "Gold Rows / hr",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 4,
+        "x": 20,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(datalink_gold_rows_total[1h])) * 3600",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "rows/hr"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "Pipeline Runs by Status",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (status) (rate(datalink_pipeline_runs_total[5m])) * 60",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "{{status}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30
+          }
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "Rows Processed by Layer",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(rate(datalink_bronze_rows_loaded_total[5m])) * 60",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "Bronze",
+          "range": true,
+          "instant": false
+        },
+        {
+          "expr": "sum(rate(datalink_silver_rows_total[5m])) * 60",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "Silver",
+          "range": true,
+          "instant": false
+        },
+        {
+          "expr": "sum(rate(datalink_gold_rows_total[5m])) * 60",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "Gold",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2,
+            "fillOpacity": 30
+          }
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "Runs by Dataset (24h)",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (dataset) (increase(datalink_pipeline_runs_total[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "{{dataset}}"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "continuous-BlYlRd"
+          }
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Runs by Client (24h)",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 12
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (client) (increase(datalink_pipeline_runs_total[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "{{client}}"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "continuous-GrYlRd"
+          }
+        }
+      }
+    },
+    {
+      "id": 14,
+      "title": "Task Duration (p50 / p95)",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 24,
+        "x": 0,
+        "y": 20
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum by (task, le) (rate(datalink_task_duration_seconds_bucket[5m])))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "p50 {{task}}",
+          "range": true,
+          "instant": false
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (task, le) (rate(datalink_task_duration_seconds_bucket[5m])))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "p95 {{task}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2
+          }
+        }
+      }
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

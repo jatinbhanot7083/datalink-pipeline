@@ -28,23 +28,16 @@ window they're looking at — no chart is ambiguous about currency.
 
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import pandas as pd
 import plotly.express as px
 import streamlit as st
 
-WAREHOUSE_PATH = os.environ.get("DL_CT_WAREHOUSE_PATH", "/opt/datalink/warehouse.duckdb")
+# Phase 21 — Snowflake-only.  DuckDB warehouse path bootstrap removed.
+from datalink.ui._query import query_silent as _wh_query_silent
 
-# Phase 6 fix: bootstrap warehouse file + CONTROL schema before any
-# read-only connection attempt.
-from datalink.ui._bootstrap import ensure_warehouse_exists  # noqa: E402
-
-# Phase 7 Day 2: warehouse access centralised in datalink.ui._query.
-from datalink.ui._query import query_silent as _wh_query_silent  # noqa: E402
-
-ensure_warehouse_exists(WAREHOUSE_PATH)
+WAREHOUSE_PATH = "CONTROL (Snowflake)"  # cosmetic — only displayed in footer
 
 st.set_page_config(
     page_title="DataLink — DQ Dashboard",
@@ -140,31 +133,47 @@ st.markdown(
 # SIDEBAR FILTERS — client / source_type / dimension / window
 # ============================================================================
 
-# Client is selected once in the sidebar (global selector). All filters
-# on this page are scoped to that client — no per-page client dropdown.
-from datalink.ui._nav import require_client  # noqa: E402
-
-selected_client = require_client()
-# Phase 16.6 — when no client picked (default = All clients), gate
-# the per-client content with a friendly notice. Pages with a true
-# all-clients view (Pipeline Architect) handle this differently.
-if selected_client is None:
-    import streamlit as _st
-
-    _st.info(
-        "🌐 **All-clients view.** Pick a client from the dropdown above "
-        "to load this client-scoped page. Cross-tenant dashboards "
-        "(Control Tower, PHI Governance, Cost & Tokens, Lineage) live "
-        "elsewhere and don't need a client picker."
-    )
-    _st.stop()
+# Phase 21 — factory-pattern.  Client filter is OPTIONAL (multiselect,
+# default = all clients).  Same for source_type / dimension.  This page
+# is now a cross-tenant DQ console, paired with DQ Suite Registry for
+# suite-level drill-down.
 st.sidebar.header("Filters")
 
-source_options = ["<all>", "CLAIMS", "MEMBERSHIP", "PROVIDER"]
-selected_source = st.sidebar.selectbox("Source type", source_options, index=0)
+# Discover available client_ids from gx_validation_results so the picker
+# only shows tenants who actually have DQ data.
+_client_options_df = _wh_query_silent(
+    "SELECT DISTINCT client_id FROM CONTROL.gx_validation_results "
+    "WHERE client_id IS NOT NULL ORDER BY client_id"
+)
+_available_clients = (
+    [str(c) for c in _client_options_df["client_id"].tolist()]
+    if not _client_options_df.empty
+    else []
+)
+selected_clients = st.sidebar.multiselect(
+    "Filter by client",
+    options=_available_clients,
+    default=[],
+    placeholder="All clients (default)",
+)
+
+# Source type (the dataset_code, but in the gx_validation_results legacy
+# column it's stored as upper-case) — discover from data.
+_src_options_df = _wh_query_silent(
+    "SELECT DISTINCT source_type FROM CONTROL.gx_validation_results "
+    "WHERE source_type IS NOT NULL ORDER BY source_type"
+)
+_available_sources = (
+    [str(s) for s in _src_options_df["source_type"].tolist()] if not _src_options_df.empty else []
+)
+selected_sources = st.sidebar.multiselect(
+    "Filter by source / dataset",
+    options=_available_sources,
+    default=[],
+    placeholder="All sources (default)",
+)
 
 dimension_options = [
-    "<all>",
     "Completeness",
     "Uniqueness",
     "Timeliness",
@@ -172,29 +181,41 @@ dimension_options = [
     "Consistency",
     "Validity",
 ]
-selected_dim = st.sidebar.selectbox("DQ Dimension", dimension_options, index=0)
+selected_dims = st.sidebar.multiselect(
+    "Filter by DQ dimension",
+    options=dimension_options,
+    default=[],
+    placeholder="All dimensions (default)",
+)
 
 days = st.sidebar.slider("Window (days)", 1, 90, 30)
 
-# Build param list + where clauses for each slicer.
-_wheres: list[str] = ["client_id = ?"]
-_params: list[Any] = [selected_client]
+# Build dynamic where clauses.  Empty multiselect = no filter on that field.
+_wheres: list[str] = []
+_params: list[Any] = []
 
-if selected_source != "<all>":
-    _wheres.append("UPPER(source_type) = ?")
-    _params.append(selected_source.upper())
-if selected_dim != "<all>":
-    _wheres.append("dq_dimension = ?")
-    _params.append(selected_dim)
+if selected_clients:
+    _wheres.append("client_id IN (" + ",".join(["?"] * len(selected_clients)) + ")")
+    _params.extend(selected_clients)
+if selected_sources:
+    _wheres.append("UPPER(source_type) IN (" + ",".join(["?"] * len(selected_sources)) + ")")
+    _params.extend([s.upper() for s in selected_sources])
+if selected_dims:
+    _wheres.append("dq_dimension IN (" + ",".join(["?"] * len(selected_dims)) + ")")
+    _params.extend(selected_dims)
 
-filter_sql = " AND " + " AND ".join(_wheres)
+filter_sql = (" AND " + " AND ".join(_wheres)) if _wheres else ""
 params_tuple: tuple[Any, ...] = tuple(_params)
 
 scope_str = (
-    f"**Client:** {selected_client}  ·  **Source:** {selected_source}  ·  "
-    f"**Dimension:** {selected_dim}  ·  **Window:** last {days} days"
+    f"**Clients:** {', '.join(selected_clients) if selected_clients else 'all'}  ·  "
+    f"**Sources:** {', '.join(selected_sources) if selected_sources else 'all'}  ·  "
+    f"**Dimensions:** {', '.join(selected_dims) if selected_dims else 'all'}  ·  "
+    f"**Window:** last {days} days"
 )
 st.caption(scope_str)
+# Cosmetic alias: many existing strings reference selected_client (singular).
+selected_client = ", ".join(selected_clients) if selected_clients else "all clients"
 
 
 # ============================================================================
@@ -218,7 +239,7 @@ kpi_df = _try_query(
       COUNT(DISTINCT run_id) AS n_runs,
       COUNT(DISTINCT checkpoint_name) AS n_suites
     FROM CONTROL.gx_validation_results
-    WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+    WHERE ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
       {filter_sql}
     """,
     params_tuple,
@@ -269,7 +290,7 @@ with col_a:
                COUNT(*) AS n_all,
                SUM(CASE WHEN success THEN 1 ELSE 0 END) AS n_pass
         FROM CONTROL.gx_validation_results
-        WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+        WHERE ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
           {filter_sql}
         GROUP BY dimension
         ORDER BY n_all DESC
@@ -318,7 +339,7 @@ with col_b:
                COUNT(*) AS n_all,
                SUM(CASE WHEN success THEN 1 ELSE 0 END) AS n_pass
         FROM CONTROL.gx_validation_results
-        WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+        WHERE ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
           {filter_sql}
         GROUP BY source_type, dimension
         """,
@@ -358,7 +379,7 @@ with col_c:
                COUNT(*) AS n_all,
                SUM(CASE WHEN success THEN 1 ELSE 0 END) AS n_pass
         FROM CONTROL.gx_validation_results
-        WHERE ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+        WHERE ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
           {filter_sql}
         GROUP BY client_id
         ORDER BY n_all DESC
@@ -402,7 +423,7 @@ with col_d:
                column_name, unexpected_count, unexpected_pct
         FROM CONTROL.gx_validation_results
         WHERE success = FALSE
-          AND ts >= CURRENT_TIMESTAMP - INTERVAL '{days} days'
+          AND ts >= DATEADD(day, -{days}, CURRENT_TIMESTAMP())
           {filter_sql}
         ORDER BY ts DESC
         LIMIT 100
@@ -454,11 +475,13 @@ suite_df = _try_query(
     """
 )
 
-# selected_client is always a real tenant (require_client() halts if not).
-if not suite_df.empty:
-    suite_df = suite_df[suite_df["client_id"] == selected_client]
-if selected_source != "<all>" and not suite_df.empty:
-    suite_df = suite_df[suite_df["source_type"].str.upper() == selected_source.upper()]
+# Phase 21 — apply the multiselect filters (no required client).
+if selected_clients and not suite_df.empty:
+    suite_df = suite_df[suite_df["client_id"].isin(selected_clients)]
+if selected_sources and not suite_df.empty:
+    suite_df = suite_df[
+        suite_df["source_type"].astype(str).str.upper().isin([s.upper() for s in selected_sources])
+    ]
 
 if suite_df.empty:
     st.markdown(

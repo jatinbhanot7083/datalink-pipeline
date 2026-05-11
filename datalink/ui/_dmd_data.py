@@ -68,12 +68,8 @@ class Snapshot:
     bronze_datasets: list[dict[str, Any]] = field(default_factory=list)
     silver_schemas: list[dict[str, Any]] = field(default_factory=list)
     gold_schemas: list[dict[str, Any]] = field(default_factory=list)
-    silver_columns_by_dataset: dict[str, list[dict[str, Any]]] = field(
-        default_factory=dict
-    )
-    gold_fields_by_dataset: dict[str, list[dict[str, Any]]] = field(
-        default_factory=dict
-    )
+    silver_columns_by_dataset: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
+    gold_fields_by_dataset: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     distinct_clients: list[str] = field(default_factory=list)
     loaded_at: str = ""
 
@@ -183,12 +179,18 @@ def _fetch_snapshot_uncached() -> Snapshot:
             )
         )
 
-        # 2. ALL silver schemas — every status, every scope_owner
+        # 2. ALL silver schemas — every status, every scope_owner.
+        # Phase 17.6 — pull AI fields too (ai_proposal_json, ai_rationale,
+        # ai_token_count, ai_latency_ms) so View Schema's AI Proposal tab
+        # has something to render.  Also pull import_format + is_overkill
+        # for completeness so the inspector can surface them.
         snap.silver_schemas = list(
             wh.query(
                 f"""
                 SELECT silver_dataset_id, dataset_code, silver_pattern, version,
-                       status, silver_anchor, source, scope_owner,
+                       status, silver_anchor, source, scope_owner, import_format,
+                       is_overkill_flag, ai_proposal_json, ai_rationale,
+                       ai_token_count, ai_latency_ms,
                        forked_from_global_version, created_by, created_at,
                        submitted_at, approved_by, approved_at, archived_at, notes
                   FROM {CONTROL_SCHEMA}.global_silver_schema_datasets
@@ -196,12 +198,14 @@ def _fetch_snapshot_uncached() -> Snapshot:
             )
         )
 
-        # 3. ALL gold schemas
+        # 3. ALL gold schemas — same AI-fields uplift as silver above.
         snap.gold_schemas = list(
             wh.query(
                 f"""
                 SELECT gold_dataset_id, dataset_code, gold_table_name, version,
-                       status, gold_anchor, source, scope_owner,
+                       status, gold_anchor, source, scope_owner, import_format,
+                       ai_proposal_json, ai_rationale, ai_token_count,
+                       ai_latency_ms,
                        forked_from_global_version,
                        semver_major, semver_minor, compatibility_class,
                        parent_version, migration_window_days,
@@ -278,9 +282,7 @@ def _fetch_snapshot_uncached() -> Snapshot:
         try:
             from pathlib import Path
 
-            _data_gen = (
-                Path(__file__).resolve().parents[2] / "data" / "generated"
-            )
+            _data_gen = Path(__file__).resolve().parents[2] / "data" / "generated"
             if _data_gen.is_dir():
                 for child in _data_gen.iterdir():
                     if not child.is_dir():
@@ -449,10 +451,7 @@ def submit_all() -> SubmitReport:
                     continue
 
                 cur_version, cur_status = cur
-                if (
-                    cur_version != patch.base_version
-                    or cur_status != patch.base_status
-                ):
+                if cur_version != patch.base_version or cur_status != patch.base_status:
                     report.outcomes.append(
                         SubmitOutcome(
                             kind=patch.kind,

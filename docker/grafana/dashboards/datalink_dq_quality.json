@@ -1,0 +1,335 @@
+{
+  "uid": "dl-dq-quality",
+  "title": "DataLink \u2014 Data Quality",
+  "description": "Phase 20.2 \u2014 DQ check pass/fail rates, per-layer breakdowns, schema-drift event timeline.",
+  "editable": true,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "tags": [
+    "datalink",
+    "phase20"
+  ],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "version": 1,
+  "panels": [
+    {
+      "id": 1,
+      "title": "Total DQ Checks (24h)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(datalink_dq_checks_total[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "checks"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "title": "Pass Rate (24h)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 6,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "100 * sum(increase(datalink_dq_checks_total{result=\"pass\"}[24h])) / clamp_min(sum(increase(datalink_dq_checks_total[24h])),1)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "pct"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red"
+              },
+              {
+                "color": "orange",
+                "value": 90
+              },
+              {
+                "color": "green",
+                "value": 98
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": 3,
+      "title": "Failures (24h)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 12,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(datalink_dq_checks_total{result=\"fail\"}[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "failures"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "red"
+          }
+        }
+      }
+    },
+    {
+      "id": 4,
+      "title": "Schema Drift (7d)",
+      "type": "stat",
+      "gridPos": {
+        "h": 4,
+        "w": 6,
+        "x": 18,
+        "y": 0
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum(increase(datalink_schema_drift_events_total[7d]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "events"
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "orange"
+          }
+        }
+      }
+    },
+    {
+      "id": 10,
+      "title": "DQ Pass-Rate Over Time by Layer",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 0,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "100 * sum by (layer) (rate(datalink_dq_checks_total{result=\"pass\"}[5m])) / clamp_min(sum by (layer) (rate(datalink_dq_checks_total[5m])), 0.001)",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "{{layer}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 2
+          }
+        }
+      }
+    },
+    {
+      "id": 11,
+      "title": "DQ Checks by Dataset (24h)",
+      "type": "bargauge",
+      "gridPos": {
+        "h": 9,
+        "w": 12,
+        "x": 12,
+        "y": 4
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (dataset, result) (increase(datalink_dq_checks_total[24h]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "{{dataset}} ({{result}})"
+        }
+      ],
+      "options": {
+        "orientation": "horizontal",
+        "displayMode": "gradient"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        }
+      }
+    },
+    {
+      "id": 12,
+      "title": "DQ Failures by Dataset+Layer",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (dataset, layer) (rate(datalink_dq_checks_total{result=\"fail\"}[5m]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "{{dataset}} / {{layer}}",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 80
+          }
+        }
+      }
+    },
+    {
+      "id": 13,
+      "title": "Schema Drift Events Timeline",
+      "type": "timeseries",
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "datasource": {
+        "type": "prometheus",
+        "uid": "datalink-prometheus"
+      },
+      "targets": [
+        {
+          "expr": "sum by (dataset, severity) (rate(datalink_schema_drift_events_total[5m]))",
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "datalink-prometheus"
+          },
+          "legendFormat": "{{dataset}} [{{severity}}]",
+          "range": true,
+          "instant": false
+        }
+      ],
+      "options": {},
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "lineWidth": 1,
+            "fillOpacity": 70
+          }
+        }
+      }
+    }
+  ],
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  }
+}

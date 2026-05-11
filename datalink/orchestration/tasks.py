@@ -763,6 +763,122 @@ def bronze_land_task(
     }
 
 
+def _find_factory_suite_id(wh: Any, *, dataset_code: str, layer: str) -> str | None:
+    """Phase 19.6 — look up the LIVE DQ suite for (dataset_code, layer).
+
+    Factory-pattern suites are universal across clients (no client_id).
+    Returns the suite_id string or None if no LIVE suite exists for
+    this pair.  Helpers for bronze_validate / silver_dq / gold_dq tasks.
+    """
+    try:
+        rows = list(
+            wh.query(
+                f"SELECT suite_id FROM {CONTROL_SCHEMA}.dq_suites "
+                f"WHERE LOWER(dataset_code) = LOWER($ds) "
+                f"  AND UPPER(layer) = UPPER($lyr) "
+                f"  AND status = 'LIVE' "
+                f"ORDER BY version DESC LIMIT 1",
+                {"ds": dataset_code, "lyr": layer},
+            )
+        )
+        return str(rows[0]["suite_id"]) if rows else None
+    except Exception:
+        return None
+
+
+def _run_layer_dq(
+    *,
+    layer: str,
+    fq_table: str,
+    client_id: str,
+    dataset_code: str,
+) -> dict[str, Any]:
+    """Phase 19.6 shared body — load LIVE factory suite for (dataset, layer)
+    and run it against the given physical table.  Used by silver_dq_task
+    and gold_dq_task; bronze_validate_task already has its own anomaly-
+    detector path so it calls _find_factory_suite_id directly instead.
+    """
+    settings = load_settings(env=os.environ.get("DL_ENV", "dev"))
+    from datalink.adapters.factory import build_adapters
+    from datalink.quality.gx_runner import run_checkpoint
+
+    wh = build_adapters(settings).warehouse
+    suite_id = _find_factory_suite_id(wh, dataset_code=dataset_code, layer=layer)
+    if suite_id is None:
+        _log.info(
+            "phase19.layer_dq.no_suite",
+            client_id=client_id,
+            dataset_code=dataset_code,
+            layer=layer,
+        )
+        return {
+            "task": f"{layer.lower()}_dq",
+            "client_id": client_id,
+            "dataset_code": dataset_code,
+            "layer": layer,
+            "status": "no_suite",
+            "fq_table": fq_table,
+        }
+    try:
+        full = run_checkpoint(
+            warehouse=wh,
+            client_id=client_id,
+            dataset_code=dataset_code,
+            fq_table=fq_table,
+            suite_id=suite_id,
+            source_type=dataset_code.upper(),
+        )
+        summary = {k: v for k, v in full.items() if k != "results"}
+    except Exception as exc:
+        _log.warning(
+            "phase19.layer_dq.checkpoint_failed",
+            client_id=client_id,
+            dataset_code=dataset_code,
+            layer=layer,
+            err=str(exc)[:300],
+        )
+        summary = {"error": str(exc)[:300], "suite_id": suite_id}
+    return {
+        "task": f"{layer.lower()}_dq",
+        "client_id": client_id,
+        "dataset_code": dataset_code,
+        "layer": layer,
+        "fq_table": fq_table,
+        "suite_id": suite_id,
+        "gx_summary": summary,
+    }
+
+
+def silver_dq_task(*, client_id: str, dataset_code: str, **_: Any) -> dict[str, Any]:
+    """Phase 19.6 — Silver-layer DQ checkpoint.
+
+    Loads the LIVE suite for (dataset_code, SILVER) from CONTROL.dq_suites
+    (designed by DQ AI Architect, factory-pattern — universal across clients)
+    and runs it against ``SILVER_<CLIENT>.<dataset>_clean``.
+
+    Wires into the DAG between silver_dbt and gold_dbt.  No-op (status='no_suite')
+    if the operator hasn't authored a Silver suite for this dataset yet —
+    pipeline continues so missing-suite is not a blocker.
+    """
+    fq = f"SILVER_{client_id.upper()}.{dataset_code.lower()}_clean"
+    _log.info("phase19.silver_dq.start", client_id=client_id, dataset_code=dataset_code, fq=fq)
+    return _run_layer_dq(
+        layer="SILVER", fq_table=fq, client_id=client_id, dataset_code=dataset_code
+    )
+
+
+def gold_dq_task(*, client_id: str, dataset_code: str, **_: Any) -> dict[str, Any]:
+    """Phase 19.6 — Gold-layer DQ checkpoint.
+
+    Loads the LIVE suite for (dataset_code, GOLD) from CONTROL.dq_suites
+    and runs it against ``GOLD_<CLIENT>.<dataset>``.  Wires into the DAG
+    after gold_dbt and before onprem_push.
+    """
+    fq = f"GOLD_{client_id.upper()}.{dataset_code.lower()}"
+    _log.info("phase19.gold_dq.start", client_id=client_id, dataset_code=dataset_code, fq=fq)
+    return _run_layer_dq(layer="GOLD", fq_table=fq, client_id=client_id, dataset_code=dataset_code)
+
+
 def bronze_validate_task(*, client_id: str, dataset_code: str, **_: Any) -> dict[str, Any]:
     """Validate Bronze landing — Phase 16.8 (real GX checkpoint).
 
@@ -819,22 +935,26 @@ def bronze_validate_task(*, client_id: str, dataset_code: str, **_: Any) -> dict
     except Exception as exc:
         _log.warning("phase15.anomaly_check_failed", err=str(exc)[:200])
 
-    # 2. GX checkpoint — real expectation execution
+    # 2. GX checkpoint — real expectation execution.
+    # Phase 19.6 — factory-pattern suite lookup: load suite by
+    # (dataset_code, layer='BRONZE', status='LIVE'), independent of
+    # client.  Same suite runs against every client's Bronze table for
+    # this dataset.
     bronze_table_fq = f"BRONZE_{client_id.upper()}.raw_{dataset_code.lower()}"
-    # Look up the suite_id from the pipeline instance
-    suite_id_rows = list(
-        wh.query(
-            f"SELECT gx_suite_id FROM {CONTROL_SCHEMA}.client_pipeline_instances "
-            f"WHERE client_id = $c AND dataset_code = $d AND status = 'LIVE' "
-            f"ORDER BY deployed_at DESC NULLS LAST LIMIT 1",
-            {"c": client_id, "d": dataset_code},
+    suite_id = _find_factory_suite_id(wh, dataset_code=dataset_code, layer="BRONZE")
+    if suite_id is None:
+        # Fallback to legacy per-instance lookup for backward compat.
+        legacy = list(
+            wh.query(
+                f"SELECT gx_suite_id FROM {CONTROL_SCHEMA}.client_pipeline_instances "
+                f"WHERE client_id = $c AND dataset_code = $d AND status = 'LIVE' "
+                f"ORDER BY deployed_at DESC NULLS LAST LIMIT 1",
+                {"c": client_id, "d": dataset_code},
+            )
         )
-    )
-    suite_id = (
-        str(suite_id_rows[0]["gx_suite_id"])
-        if suite_id_rows and suite_id_rows[0].get("gx_suite_id")
-        else None
-    )
+        suite_id = (
+            str(legacy[0]["gx_suite_id"]) if legacy and legacy[0].get("gx_suite_id") else None
+        )
 
     gx_summary: dict[str, Any] = {
         "passed": 0,

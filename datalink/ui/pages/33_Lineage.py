@@ -50,7 +50,8 @@ with warehouse_ctx(readonly=True) as wh:
     gold_cols = list(
         wh.query(
             f"""
-        SELECT g.gold_dataset_id, g.column_name, g.logical_type, g.is_business_key,
+        SELECT g.gold_dataset_id, g.gold_column_name AS column_name,
+               g.logical_type, g.is_business_key,
                g.is_pii, g.is_phi, gd.dataset_code
           FROM {CONTROL_SCHEMA}.global_gold_schema_fields g
           JOIN {CONTROL_SCHEMA}.global_gold_schema_datasets gd

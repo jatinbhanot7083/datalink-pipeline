@@ -1115,6 +1115,33 @@ _DDL = [
         rejected_at              TIMESTAMP
     )
     """,
+    # ------------------------------------------------------------------------
+    # Phase 18 — dataset_pipeline_runs.  One row per "▶ Run now" execution
+    # (or per Airflow DAG run when we wire that up later).  Captures the
+    # status of each step in the Bronze→Silver→Gold→Push chain so the
+    # Pipeline Architect's run-history drill-down can surface failures
+    # without scraping logs.  Keyed by run_id; instance_id is the FK back
+    # to client_pipeline_instances.
+    # ------------------------------------------------------------------------
+    f"""
+    CREATE TABLE IF NOT EXISTS {CONTROL_SCHEMA}.dataset_pipeline_runs (
+        run_id              VARCHAR PRIMARY KEY,
+        instance_id         VARCHAR NOT NULL,
+        client_id           VARCHAR NOT NULL,
+        dataset_code        VARCHAR NOT NULL,
+        status              VARCHAR NOT NULL,        -- RUNNING | SUCCESS | FAILED
+        triggered_by        VARCHAR NOT NULL,        -- 'ui:run_now' | 'airflow' | 'cli'
+        started_at          TIMESTAMP NOT NULL,
+        ended_at            TIMESTAMP,
+        duration_ms         INTEGER,
+        rows_bronze         INTEGER,
+        rows_silver         INTEGER,
+        rows_gold           INTEGER,
+        error_task          VARCHAR,                 -- which step failed (if any)
+        error_message       VARCHAR,
+        task_log_json       VARCHAR                  -- JSON array of per-task results
+    )
+    """,
 ]
 
 
@@ -1134,6 +1161,22 @@ def create_control_tables(warehouse: Warehouse) -> None:
     _migrations = [
         f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN source_type VARCHAR",
         f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN schema_fingerprint VARCHAR",
+        # Phase 19.1 — factory-pattern DQ suites.  Suites are now scoped to
+        # (dataset_code, layer) — universal across clients.  Legacy per-
+        # client suites still work; client_id is now nullable (enforced in
+        # code).  AI control fields preserved.
+        f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN dataset_code VARCHAR",
+        f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN layer VARCHAR",  # BRONZE | SILVER | GOLD
+        f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN ai_proposal_json VARCHAR",
+        f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN ai_rationale VARCHAR",
+        f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN ai_token_count INTEGER",
+        f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN ai_latency_ms INTEGER",
+        f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN temperature FLOAT",
+        f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ADD COLUMN grounding_mode VARCHAR",  # off | rag | strict
+        # Phase 19.1 — relax client_id NOT NULL.  Factory-pattern suites
+        # are universal (no client_id); legacy per-client suites still
+        # populate client_id, so this is non-breaking.
+        f"ALTER TABLE {CONTROL_SCHEMA}.dq_suites ALTER COLUMN client_id DROP NOT NULL",
         f"ALTER TABLE {CONTROL_SCHEMA}.pipeline_checkpoints ADD COLUMN client_id VARCHAR",
         f"ALTER TABLE {CONTROL_SCHEMA}.pipeline_checkpoints ADD COLUMN source_type VARCHAR",
         f"ALTER TABLE {CONTROL_SCHEMA}.gx_validation_results ADD COLUMN client_id VARCHAR",
