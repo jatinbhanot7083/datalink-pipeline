@@ -1,0 +1,5 @@
+Dataset|Field name|Req / Opt|Description|Additional notes|Example|Frequency
+New Dataset|Member ID|Required|Unique member identifier from the source system|Used as the canonical member_id downstream|M0000123|Monthly
+New Dataset|Last Name|Required|Member's legal last name||Smith|Monthly
+New Dataset|Date of Birth|Required|Member's date of birth|Preferred format yyyy-mm-dd|1972-08-15|Monthly
+New Dataset|Postal Code|Optional|Member's mailing ZIP / postal code|5-digit US ZIP or alphanumeric for non-US|10001|Monthly

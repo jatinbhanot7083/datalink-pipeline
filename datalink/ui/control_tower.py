@@ -718,8 +718,8 @@ st.caption("Most-recent operational events across the platform.")
 feed1, feed2, feed3 = st.columns(3)
 
 with feed1:
-    st.markdown("**📺 Recent runs (10)**")
     runs_recent = _recent_runs(limit=10)
+    st.markdown(f"**📺 Recent runs** _(showing {len(runs_recent)} of last 10)_")
     if not runs_recent:
         st.caption("_No runs yet._")
     for r in runs_recent:
@@ -739,8 +739,8 @@ with feed1:
         )
 
 with feed2:
-    st.markdown("**❌ Recent failures (5)**")
     failed = _recent_failed_runs(limit=5)
+    st.markdown(f"**❌ Recent failures** _(showing {len(failed)} of last 5)_")
     if not failed:
         st.caption("_No failed runs.  All green._")
     for r in failed:
@@ -756,8 +756,8 @@ with feed2:
         )
 
 with feed3:
-    st.markdown("**🌀 Recent drift events (5)**")
     drift = _recent_drift(limit=5)
+    st.markdown(f"**🌀 Recent drift events** _(showing {len(drift)} of last 5)_")
     if not drift:
         st.caption("_No drift detected._")
     for d in drift:

@@ -601,6 +601,11 @@ services:
   # =====================================================================
 
   control_tower:
+    # Phase 22 — point entrypoint at the bind-mounted host copy so edits to
+    # docker/control-tower/entrypoint.sh take effect on the next recreate
+    # without rebuilding the image (default ENTRYPOINT in the image is
+    # /opt/entrypoint.sh which was COPYd in at build time).
+    entrypoint: ["/opt/datalink/docker/control-tower/entrypoint.sh"]
     restart: unless-stopped
     build:
       context: ./docker/control-tower
@@ -638,6 +643,13 @@ services:
       DL_CT_MSSQL_DB: DataLinkUM
       DL_CT_MSSQL_USER: datalink
       DL_CT_MSSQL_PASS: datalink_local_only
+      # Phase 22 — skip the in-container baseline DQ-suite seeder.  Each
+      # baseline suite calls Voyage AI for an embedding; free-tier 3 RPM
+      # makes 84 seeds take ~5 min of cold-start latency on every container
+      # recreate, which defeats the repeatable-demo flow.  Pages handle
+      # empty CONTROL.dq_suites cleanly.  Override to "0" if you ever want
+      # the baselines back.
+      DL_SKIP_BASELINE_SEED: "1"
     volumes:
       - .:/opt/datalink                     # code hot-reloads without rebuild
     ports:

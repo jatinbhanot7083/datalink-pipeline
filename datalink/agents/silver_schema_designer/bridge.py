@@ -364,20 +364,18 @@ def persist_silver_proposal(
         },
     )
 
-    # Tables + columns
+    # Tables + columns — BATCHED via cursor.executemany.  Previously this
+    # was a row-by-row INSERT loop which took ~500 ms per Snowflake round-trip
+    # → 60+ seconds for a typical 100-column Silver schema.  Same fix as
+    # the Phase 22 catalog loader: drop into the raw connector and batch.
     table_id_by_name: dict[str, str] = {}
+    table_rows_batch: list[dict[str, Any]] = []
+    column_rows_batch: list[dict[str, Any]] = []
     for i, t in enumerate(silver_tables_in, start=1):
         silver_table_id = str(uuid.uuid4())
         table_name = str(t["table_name"])
         table_id_by_name[table_name] = silver_table_id
-        warehouse.execute(
-            f"""
-            INSERT INTO {CONTROL_SCHEMA}.global_silver_schema_tables
-              (silver_table_id, silver_dataset_id, dataset_code, table_name,
-               table_kind, parent_silver_table_id, business_keys_json,
-               linked_hub_ids_json, table_order, description)
-            VALUES ($id, $sid, $ds, $tn, $kind, NULL, $bks, NULL, $ord, $desc)
-            """,
+        table_rows_batch.append(
             {
                 "id": silver_table_id,
                 "sid": silver_dataset_id,
@@ -387,18 +385,10 @@ def persist_silver_proposal(
                 "bks": json.dumps(list(t.get("business_keys") or [])),
                 "ord": i,
                 "desc": str(t.get("description") or ""),
-            },
+            }
         )
         for j, c in enumerate(t.get("columns") or [], start=1):
-            warehouse.execute(
-                f"""
-                INSERT INTO {CONTROL_SCHEMA}.global_silver_schema_columns
-                  (silver_column_id, silver_table_id, silver_dataset_id, column_order,
-                   column_name, logical_type, nullable, is_business_key, is_hash_key,
-                   is_hash_diff, is_pii, is_phi, description)
-                VALUES ($id, $tid, $sid, $ord, $n, $t, $nul, $bk, $hk, $hd,
-                        $pii, $phi, $desc)
-                """,
+            column_rows_batch.append(
                 {
                     "id": str(uuid.uuid4()),
                     "tid": silver_table_id,
@@ -413,8 +403,35 @@ def persist_silver_proposal(
                     "pii": bool(c.get("is_pii", False)),
                     "phi": bool(c.get("is_phi", False)),
                     "desc": str(c.get("description") or ""),
-                },
+                }
             )
+
+    # Single batched INSERT for ALL tables, single batched INSERT for ALL columns
+    if table_rows_batch:
+        conn = warehouse._connect()
+        cur = conn.cursor()
+        try:
+            cur.executemany(
+                f"INSERT INTO {CONTROL_SCHEMA}.global_silver_schema_tables "
+                f"(silver_table_id, silver_dataset_id, dataset_code, table_name, "
+                f" table_kind, parent_silver_table_id, business_keys_json, "
+                f" linked_hub_ids_json, table_order, description) "
+                f"VALUES (%(id)s, %(sid)s, %(ds)s, %(tn)s, %(kind)s, NULL, "
+                f"        %(bks)s, NULL, %(ord)s, %(desc)s)",
+                table_rows_batch,
+            )
+            if column_rows_batch:
+                cur.executemany(
+                    f"INSERT INTO {CONTROL_SCHEMA}.global_silver_schema_columns "
+                    f"(silver_column_id, silver_table_id, silver_dataset_id, column_order, "
+                    f" column_name, logical_type, nullable, is_business_key, is_hash_key, "
+                    f" is_hash_diff, is_pii, is_phi, description) "
+                    f"VALUES (%(id)s, %(tid)s, %(sid)s, %(ord)s, %(n)s, %(t)s, "
+                    f"        %(nul)s, %(bk)s, %(hk)s, %(hd)s, %(pii)s, %(phi)s, %(desc)s)",
+                    column_rows_batch,
+                )
+        finally:
+            cur.close()
     # Now resolve parent_silver_table_id + linked_hub_ids_json
     for t in silver_tables_in:
         parent = t.get("parent_hub_name")
@@ -458,24 +475,18 @@ def persist_silver_proposal(
     for r in rows:
         col_id_lookup[(r["table_name"], r["column_name"])] = r["silver_column_id"]
 
+    # Mappings — BATCHED via cursor.executemany (was row-by-row INSERT)
+    mapping_rows_batch: list[dict[str, Any]] = []
     for m in mappings_in:
         tn = str(m["silver_table_name"])
         cn = str(m["silver_column_name"])
         col_id = col_id_lookup.get((tn, cn))
         if not col_id:
-            # Skip mapping for non-existent col; agent shouldn't emit but defensive
             continue
         srcs = m.get("bronze_source_columns")
         if not isinstance(srcs, list):
             srcs = []
-        warehouse.execute(
-            f"""
-            INSERT INTO {CONTROL_SCHEMA}.bronze_to_silver_mappings
-              (mapping_id, silver_column_id, silver_dataset_id, silver_table_name,
-               silver_column_name, bronze_source_columns, transform_kind,
-               transform_sql, rationale, confidence, created_by)
-            VALUES ($id, $cid, $sid, $tn, $cn, $bsc, $kind, $sql, $rat, $conf, $by)
-            """,
+        mapping_rows_batch.append(
             {
                 "id": str(uuid.uuid4()),
                 "cid": col_id,
@@ -488,8 +499,23 @@ def persist_silver_proposal(
                 "rat": str(m.get("rationale") or "")[:1000],
                 "conf": float(m.get("confidence") or 0.9),
                 "by": actor,
-            },
+            }
         )
+    if mapping_rows_batch:
+        conn = warehouse._connect()
+        cur = conn.cursor()
+        try:
+            cur.executemany(
+                f"INSERT INTO {CONTROL_SCHEMA}.bronze_to_silver_mappings "
+                f"(mapping_id, silver_column_id, silver_dataset_id, silver_table_name, "
+                f" silver_column_name, bronze_source_columns, transform_kind, "
+                f" transform_sql, rationale, confidence, created_by) "
+                f"VALUES (%(id)s, %(cid)s, %(sid)s, %(tn)s, %(cn)s, %(bsc)s, "
+                f"        %(kind)s, %(sql)s, %(rat)s, %(conf)s, %(by)s)",
+                mapping_rows_batch,
+            )
+        finally:
+            cur.close()
 
     # Audit
     _audit(

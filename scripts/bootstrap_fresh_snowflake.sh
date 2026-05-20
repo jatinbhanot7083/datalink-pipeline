@@ -31,6 +31,9 @@
 # ============================================================================
 
 set -u  # fail on unset vars; tolerate non-zero exits inside try-style blocks
+set -o pipefail  # propagate non-zero exits through pipes so `docker exec | tail`
+                 # actually fails when docker exec fails (caught one silent
+                 # migration-skip on 2026-05-11 — see commit log)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
@@ -113,8 +116,24 @@ if [ "${container_account}" != "${SNOWFLAKE_ACCOUNT}" ]; then
     step_warn "control_tower has stale SNOWFLAKE_ACCOUNT='${container_account}', recreating..."
     docker compose up -d --force-recreate \
         control_tower airflow_scheduler airflow_webserver 2>&1 | tail -5
-    sleep 5  # give them a moment to settle
-    step_pass "Containers recreated with fresh .env"
+    # Poll until control_tower is fully healthy (not just "running" / "starting").
+    # The Phase 17.x migrations call `docker exec datalink-control-tower …` and
+    # silently no-op if the container is in its starting health-check window.
+    printf "  ⏳ Waiting for control_tower health: "
+    for i in $(seq 1 60); do
+        health="$(docker inspect -f '{{.State.Health.Status}}' datalink-control-tower 2>/dev/null || echo unknown)"
+        if [ "${health}" = "healthy" ]; then
+            echo "healthy (after ${i}s)"
+            break
+        fi
+        sleep 1
+        [ $((i % 5)) -eq 0 ] && printf "."
+    done
+    if [ "${health}" != "healthy" ]; then
+        step_fail "control_tower never reached healthy state — aborting"
+        exit 1
+    fi
+    step_pass "Containers recreated with fresh .env and healthy"
 else
     step_pass "Containers already have fresh SNOWFLAKE_ACCOUNT (${container_account}) — skipping recreate"
 fi

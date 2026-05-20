@@ -107,6 +107,10 @@ INTERNAL_PAGE_GROUPS: list[tuple[str, str, list[tuple[str, str, str]]]] = [
         [
             # Top-of-funnel: design Silver+Gold per dataset (cross-client).
             ("Data Model Designer", "/Data_Model_Designer", "🥇"),
+            # Phase 23 — Client Onboarding · AI Mapping (Bronze Inbound Mapping Agent).
+            # Different from DMD: DMD is GLOBAL canonical authoring; this page is
+            # per-client INBOUND mapping (client format → canonical Bronze).
+            ("Client Onboarding", "/Client_Onboarding", "🚪"),
             # Materialise per-client pipelines from the LIVE designs.
             ("Pipeline Architect", "/Pipeline_Architect", "🏛"),
             # DQ authoring — same lifecycle for custom expectations.

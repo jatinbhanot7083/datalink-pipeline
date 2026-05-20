@@ -1,0 +1,184 @@
+{
+  "field_catalogue": [
+    {
+      "dataset": "Membership",
+      "field_name": "Payer Name",
+      "req_opt": "Required",
+      "description": "Name of the member's primary insurer",
+      "additional_notes": "",
+      "example": "Aetna Health Inc.",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Membership",
+      "field_name": "Member Card ID",
+      "req_opt": "Required",
+      "description": "Insurer's unique identification number for the member",
+      "additional_notes": "Used as canonical member_id downstream",
+      "example": "A12345678",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Membership",
+      "field_name": "DOB",
+      "req_opt": "Required",
+      "description": "Member's date of birth",
+      "additional_notes": "Preferred format is yyyy-mm-dd",
+      "example": "1972-08-15",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Membership",
+      "field_name": "Gender",
+      "req_opt": "Required",
+      "description": "Member's biological sex",
+      "additional_notes": "M / F / U / X allowed",
+      "example": "M",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Claims-Encounters",
+      "field_name": "Claim ID",
+      "req_opt": "Required",
+      "description": "Unique claim identifier from the payer",
+      "additional_notes": "Combined with claim_line for line-level uniqueness",
+      "example": "CL0001234567",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Claims-Encounters",
+      "field_name": "Member Card ID",
+      "req_opt": "Required",
+      "description": "Patient's payer card ID — joins to Membership",
+      "additional_notes": "",
+      "example": "A12345678",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Claims-Encounters",
+      "field_name": "Service Start Date",
+      "req_opt": "Required",
+      "description": "Earliest date of service on the claim line",
+      "additional_notes": "Preferred format yyyy-mm-dd",
+      "example": "2026-01-15",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Claims-Encounters",
+      "field_name": "Total Charge",
+      "req_opt": "Required",
+      "description": "Total charged amount in dollars",
+      "additional_notes": "Decimal(12,2); negative allowed for reversals",
+      "example": "1234.56",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Provider",
+      "field_name": "NPI",
+      "req_opt": "Required",
+      "description": "National Provider Identifier (10 digits)",
+      "additional_notes": "Must validate Luhn checksum",
+      "example": "1234567893",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Provider",
+      "field_name": "Provider Name",
+      "req_opt": "Required",
+      "description": "Legal name of the provider",
+      "additional_notes": "",
+      "example": "Dr. Jane Smith, MD",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Provider",
+      "field_name": "Specialty",
+      "req_opt": "Required",
+      "description": "Primary clinical specialty (taxonomy code or text)",
+      "additional_notes": "NUCC taxonomy preferred",
+      "example": "Internal Medicine",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Provider",
+      "field_name": "Network Status",
+      "req_opt": "Optional",
+      "description": "In-network / Out-of-network / Terminated",
+      "additional_notes": "",
+      "example": "In-network",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "Daily Census (ADT)",
+      "field_name": "Encounter ID",
+      "req_opt": "Required",
+      "description": "Unique encounter identifier from the facility",
+      "additional_notes": "",
+      "example": "ENC-2026-0001",
+      "frequency": "Daily"
+    },
+    {
+      "dataset": "Daily Census (ADT)",
+      "field_name": "Member Card ID",
+      "req_opt": "Required",
+      "description": "Patient identifier — joins to Membership",
+      "additional_notes": "",
+      "example": "A12345678",
+      "frequency": "Daily"
+    },
+    {
+      "dataset": "Daily Census (ADT)",
+      "field_name": "Admit Date",
+      "req_opt": "Required",
+      "description": "Date of admission",
+      "additional_notes": "yyyy-mm-dd",
+      "example": "2026-05-10",
+      "frequency": "Daily"
+    },
+    {
+      "dataset": "Daily Census (ADT)",
+      "field_name": "Discharge Status",
+      "req_opt": "Optional",
+      "description": "Discharge disposition code; NULL if still admitted",
+      "additional_notes": "UB-04 standard codes",
+      "example": "01",
+      "frequency": "Daily"
+    },
+    {
+      "dataset": "CMS-MMR",
+      "field_name": "HICN",
+      "req_opt": "Required",
+      "description": "Health Insurance Claim Number (legacy Medicare ID)",
+      "additional_notes": "Replaced by MBI for new members; both may appear",
+      "example": "123456789A",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "CMS-MMR",
+      "field_name": "MBI",
+      "req_opt": "Required",
+      "description": "Medicare Beneficiary Identifier",
+      "additional_notes": "11-char alphanumeric; replaces HICN",
+      "example": "1EG4-TE5-MK73",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "CMS-MMR",
+      "field_name": "Payment Year/Month",
+      "req_opt": "Required",
+      "description": "Reporting year + month (YYYYMM)",
+      "additional_notes": "",
+      "example": "202605",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "CMS-MMR",
+      "field_name": "Risk Score",
+      "req_opt": "Required",
+      "description": "CMS-HCC risk score for the member",
+      "additional_notes": "Decimal(6,4) — RAF score",
+      "example": "1.2345",
+      "frequency": "Monthly"
+    }
+  ]
+}

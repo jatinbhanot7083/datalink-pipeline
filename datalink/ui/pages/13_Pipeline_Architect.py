@@ -51,7 +51,7 @@ from datalink.agents.pipeline_architect import (  # noqa: E402
     persist_proposal,
     propose_pipeline,
 )
-from datalink.quality.control import create_control_tables  # noqa: E402
+from datalink.quality.control import CONTROL_SCHEMA, create_control_tables  # noqa: E402
 from datalink.ui import (
     _dmd_data as _dmd,
 )
@@ -133,8 +133,45 @@ def _warehouse(*, readonly: bool = True) -> Iterator[Any]:
 # ---------------------------------------------------------------------------
 
 st.markdown("# 🏛 Pipeline Architect")
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _arch_live_counts() -> tuple[int, int, int, int]:
+    """Live counts for the hero blurb so it never lies on empty / mid-load
+    state.  Returns (datasets, fields, routing_rules, catalog_version)."""
+    try:
+        with warehouse_ctx(readonly=True) as wh:
+            ds = list(
+                wh.query(
+                    f"SELECT COUNT(*) c, COALESCE(MAX(catalog_version),0) v "
+                    f"FROM {CONTROL_SCHEMA}.global_bronze_catalog_datasets"
+                )
+            )[0]
+            fd = list(
+                wh.query(f"SELECT COUNT(*) c FROM {CONTROL_SCHEMA}.global_bronze_catalog_fields")
+            )[0]["c"]
+            rr = list(wh.query(f"SELECT COUNT(*) c FROM {CONTROL_SCHEMA}.onprem_routing_rules"))[0][
+                "c"
+            ]
+            return int(ds["c"] or 0), int(fd or 0), int(rr or 0), int(ds["v"] or 0)
+    except Exception:
+        return 0, 0, 0, 0
+
+
+_arch_ds, _arch_fd, _arch_rr, _arch_ver = _arch_live_counts()
+if _arch_ds == 0 and _arch_fd == 0:
+    _arch_catalog_phrase = (
+        "Catalog: <strong>empty</strong> "
+        "(upload a Product Catalogue via the Data Model Designer to populate)"
+    )
+else:
+    _arch_catalog_phrase = (
+        f"Catalog v{_arch_ver}: <strong>{_arch_ds:,} datasets</strong> &middot; "
+        f"<strong>{_arch_fd:,} fields</strong> &middot; "
+        f"<strong>{_arch_rr:,} routing rules</strong>"
+    )
 st.markdown(
-    """
+    f"""
     <div class="arch-hero">
       <strong>Gold-first multi-tenant pipelines from the Global Gold Catalog.</strong>
       Pick a dataset, the agent proposes a fully-resolved
@@ -144,8 +181,7 @@ st.markdown(
       when one exists; BUILD from catalog when it's the first.
       <div class="arch-meta">
         Backend: <strong>Claude Haiku 4.5 + deterministic builders</strong>
-        &middot; Catalog version 1: 33 datasets &middot; 943 fields &middot;
-        61 routing rules. PHI-safe: only metadata reaches the LLM.
+        &middot; {_arch_catalog_phrase}. PHI-safe: only metadata reaches the LLM.
       </div>
     </div>
     """,

@@ -1,0 +1,21 @@
+Dataset	Field name	Req / Opt	Description	Additional notes	Example	Frequency
+Membership	Payer Name	Required	Name of the member's primary insurer		Aetna Health Inc.	Monthly
+Membership	Member Card ID	Required	Insurer's unique identification number for the member	Used as canonical member_id downstream	A12345678	Monthly
+Membership	DOB	Required	Member's date of birth	Preferred format is yyyy-mm-dd	1972-08-15	Monthly
+Membership	Gender	Required	Member's biological sex	M / F / U / X allowed	M	Monthly
+Claims-Encounters	Claim ID	Required	Unique claim identifier from the payer	Combined with claim_line for line-level uniqueness	CL0001234567	Monthly
+Claims-Encounters	Member Card ID	Required	Patient's payer card ID — joins to Membership		A12345678	Monthly
+Claims-Encounters	Service Start Date	Required	Earliest date of service on the claim line	Preferred format yyyy-mm-dd	2026-01-15	Monthly
+Claims-Encounters	Total Charge	Required	Total charged amount in dollars	Decimal(12,2); negative allowed for reversals	1234.56	Monthly
+Provider	NPI	Required	National Provider Identifier (10 digits)	Must validate Luhn checksum	1234567893	Monthly
+Provider	Provider Name	Required	Legal name of the provider		Dr. Jane Smith, MD	Monthly
+Provider	Specialty	Required	Primary clinical specialty (taxonomy code or text)	NUCC taxonomy preferred	Internal Medicine	Monthly
+Provider	Network Status	Optional	In-network / Out-of-network / Terminated		In-network	Monthly
+Daily Census (ADT)	Encounter ID	Required	Unique encounter identifier from the facility		ENC-2026-0001	Daily
+Daily Census (ADT)	Member Card ID	Required	Patient identifier — joins to Membership		A12345678	Daily
+Daily Census (ADT)	Admit Date	Required	Date of admission	yyyy-mm-dd	2026-05-10	Daily
+Daily Census (ADT)	Discharge Status	Optional	Discharge disposition code; NULL if still admitted	UB-04 standard codes	01	Daily
+CMS-MMR	HICN	Required	Health Insurance Claim Number (legacy Medicare ID)	Replaced by MBI for new members; both may appear	123456789A	Monthly
+CMS-MMR	MBI	Required	Medicare Beneficiary Identifier	11-char alphanumeric; replaces HICN	1EG4-TE5-MK73	Monthly
+CMS-MMR	Payment Year/Month	Required	Reporting year + month (YYYYMM)		202605	Monthly
+CMS-MMR	Risk Score	Required	CMS-HCC risk score for the member	Decimal(6,4) — RAF score	1.2345	Monthly

@@ -47,9 +47,13 @@ import openpyxl  # type: ignore[import-untyped]
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_REPO_ROOT))
 
-from datalink.adapters.factory import build_adapters  # noqa: E402
+# Phase 22 fix — build_adapters + load_settings import is deferred to
+# inside ``load_catalog`` because pulling them at module load triggers
+# ``datalink.adapters.factory`` which imports the Azurite object store
+# (azure-core), and that package isn't installed inside the Streamlit
+# container.  The CLI entry point still works because the host venv DOES
+# have azure-core.
 from datalink.adapters.protocols import Warehouse  # noqa: E402
-from datalink.config.loader import load_settings  # noqa: E402
 from datalink.logging import get_logger  # noqa: E402
 from datalink.quality.control import CONTROL_SCHEMA, create_control_tables  # noqa: E402
 
@@ -526,9 +530,23 @@ def load_catalog(
             "dry_run": 1,
         }
 
-    settings = load_settings(env=os.environ.get("DL_ENV", "local"))
-    adapters = build_adapters(settings)
-    wh = adapters.warehouse
+    # Phase 22 fix — try the UI's _build_backend path first.  It constructs
+    # SnowflakeWarehouse directly from env vars and skips the factory chain
+    # that pulls in azure-core (not installed in the Streamlit container).
+    # Falls back to the full factory for CLI contexts where azure IS
+    # available (host venv).
+    try:
+        from datalink.ui._query import _build_backend
+
+        wh = _build_backend(readonly=False)
+    except Exception:
+        # Deferred imports — only loaded on the CLI fallback path.
+        from datalink.adapters.factory import build_adapters
+        from datalink.config.loader import load_settings
+
+        settings = load_settings(env=os.environ.get("DL_ENV", "local"))
+        adapters = build_adapters(settings)
+        wh = adapters.warehouse
     print(f"Warehouse: {type(wh).__name__}")
     create_control_tables(wh)
     print("CONTROL tables ensured (idempotent).")

@@ -1,0 +1,40 @@
+{
+  "field_catalogue": [
+    {
+      "dataset": "New Dataset",
+      "field_name": "Member ID",
+      "req_opt": "Required",
+      "description": "Unique member identifier from the source system",
+      "additional_notes": "Used as the canonical member_id downstream",
+      "example": "M0000123",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "New Dataset",
+      "field_name": "Last Name",
+      "req_opt": "Required",
+      "description": "Member's legal last name",
+      "additional_notes": "",
+      "example": "Smith",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "New Dataset",
+      "field_name": "Date of Birth",
+      "req_opt": "Required",
+      "description": "Member's date of birth",
+      "additional_notes": "Preferred format yyyy-mm-dd",
+      "example": "1972-08-15",
+      "frequency": "Monthly"
+    },
+    {
+      "dataset": "New Dataset",
+      "field_name": "Postal Code",
+      "req_opt": "Optional",
+      "description": "Member's mailing ZIP / postal code",
+      "additional_notes": "5-digit US ZIP or alphanumeric for non-US",
+      "example": "10001",
+      "frequency": "Monthly"
+    }
+  ]
+}

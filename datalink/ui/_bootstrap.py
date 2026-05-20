@@ -207,20 +207,34 @@ def _bootstrap_snowflake(*, verbose: bool = False) -> None:
             traceback.print_exc()
 
     # Step 3 — seed baselines for 7 clients -----------------------------
-    try:
-        from datalink.quality.baseline_seeder import seed_all_real_clients
-
-        result = seed_all_real_clients(wh)
+    # Phase 22 — operator can disable this via DL_SKIP_BASELINE_SEED=1.
+    # Each baseline suite calls Voyage AI for an embedding; on the free
+    # tier that's 3 RPM → 84 suites = ~5 min of cold-start latency on
+    # every container recreate.  For repeatable demos where the operator
+    # wants 0/0/0 state until they upload the catalogue, the baselines
+    # are noise.  Pages render correctly on empty `dq_suites` — the UI
+    # has explicit "no suites yet" empty-state handling.
+    if os.environ.get("DL_SKIP_BASELINE_SEED", "").strip() in ("1", "true", "TRUE", "yes"):
         if verbose:
-            total = sum(result.values())
             print(
-                f"[bootstrap] snowflake step 3: seeded {total} baseline suites "
-                f"across {len(result)} clients — {result}",
+                "[bootstrap] snowflake step 3: SKIPPED (DL_SKIP_BASELINE_SEED set)",
                 file=sys.stderr,
             )
-    except Exception:
-        if verbose:
-            traceback.print_exc()
+    else:
+        try:
+            from datalink.quality.baseline_seeder import seed_all_real_clients
+
+            result = seed_all_real_clients(wh)
+            if verbose:
+                total = sum(result.values())
+                print(
+                    f"[bootstrap] snowflake step 3: seeded {total} baseline suites "
+                    f"across {len(result)} clients — {result}",
+                    file=sys.stderr,
+                )
+        except Exception:
+            if verbose:
+                traceback.print_exc()
 
     # Step 4 — release the adapter connection ---------------------------
     with contextlib.suppress(Exception):

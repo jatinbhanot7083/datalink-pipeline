@@ -409,63 +409,67 @@ def persist_proposal(
         },
     )
 
-    # 2. Column rows
-    for i, c in enumerate(columns, start=1):
-        warehouse.execute(
-            f"""
-            INSERT INTO {CONTROL_SCHEMA}.global_gold_schema_fields
-              (gold_field_id, gold_dataset_id, dataset_code, column_order,
-               gold_column_name, logical_type, nullable, is_business_key,
-               is_pii, is_phi, description, anchor_reference, version)
-            VALUES ($id, $g, $ds, $ord,
-                    $n, $t, $nul, $bk,
-                    $pii, $phi, $desc, $ar, $v)
-            """,
-            {
-                "id": str(uuid.uuid4()),
-                "g": gold_dataset_id,
-                "ds": dataset_code,
-                "ord": i,
-                "n": str(c["gold_column_name"]),
-                "t": str(c["logical_type"]),
-                "nul": bool(c["nullable"]),
-                "bk": bool(c.get("is_business_key", False)),
-                "pii": bool(c.get("is_pii", False)),
-                "phi": bool(c.get("is_phi", False)),
-                "desc": str(c.get("description") or ""),
-                "ar": c.get("anchor_reference"),
-                "v": next_version,
-            },
-        )
-
-    # 3. Mapping rows
-    for m in mappings:
-        warehouse.execute(
-            f"""
-            INSERT INTO {CONTROL_SCHEMA}.bronze_to_gold_mappings
-              (mapping_id, gold_field_id, gold_dataset_id, gold_column_name,
-               bronze_source_columns, transform_kind, transform_sql, rationale,
-               confidence, created_by)
-            VALUES ($id, $f, $g, $n,
-                    $bsc, $kind, $sql, $rat,
-                    $conf, $by)
-            """,
-            {
-                "id": str(uuid.uuid4()),
-                # gold_field_id can be left NULL when mapping is recorded
-                # before the column is queried back by ID — the FK is logical
-                # only (dataset_id + gold_column_name uniquely identifies it).
-                "f": str(uuid.uuid4()),
-                "g": gold_dataset_id,
-                "n": str(m["gold_column_name"]),
-                "bsc": json.dumps(m.get("bronze_source_columns", []), default=str),
-                "kind": str(m["transform_kind"]).upper(),
-                "sql": str(m["transform_sql"]),
-                "rat": str(m.get("rationale", ""))[:1000],
-                "conf": float(m.get("confidence", 0.9)),
-                "by": actor,
-            },
-        )
+    # 2. Column rows — BATCHED via cursor.executemany (was row-by-row → ~30s)
+    column_rows_batch = [
+        {
+            "id": str(uuid.uuid4()),
+            "g": gold_dataset_id,
+            "ds": dataset_code,
+            "ord": i,
+            "n": str(c["gold_column_name"]),
+            "t": str(c["logical_type"]),
+            "nul": bool(c["nullable"]),
+            "bk": bool(c.get("is_business_key", False)),
+            "pii": bool(c.get("is_pii", False)),
+            "phi": bool(c.get("is_phi", False)),
+            "desc": str(c.get("description") or ""),
+            "ar": c.get("anchor_reference"),
+            "v": next_version,
+        }
+        for i, c in enumerate(columns, start=1)
+    ]
+    # 3. Mapping rows — BATCHED too
+    mapping_rows_batch = [
+        {
+            "id": str(uuid.uuid4()),
+            "f": str(uuid.uuid4()),
+            "g": gold_dataset_id,
+            "n": str(m["gold_column_name"]),
+            "bsc": json.dumps(m.get("bronze_source_columns", []), default=str),
+            "kind": str(m["transform_kind"]).upper(),
+            "sql": str(m["transform_sql"]),
+            "rat": str(m.get("rationale", ""))[:1000],
+            "conf": float(m.get("confidence", 0.9)),
+            "by": actor,
+        }
+        for m in mappings
+    ]
+    if column_rows_batch or mapping_rows_batch:
+        conn = warehouse._connect()
+        cur = conn.cursor()
+        try:
+            if column_rows_batch:
+                cur.executemany(
+                    f"INSERT INTO {CONTROL_SCHEMA}.global_gold_schema_fields "
+                    f"(gold_field_id, gold_dataset_id, dataset_code, column_order, "
+                    f" gold_column_name, logical_type, nullable, is_business_key, "
+                    f" is_pii, is_phi, description, anchor_reference, version) "
+                    f"VALUES (%(id)s, %(g)s, %(ds)s, %(ord)s, %(n)s, %(t)s, %(nul)s, "
+                    f"        %(bk)s, %(pii)s, %(phi)s, %(desc)s, %(ar)s, %(v)s)",
+                    column_rows_batch,
+                )
+            if mapping_rows_batch:
+                cur.executemany(
+                    f"INSERT INTO {CONTROL_SCHEMA}.bronze_to_gold_mappings "
+                    f"(mapping_id, gold_field_id, gold_dataset_id, gold_column_name, "
+                    f" bronze_source_columns, transform_kind, transform_sql, rationale, "
+                    f" confidence, created_by) "
+                    f"VALUES (%(id)s, %(f)s, %(g)s, %(n)s, %(bsc)s, %(kind)s, %(sql)s, "
+                    f"        %(rat)s, %(conf)s, %(by)s)",
+                    mapping_rows_batch,
+                )
+        finally:
+            cur.close()
 
     # 4. Silver pattern recommendation row (only if not yet LIVE for this dataset)
     if rec:

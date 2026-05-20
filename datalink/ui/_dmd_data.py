@@ -71,6 +71,9 @@ class Snapshot:
     silver_columns_by_dataset: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     gold_fields_by_dataset: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     distinct_clients: list[str] = field(default_factory=list)
+    # Phase 22 — product-line scoping.  Maps dataset_code → list of
+    # product_line_codes (e.g. {'membership': ['CC', 'E360', 'RBN']}).
+    product_lines_by_dataset: dict[str, list[str]] = field(default_factory=dict)
     loaded_at: str = ""
 
     @property
@@ -293,11 +296,31 @@ def _fetch_snapshot_uncached() -> Snapshot:
                     clients.add(nm)
         except Exception:
             pass
-        # Always include 'aetna' as the documented baseline tenant the
-        # demos / smoke tests reference, even if its data folder hasn't
-        # been generated yet.
-        clients.add("aetna")
+        # NOTE: previously hardcoded `clients.add("aetna")` here as a
+        # demo placeholder.  Removed in May 2026 — it caused the DMD page
+        # to show "Total Bronze LIVE clients = 1" + an "AETNA — no
+        # authored schemas yet" expander even after a fresh wipe.  If you
+        # need a baseline tenant for smoke tests, register it via
+        # CONTROL.client_pipeline_instances (or drop a folder under
+        # data/generated/aetna/), don't hardcode it here.
         snap.distinct_clients = sorted(clients)
+
+        # 7. Product-line scoping (Phase 22).  CONTROL.dataset_product_lines
+        # may not exist on accounts that haven't run migration 22 yet — be
+        # defensive.
+        try:
+            for r in wh.query(
+                f"SELECT dataset_code, product_line_code "
+                f"FROM {CONTROL_SCHEMA}.dataset_product_lines "
+                f"ORDER BY dataset_code, product_line_code"
+            ):
+                ds = str(r.get("dataset_code") or "")
+                pl = str(r.get("product_line_code") or "")
+                if ds and pl:
+                    snap.product_lines_by_dataset.setdefault(ds, []).append(pl)
+        except Exception:
+            # Migration not applied — silently leave the map empty.
+            pass
 
     snap.loaded_at = datetime.now(UTC).isoformat()
     return snap

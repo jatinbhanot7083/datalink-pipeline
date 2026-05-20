@@ -60,10 +60,190 @@ from datalink.agents.silver_schema_designer import (  # noqa: E402
 from datalink.config.loader import load_settings  # noqa: E402
 from datalink.memory import AgentMemoryStore  # noqa: E402
 from datalink.quality.control import CONTROL_SCHEMA, create_control_tables  # noqa: E402
+from datalink.ui._dmd_admin_banner import render_admin_banner  # noqa: E402
 from datalink.ui._nav import render_sidebar  # noqa: E402
 from datalink.ui._query import warehouse_ctx  # noqa: E402
 
 render_sidebar(active="Data Model Designer")
+
+# Phase 22 — operator wipe + upload at the top of the page.  Repeatable
+# demo state without leaving the browser.  See ``_dmd_admin_banner.py``.
+render_admin_banner()
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 23.5 — Canonical Extension Proposals (DBA only)
+#
+# Feedback loop from Client Onboarding: unmapped client fields that the
+# operator promoted to canonical-extension proposals land here for DBA
+# review.  Approval inserts into ``global_bronze_catalog_fields`` so the
+# canonical model grows organically from real client data shape.
+# ═════════════════════════════════════════════════════════════════════════════
+def _render_canonical_extensions_section() -> None:
+    """DBA-only section showing pending Canonical Extension Proposals.
+
+    Hidden entirely when:
+      * Role is not DBA  (USER mode never sees it)
+      * No pending proposals AND no historical proposals to show
+
+    Rationale: until Client Onboarding produces unmapped-field proposals,
+    this panel has no signal — its "0 pending" empty-state was confusing
+    operators who hadn't run that flow yet.  When proposals appear, the
+    panel reappears automatically (it's checked on every DMD render).
+    """
+    if st.session_state.get("dmd_role") != "DBA":
+        return  # USER mode hides this entirely
+
+    from datalink.agents.inbound_mapping import (
+        approve_canonical_extension,
+        list_extension_proposals,
+        reject_canonical_extension,
+    )
+
+    with warehouse_ctx(readonly=True) as _wh_ro:
+        pending = list_extension_proposals(
+            wh=_wh_ro,
+            status=["DRAFT", "PENDING_REVIEW"],
+            limit=50,
+        )
+        historical = list_extension_proposals(
+            wh=_wh_ro,
+            status=["PROMOTED", "REJECTED"],
+            limit=50,
+        )
+
+    n_pending = len(pending)
+    n_historical = len(historical)
+
+    # Hide entirely when there's nothing actionable AND no history worth
+    # surfacing.  Re-appears the moment Client Onboarding produces a
+    # proposal or accumulates history.
+    if n_pending == 0 and n_historical == 0:
+        return
+
+    label = f"🛡️ DBA · Canonical Extension Proposals  ·  **{n_pending} pending**"
+    with st.expander(label, expanded=bool(n_pending)):
+        st.caption(
+            "Unmapped client fields promoted from Client Onboarding.  Approve "
+            "→ adds the field to the canonical Bronze catalog (all future "
+            "client mappings can target it).  Reject → discard with reason."
+        )
+        if not pending:
+            st.info("No pending extension proposals.  ✨ The canonical model is up to date.")
+        else:
+            for p in pending:
+                with st.container(border=True):
+                    h1, h2, h3, h4 = st.columns([2.0, 1.4, 1.4, 1.6])
+                    h1.markdown(
+                        f"**{p['proposed_display_name']}**  ·  " f"`{p['proposed_column_name']}`"
+                    )
+                    h2.markdown(
+                        f"**Type:** `{p.get('proposed_logical_type','TEXT')}`  ·  "
+                        f"**Req:** {p.get('proposed_requirement','Optional')}"
+                    )
+                    pii_phi_bits = []
+                    if p.get("proposed_is_pii"):
+                        pii_phi_bits.append("🔒 PII")
+                    if p.get("proposed_is_phi"):
+                        pii_phi_bits.append("🩺 PHI")
+                    h3.markdown(
+                        f"**Dataset:** `{p['dataset_code']}`  "
+                        + ("  ·  " + " ".join(pii_phi_bits) if pii_phi_bits else "")
+                    )
+                    conf = float(p.get("ai_confidence") or 0)
+                    h4.markdown(
+                        f"**Confidence:** `{conf:.2f}`  ·  " f"**Tokens:** `{p.get('ai_tokens',0)}`"
+                    )
+                    st.caption(
+                        f"📥 origin: client `{p.get('origin_client_id','?')}` · "
+                        f"field `{p.get('origin_field_name','?')}` · "
+                        f"created `{str(p.get('created_at',''))[:19]}` by `{p.get('created_by','?')}`"
+                    )
+                    if p.get("proposed_description"):
+                        st.markdown(f"📝 _{p['proposed_description']}_")
+
+                    notes = st.text_input(
+                        "Reviewer notes (REQUIRED on reject; recorded on approve)",
+                        key=f"ext_notes_{p['extension_id']}",
+                        max_chars=4000,
+                    )
+                    b1, b2, _ = st.columns([1, 1, 4])
+                    with b1:
+                        if st.button(
+                            "✅ Approve → add to canonical",
+                            key=f"ext_approve_{p['extension_id']}",
+                            type="primary",
+                            use_container_width=True,
+                            help=(
+                                "INSERTs the field into "
+                                "CONTROL.global_bronze_catalog_fields and "
+                                "marks the extension PROMOTED.  No undo — "
+                                "field can be DEPRECATED but not deleted."
+                            ),
+                        ):
+                            try:
+                                with warehouse_ctx(readonly=False) as _wh_w:
+                                    new_field_id = approve_canonical_extension(
+                                        wh=_wh_w,
+                                        extension_id=p["extension_id"],
+                                        actor="ui:dba:dmd",
+                                        reviewer_notes=notes,
+                                    )
+                                st.success(
+                                    f"🎉 Promoted.  Canonical field_id=`{new_field_id}` · "
+                                    f"`{p['proposed_column_name']}` is now in "
+                                    f"`{p['dataset_code']}`.  Future client mappings can target it."
+                                )
+                                # Bust DMD snapshot cache so the new field is visible
+                                try:
+                                    from datalink.ui import _dmd_data as _dmd
+
+                                    _dmd.invalidate()
+                                except Exception:
+                                    pass
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"❌ Approve failed: {type(exc).__name__}: {exc}")
+                    with b2:
+                        if st.button(
+                            "❌ Reject",
+                            key=f"ext_reject_{p['extension_id']}",
+                            use_container_width=True,
+                            help="Discard the proposal.  Reviewer notes required.",
+                        ):
+                            try:
+                                with warehouse_ctx(readonly=False) as _wh_w:
+                                    reject_canonical_extension(
+                                        wh=_wh_w,
+                                        extension_id=p["extension_id"],
+                                        actor="ui:dba:dmd",
+                                        reviewer_notes=notes,
+                                    )
+                                st.rerun()
+                            except ValueError as ve:
+                                st.error(str(ve))
+
+        if historical:
+            with st.expander(f"🗄️ Historical  ({len(historical)})", expanded=False):
+                hist_rows = []
+                for h in historical:
+                    hist_rows.append(
+                        {
+                            "Status": h["status"],
+                            "Dataset": h["dataset_code"],
+                            "Display name": h.get("proposed_display_name"),
+                            "Column": h.get("proposed_column_name"),
+                            "Origin client": h.get("origin_client_id"),
+                            "Origin field": h.get("origin_field_name"),
+                            "Reviewed by": h.get("reviewed_by"),
+                            "Reviewed at": str(h.get("reviewed_at") or "")[:19],
+                        }
+                    )
+                st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+
+
+_render_canonical_extensions_section()
+
 
 _NAVY = "#0a1a3e"
 _GOLD = "#d4af37"
@@ -124,8 +304,35 @@ def _warehouse(*, readonly: bool = True) -> Iterator[Any]:
 # ---------------------------------------------------------------------------
 
 st.markdown("# 🥇 Data Model Designer")
+
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _catalog_live_counts() -> tuple[int, int]:
+    """Live row counts from the Bronze catalog so the hero never lies on
+    empty / mid-load state.  Returns (datasets, fields).  Wrapped in
+    try/except so a transient Snowflake hiccup doesn't crash the page."""
+    try:
+        with warehouse_ctx(readonly=True) as wh:
+            ds = list(
+                wh.query(f"SELECT COUNT(*) c FROM {CONTROL_SCHEMA}.global_bronze_catalog_datasets")
+            )[0]["c"]
+            fd = list(
+                wh.query(f"SELECT COUNT(*) c FROM {CONTROL_SCHEMA}.global_bronze_catalog_fields")
+            )[0]["c"]
+            return int(ds or 0), int(fd or 0)
+    except Exception:
+        return 0, 0
+
+
+_hero_ds, _hero_fd = _catalog_live_counts()
+_hero_catalog_phrase = (
+    "Bronze catalog: <strong>0 datasets · 0 fields</strong> "
+    "(upload via 📂 Upload catalogue to populate)"
+    if (_hero_ds == 0 and _hero_fd == 0)
+    else f"Bronze catalog: <strong>{_hero_ds:,} datasets · {_hero_fd:,} fields</strong>"
+)
 st.markdown(
-    """
+    f"""
     <div class="gd-hero">
       <strong>Independent Bronze · Silver · Gold authoring with three modes per layer.</strong>
       Bronze comes from the product catalog (vendor mapping spec). Silver
@@ -136,7 +343,7 @@ st.markdown(
       from the global model on Pipeline Architect deploy.
       <div class="gd-meta">
         Backend: <strong>Claude Haiku 4.5 + Voyage 3.5-lite RAG</strong>
-        &middot; Bronze catalog: 33 datasets · 943 fields · CATALOG_ANCHOR by default
+        &middot; {_hero_catalog_phrase}
         &middot; PHI-safe: only metadata reaches the LLM.
       </div>
     </div>
@@ -265,151 +472,24 @@ def _is_global_scope(s: dict[str, Any]) -> bool:
 
 _g_silver = [s for s in _snap.silver_schemas if _is_global_scope(s)]
 _g_gold = [g for g in _snap.gold_schemas if _is_global_scope(g)]
-st.markdown("## 🌍 Global Medallion Registry Status")
-st.caption(
-    "Canonical templates that real clients clone from — zero LLM cost. "
-    "Counts and drill-down below are GLOBAL_CORP-scoped only."
-)
 
-bronze_count = len(_snap.bronze_datasets)
-g_silver_live_count = sum(1 for s in _g_silver if s.get("status") == "LIVE")
-g_silver_draft_count = sum(1 for s in _g_silver if s.get("status") in ("DRAFT", "PENDING_REVIEW"))
-g_gold_live_count = sum(1 for g in _g_gold if g.get("status") == "LIVE")
-g_gold_draft_count = sum(1 for g in _g_gold if g.get("status") in ("DRAFT", "PENDING_REVIEW"))
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 22 — UNIFIED Global Medallion Schema grid (replaces the old scrolling
+# dataframe + separate Inspect picker + counters).  Per-row 🛠 Author / 📦
+# Clone buttons set session_state["dmd_action"] which downstream sections
+# read.  Clicking 🥉/🥈/🥇 opens an inline schema viewer modal.
+# ═════════════════════════════════════════════════════════════════════════════
+from datalink.ui._dmd_grids import render_global_medallion  # noqa: E402
 
-c1, c2, c3 = st.columns(3)
-c1.markdown(
-    f'<div class="gd-card"><div class="gd-stat-emoji">🥉</div>'
-    f'<div class="gd-stat">{bronze_count}</div>'
-    f'<div class="gd-stat-label">Global Bronze datasets</div></div>',
-    unsafe_allow_html=True,
-)
-silver_draft_html = (
-    f"<small style='color:{_AMBER};font-size:.7em'> +{g_silver_draft_count} draft</small>"
-    if g_silver_draft_count
-    else ""
-)
-gold_draft_html = (
-    f"<small style='color:{_AMBER};font-size:.7em'> +{g_gold_draft_count} draft</small>"
-    if g_gold_draft_count
-    else ""
-)
-c2.markdown(
-    f'<div class="gd-card"><div class="gd-stat-emoji">🥈</div>'
-    f'<div class="gd-stat">{g_silver_live_count}{silver_draft_html}</div>'
-    f'<div class="gd-stat-label">Global Silver schemas LIVE</div></div>',
-    unsafe_allow_html=True,
-)
-c3.markdown(
-    f'<div class="gd-card"><div class="gd-stat-emoji">🥇</div>'
-    f'<div class="gd-stat">{g_gold_live_count}{gold_draft_html}</div>'
-    f'<div class="gd-stat-label">Global Gold schemas LIVE</div></div>',
-    unsafe_allow_html=True,
-)
+render_global_medallion(snap=_snap)
+st.markdown("---")
 
-
-# Drill-down expander — readiness across all 33 datasets at the GLOBAL_CORP
-# layer.  Per-client readiness is in the Client Medallion Registry below.
-def _readiness_row(ds: dict[str, Any]) -> dict[str, Any]:
-    code = ds["dataset_code"]
-    silvers = [s for s in _g_silver if s["dataset_code"] == code]
-    golds = [g for g in _g_gold if g["dataset_code"] == code]
-    silver = silvers[0] if silvers else None
-    gold = golds[0] if golds else None
-
-    # Anchor column — gather every distinct anchor seen across non-archived
-    # Silver + Gold rows for this dataset under GLOBAL_CORP.  Multiple
-    # anchors → comma-joined.  Reflects the current (anchor-aware) slot model.
-    _anchor_set: set[str] = set()
-    for s in silvers:
-        if str(s.get("status") or "") != "ARCHIVED":
-            _anchor_set.add(str(s.get("silver_anchor") or "—"))
-    for g in golds:
-        if str(g.get("status") or "") != "ARCHIVED":
-            _anchor_set.add(str(g.get("gold_anchor") or "—"))
-    anchor_label = ", ".join(sorted(_anchor_set)) if _anchor_set else "—"
-
-    used_by_raw = ds.get("used_by") or "[]"
-    try:
-        used_by_list = json.loads(used_by_raw) if isinstance(used_by_raw, str) else used_by_raw
-    except json.JSONDecodeError:
-        used_by_list = []
-    return {
-        "Dataset": ds["display_name"],
-        "Code": code,
-        "Category": ds.get("category") or "—",
-        "Anchor": anchor_label,
-        "Bronze": "✓ LIVE",
-        "Silver": (
-            f"✓ LIVE ({silver['silver_pattern']} v{silver['version']})"
-            if silver and silver.get("status") == "LIVE"
-            else "◌ DRAFT"
-            if silver and silver.get("status") in ("DRAFT", "PENDING_REVIEW")
-            else "— none"
-        ),
-        "Gold": (
-            f"✓ LIVE (v{gold['version']})"
-            if gold and gold.get("status") == "LIVE"
-            else "◌ DRAFT"
-            if gold and gold.get("status") in ("DRAFT", "PENDING_REVIEW")
-            else "— none"
-        ),
-        "Bronze fields": ds["total_fields"],
-        "Used by": ", ".join(used_by_list) if used_by_list else "—",
-    }
-
-
-def _color_status(val: str) -> str:
-    """Streamlit Pandas Styler — color cells by readiness."""
-    if isinstance(val, str):
-        if val.startswith("✓ LIVE"):
-            return f"background-color:#dcfce7;color:{_GREEN};font-weight:600"
-        if val.startswith("◌ DRAFT"):
-            return f"background-color:#fef3c7;color:{_AMBER};font-weight:600"
-        if val.startswith("— none"):
-            return f"background-color:#f3f4f6;color:{_GREY}"
-    return ""
-
-
-with st.expander(
-    f"📊 Drill into all {bronze_count} datasets — Global Bronze / Silver / Gold readiness",
-    expanded=True,
-):
-    if not _snap.bronze_datasets:
-        st.warning(
-            "Bronze catalog is empty. Run `python3 scripts/load_product_catalog.py` to seed it."
-        )
-    else:
-        rows = [_readiness_row(d) for d in _snap.bronze_datasets]
-
-        # Sort: most-authored first.  LIVE Silver+Gold → top, then partial,
-        # then DRAFT, then 'none'.  Within same tier, alphabetical by dataset.
-        def _readiness_sort_key(r: dict[str, Any]) -> tuple[int, str]:
-            silver = r.get("Silver") or ""
-            gold = r.get("Gold") or ""
-            score = 0
-            if silver.startswith("✓ LIVE"):
-                score -= 2
-            elif silver.startswith("◌ DRAFT"):
-                score -= 1
-            if gold.startswith("✓ LIVE"):
-                score -= 2
-            elif gold.startswith("◌ DRAFT"):
-                score -= 1
-            # Lower score = more authored = sorts first when ascending.
-            return (score, str(r.get("Dataset") or ""))
-
-        rows.sort(key=_readiness_sort_key)
-        df = pd.DataFrame(rows)
-        styled = df.style.map(_color_status, subset=["Bronze", "Silver", "Gold"])
-        st.dataframe(styled, use_container_width=True, hide_index=True, height=520)
-
-        # 👁️ Inspect a Global schema — placeholder reserved here so the
-        # picker renders visually inside the Global drill-down expander.
-        # The actual picker function (_render_global_inspect_picker) is
-        # defined further down, AFTER _render_schema_inspector exists, and
-        # filled into this slot via `with _global_inspect_slot.container():`.
-        _global_inspect_slot = st.empty()
+# (Phase 22 — legacy counters + scrolling drill-down dataframe deleted.
+# The grid above replaces them.  Git history preserves the prior code.)
+# (Phase 22 — old c2/c3 counters and the 520px-tall scrolling drill-down
+# dataframe were removed.  The new unified `render_global_medallion` grid
+# above carries the counters AND the per-row drill in a single full-width
+# table — no inner scroll bar, schema viewers inline via 🥉/🥈/🥇 buttons.)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -852,107 +932,9 @@ def _render_schema_inspector(
         st.caption(f"silver/gold_dataset_id: `{entity_id}`")
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Phase 17.6 — 👁️ Inspect a Global schema (picker fills the placeholder
-# reserved at the top of the page inside the Global Medallion Registry
-# drill-down expander).  Defined HERE so it can call _render_schema_inspector
-# above; INVOKED via _global_inspect_slot.container() so it visually appears
-# in its reserved slot at the top.
-# ─────────────────────────────────────────────────────────────────────────────
-def _render_global_inspect_picker() -> None:
-    """Render the dataset → layer → version picker + 👁️ View Schema popover
-    for GLOBAL_CORP-scoped schemas.  Same inspector the Client grid uses —
-    keeps the experience uniform and lets operators see exactly what gets
-    cloned BEFORE they clone."""
-    st.markdown("#### 👁️ Inspect a Global schema")
-    st.caption(
-        "Pick a dataset + layer + version to view its columns, AI "
-        "rationale, generated DDL, and dbt model. This is what gets "
-        "carried forward when you clone to a client."
-    )
-
-    _g_inspect_dsets = sorted(
-        {str(s.get("dataset_code")) for s in _g_silver if s.get("dataset_code")}
-        | {str(g.get("dataset_code")) for g in _g_gold if g.get("dataset_code")}
-    )
-    if not _g_inspect_dsets:
-        st.info(
-            "No Global Silver/Gold schemas exist yet — nothing to "
-            "inspect. Author at least one to populate this picker."
-        )
-        return
-
-    gi1, gi2, gi3, gi4 = st.columns([2, 1, 1, 1])
-    with gi1:
-        _gi_ds = st.selectbox(
-            "Dataset",
-            options=_g_inspect_dsets,
-            key="global_inspect_ds",
-        )
-    _has_silver = any(str(s.get("dataset_code")) == _gi_ds for s in _g_silver)
-    _has_gold = any(str(g.get("dataset_code")) == _gi_ds for g in _g_gold)
-    _layer_opts: list[str] = []
-    if _has_silver:
-        _layer_opts.append("Silver")
-    if _has_gold:
-        _layer_opts.append("Gold")
-    with gi2:
-        _gi_layer = st.selectbox(
-            "Layer",
-            options=_layer_opts,
-            key="global_inspect_layer",
-        )
-    if _gi_layer == "Silver":
-        _candidates = [s for s in _g_silver if str(s.get("dataset_code")) == _gi_ds]
-    else:
-        _candidates = [g for g in _g_gold if str(g.get("dataset_code")) == _gi_ds]
-    _candidates_sorted = sorted(
-        _candidates,
-        key=lambda r: int(r.get("version") or 0),
-        reverse=True,
-    )
-    _ver_labels = [
-        f"v{r.get('version')} · {_status_pill(r.get('status'))}" for r in _candidates_sorted
-    ]
-    with gi3:
-        _gi_ver_idx = st.selectbox(
-            "Version",
-            options=list(range(len(_ver_labels))),
-            format_func=lambda i: _ver_labels[i] if _ver_labels else "—",
-            key="global_inspect_ver_idx",
-        )
-    _gi_row = _candidates_sorted[_gi_ver_idx] if _candidates_sorted else None
-    with gi4:
-        if _gi_row is not None:
-            _entity_id = (
-                str(_gi_row.get("silver_dataset_id"))
-                if _gi_layer == "Silver"
-                else str(_gi_row.get("gold_dataset_id"))
-            )
-            _gi_cols = (
-                _snap.silver_columns_by_dataset.get(_entity_id, [])
-                if _gi_layer == "Silver"
-                else _snap.gold_fields_by_dataset.get(_entity_id, [])
-            )
-            with st.popover(
-                "👁️ View Schema",
-                use_container_width=True,
-                help="Open the comprehensive inspector — columns, AI "
-                "proposal, DDL, dbt model, lineage, audit.",
-            ):
-                _render_schema_inspector(
-                    layer=_gi_layer,
-                    row=_gi_row,
-                    cols=_gi_cols,
-                    entity_id=_entity_id,
-                )
-
-
-# Fill the placeholder reserved earlier inside the Global Medallion Registry
-# drill-down expander.  This makes the picker render at its visual home
-# (top of the page) while still being able to call _render_schema_inspector.
-with _global_inspect_slot.container():
-    _render_global_inspect_picker()
+# (Phase 22 — `_render_global_inspect_picker` deleted.  The new unified
+# Global Medallion grid above has per-row Bronze/Silver/Gold view buttons
+# that open the schema viewer modal directly — no separate picker needed.)
 
 
 @st.fragment
@@ -1397,21 +1379,120 @@ def _render_client_medallion_registry() -> None:
     # to change a LIVE row, archive it and re-author from the picker.
 
 
-# Top-level h2 to match Global Medallion Registry styling.  The expander
-# under it is just for collapse/show — its label is muted so the section
-# title carries the visual weight.
-st.markdown("## 🤝 Client Medallion Registry Status")
-st.caption(
-    "Per-client schema state across all datasets where the client has "
-    "authored anything. Clients with no authored content are hidden. "
-    "Filter, sort, and click rows to act — every action buffers locally "
-    "and submits as a batch via 🚀 Submit at the top."
-)
-with st.expander("Show / hide grid", expanded=True):
-    _render_client_medallion_registry()
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 22 — UNIFIED Client Medallion Schema grid (replaces the per-(client,
+# dataset)-cell scrolling grid + hidden-when-no-content filter).  Now: ALL
+# clients are shown, expand/collapse per client, full Bronze list inside
+# each.  Per-row 🛠 Author / 📦 Clone with layer-aware enable/disable.
+# ═════════════════════════════════════════════════════════════════════════════
+from datalink.ui._dmd_grids import render_client_medallion  # noqa: E402
 
-
+render_client_medallion(snap=_snap)
 st.markdown("---")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# Phase 22 — ACTION HAND-OFF
+#
+# When the operator clicks 🛠 Author or 📦 Clone on a row in either of the
+# grids above, the click handler writes ``st.session_state["dmd_action"]``
+# and triggers an app-scoped rerun.  Here we consume that action ONCE per
+# rerun by pre-filling the relevant section's widget keys, then dropping
+# the action so the picker / cloning radio behave normally on subsequent
+# user-driven changes.  Two banner placeholders are also created so
+# downstream sections can highlight the staged context (rendered in-place
+# below at the section headers).
+# ═════════════════════════════════════════════════════════════════════════════
+from datalink.ui._dmd_grids import clear_action as _dmd_clear_action  # noqa: E402
+from datalink.ui._dmd_grids import get_action as _dmd_get_action  # noqa: E402
+
+_dmd_pending_action: dict[str, Any] = _dmd_get_action() or {}
+_dmd_action_kind = str(_dmd_pending_action.get("kind") or "")
+
+# Two highlight buffers — set here, rendered at the section headers below.
+_authoring_banner_text: str | None = None
+_cloning_banner_text: str | None = None
+
+if _dmd_action_kind == "author":
+    _scope = str(_dmd_pending_action.get("scope") or "")
+    _ds = str(_dmd_pending_action.get("dataset") or "")
+    _layer = str(_dmd_pending_action.get("layer") or "Silver")
+
+    # ---- Client selectbox pre-fill ---------------------------------
+    # `dmd_pick_client` is what the Client selectbox uses as key.  Set
+    # via session_state — Streamlit reads session_state first, so this
+    # overrides any prior selection.
+    if _scope:
+        st.session_state["dmd_pick_client"] = _scope
+
+    # ---- Anchor selectbox pre-fill ---------------------------------
+    # `dmd_pick_anchor` — Anchor selectbox key.  Always pre-set to
+    # CATALOG_ANCHOR since that's the canonical baseline (the only one
+    # that makes sense from the Global grid's ⚓ Anchor button).  This
+    # CLEARS any stale anchor pick from a prior interaction.
+    st.session_state["dmd_pick_anchor"] = "CATALOG_ANCHOR"
+
+    # ---- Dataset selectbox pre-fill --------------------------------
+    # The Dataset selectbox uses a LABEL like "Membership  (41 fields,
+    # Member)" — not the raw code.  Compute the exact label so the
+    # selectbox lands on the right row.  Falls back to clearing the
+    # session_state key so the widget uses its index-default fallback
+    # (which reads query_params["dataset"]).
+    if _ds:
+        st.query_params["dataset"] = _ds
+        st.query_params["client"] = _scope
+        # Try to compute the exact label used by the Dataset selectbox
+        _ds_obj = next(
+            (d for d in _snap.bronze_datasets if str(d.get("dataset_code")) == _ds),
+            None,
+        )
+        if _ds_obj:
+            _ds_label = (
+                f"{_ds_obj['display_name']}  "
+                f"({_ds_obj['total_fields']} fields, {_ds_obj['category']})"
+            )
+            st.session_state["dmd_pick_dataset"] = _ds_label
+        else:
+            # Couldn't resolve — clear stale state so the index default fires
+            st.session_state.pop("dmd_pick_dataset", None)
+
+    # ---- Layer radio pre-fill --------------------------------------
+    # `dmd_design_layer` — Layer radio in the "Designing" section.
+    if _layer == "Silver":
+        st.session_state["dmd_design_layer"] = "🥈 Silver (designable)"
+    elif _layer == "Gold":
+        st.session_state["dmd_design_layer"] = "🥇 Gold (designable)"
+    elif _layer == "Bronze":
+        st.session_state["dmd_design_layer"] = "🥉 Bronze (read-only)"
+
+    # Stage a banner shown at the picker section's header.
+    _scope_pretty = "GLOBAL_CORP" if _scope == "GLOBAL_CORP" else _scope
+    _authoring_banner_text = (
+        f"🎯 **Authoring task staged** — `{_scope_pretty}` · `{_ds}` · target layer: **{_layer}**  "
+        f"·  the picker below is pre-filled."
+    )
+    _dmd_clear_action()  # consume — one-shot
+
+elif _dmd_action_kind == "clone":
+    _scope_from = str(_dmd_pending_action.get("from_scope") or "")
+    _ds = str(_dmd_pending_action.get("dataset") or "")
+    if _scope_from == "GLOBAL_CORP" and _ds:
+        # Switch to "Per Global Dataset → Client" mode (the most useful one
+        # for a single-row clone) and pre-select the dataset.
+        st.session_state["cc_mode"] = "📦 Per Global Dataset → Client"
+        st.session_state["cc_gd_dataset"] = _ds
+        _cloning_banner_text = (
+            f"📦 **Clone task staged** — source `GLOBAL_CORP / {_ds}`  "
+            f"·  Cloning Center pre-selected.  Pick a target client → Save."
+        )
+    elif _ds:
+        # Per source client / dataset → target client mode (mode C).
+        st.session_state["cc_mode"] = "📦 Per Source Client / Dataset → Target Client"
+        _cloning_banner_text = (
+            f"📦 **Clone task staged** — source `{_scope_from} / {_ds}`  "
+            f"·  Cloning Center mode set to Client→Client."
+        )
+    _dmd_clear_action()  # consume — one-shot
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1963,13 +2044,15 @@ def _render_cloning_center() -> None:
     _mode = st.radio(
         "Clone mode",
         options=[
-            "📦 Full Global → Client (all datasets)",
+            "📦 Multi-select Global → Client (cherry-pick)",
             "📦 Per Global Dataset → Client",
             "📦 Per Source Client / Dataset → Target Client",
         ],
         index=0,
         horizontal=True,
         key="cc_mode",
+        help="Phase 22 — top option now lets you pick ANY subset of LIVE "
+        "Global datasets to clone in one batch (was: all-or-nothing).",
     )
 
     # Build the universe of LIVE-only sources we can clone from.
@@ -1977,12 +2060,35 @@ def _render_cloning_center() -> None:
     _g_gold_live = [g for g in _g_gold if str(g.get("status")) == "LIVE"]
 
     # ─── Mode A — Full Global → ONE client ─────────────────────────────
-    if _mode.startswith("📦 Full Global"):
+    if _mode.startswith("📦 Multi-select Global"):
         st.markdown(
-            "Clones EVERY LIVE Global Silver + Gold to a single target "
-            "client.  Datasets the target already has (any non-archived "
+            "Cherry-pick **which** LIVE Global Silver + Gold datasets to "
+            "clone to a single target client.  Empty selection = ALL LIVE "
+            "Globals.  Datasets the target already has (any non-archived "
             "Silver+Gold) are silently SKIPPED — never overwritten."
         )
+
+        # Phase 22 — multi-select picker for cherry-picking datasets.
+        _all_live_codes = sorted(
+            {str(s.get("dataset_code")) for s in _g_silver_live + _g_gold_live}
+        )
+        if _all_live_codes:
+            _selected_codes = st.multiselect(
+                "Datasets to clone  (leave empty = clone ALL LIVE Globals)",
+                options=_all_live_codes,
+                default=st.session_state.get("cc_full_selected_codes", []),
+                key="cc_full_selected_codes",
+                help="Operator can clone 5 datasets to Aetna and 10 to "
+                "CoAccess in two passes without going dataset-by-dataset.",
+                placeholder=f"Pick from {len(_all_live_codes)} LIVE Global datasets…",
+            )
+        else:
+            _selected_codes = []
+            st.warning(
+                "No LIVE Global datasets exist yet.  Author + promote at "
+                "least one Silver+Gold before cloning."
+            )
+
         col1, col2, col3 = st.columns([3, 1.3, 1.3])
         with col1:
             if not _snap.distinct_clients:
@@ -2041,9 +2147,21 @@ def _render_cloning_center() -> None:
                     "underscore / hyphen only.  GLOBAL_CORP is forbidden."
                 )
             else:
+                # Phase 22 — honor the multi-select.  Empty set = clone ALL.
+                _selected_set = set(_selected_codes or [])
+                _silver_to_clone = (
+                    [s for s in _g_silver_live if str(s.get("dataset_code")) in _selected_set]
+                    if _selected_set
+                    else list(_g_silver_live)
+                )
+                _gold_to_clone = (
+                    [g for g in _g_gold_live if str(g.get("dataset_code")) in _selected_set]
+                    if _selected_set
+                    else list(_g_gold_live)
+                )
                 cloned: list[str] = []
                 skipped: list[str] = []
-                for src in _g_silver_live:
+                for src in _silver_to_clone:
                     ds = str(src.get("dataset_code"))
                     if _has_full_authoring(target, ds):
                         skipped.append(f"Silver {ds} (already authored)")
@@ -2057,7 +2175,7 @@ def _render_cloning_center() -> None:
                         cloned.append(f"Silver {ds} v{src.get('version')}")
                     except Exception as exc:
                         st.error(f"Silver {ds} clone failed: " f"{type(exc).__name__}: {exc}")
-                for src in _g_gold_live:
+                for src in _gold_to_clone:
                     ds = str(src.get("dataset_code"))
                     if _cc_gold_blocks(target, ds):
                         skipped.append(f"Gold {ds} (already authored)")
@@ -2403,6 +2521,17 @@ st.markdown("---")
 # ---------------------------------------------------------------------------
 
 st.markdown("## 🎯 Pick a dataset (drill into one for authoring)")
+# Phase 22 — show the green callout when the operator just clicked 🛠 Author
+# on a row above.  The session_state hand-off already pre-filled the picker
+# keys; this banner makes it visually obvious where their click landed.
+if _authoring_banner_text:
+    st.success(_authoring_banner_text, icon="🎯")
+else:
+    st.caption(
+        "💡  Tip:  click **🛠 Author** on any row in the Global or Client "
+        "Medallion grids above to auto-fill the picker below.  Or manually "
+        "pick Client → Dataset → Anchor."
+    )
 st.caption(
     "Authoring is gated: pick **Client → Dataset → Anchor**, then the layer "
     "radio below activates.  The Dataset list excludes datasets the chosen "
@@ -2815,6 +2944,8 @@ if _authoring_unlocked:
         options=["🥉 Bronze (read-only)", "🥈 Silver (designable)", "🥇 Gold (designable)"],
         horizontal=True,
         label_visibility="collapsed",
+        key="dmd_design_layer",  # session-state key so the ⚓ Anchor button
+        # handoff can pre-select the right layer
     )
 
     # Find existing LIVE schemas for this dataset
@@ -3010,14 +3141,27 @@ if _authoring_unlocked:
                 help="Required to enable Propose. Calls Claude Haiku 4.5 against "
                 "the catalog + RAG corpus. Defaults OFF to prevent accidents.",
             )
+            # Phase 22 — R15 idempotency: disable while an unconsumed proposal
+            # already sits in session_state.  Re-arming requires Save-as-DRAFT,
+            # Approve→LIVE, or Discard below to clear the existing proposal.
+            _silver_propose_locked = bool(st.session_state.get(SILVER_PROPOSAL_KEY))
             if st.button(
-                "🚀 Propose Silver schema (AI)",
+                "🚀 Propose Silver schema (AI)"
+                if not _silver_propose_locked
+                else "✓  Proposal ready below — review or discard to re-propose",
                 type="primary",
                 key="silver_ai_propose",
-                disabled=not _silver_ai_confirm,
-                help=None
-                if _silver_ai_confirm
-                else "🔒 Tick the AI-spend confirm box above to enable.",
+                disabled=(not _silver_ai_confirm) or _silver_propose_locked,
+                help=(
+                    "✓ A proposal is already staged below.  Save it as DRAFT, "
+                    "Approve → LIVE, or Discard to enable re-proposing."
+                    if _silver_propose_locked
+                    else (
+                        None
+                        if _silver_ai_confirm
+                        else "🔒 Tick the AI-spend confirm box above to enable."
+                    )
+                ),
             ):
                 with (
                     st.spinner(
@@ -3597,6 +3741,20 @@ if _authoring_unlocked:
 
             st.markdown(f"**Rationale:** {silver_proposal.get('rationale', '')}")
 
+            # Phase 22 — R3: editable review.  Reviewer notes (free text)
+            # capture what the human changed vs the AI proposal — recorded
+            # to the audit log alongside the save action so we can later
+            # answer "why did the LIVE schema differ from the AI proposal".
+            silver_review_notes = st.text_area(
+                "📝 Reviewer notes  (recorded in audit log)",
+                key=f"silver_review_notes_{selected_dataset_code}",
+                placeholder="e.g. Removed `secondary_dob` (duplicate of dob).  "
+                "Renamed `mbr_id` → `member_id` for consistency with CMS spec.",
+                help="Free-text record of what the reviewer changed from the AI "
+                "proposal before saving.  Written to silver_schema_audit_log.notes.",
+                max_chars=2000,
+            )
+
             s_a, s_b, _ = st.columns([1, 1, 4])
             with s_a:
                 silver_save_draft = st.button(
@@ -3610,41 +3768,112 @@ if _authoring_unlocked:
                     use_container_width=True,
                 )
 
+            # Phase 22 — R3 helper: write reviewer notes to silver_schema_audit_log.
+            def _write_silver_review_audit(
+                wh, sid: str, notes: str, *, to_status: str, actor: str
+            ) -> None:
+                if not (notes or "").strip():
+                    return  # no notes to log
+                import uuid as _u
+                from datetime import UTC, datetime
+
+                try:
+                    wh.execute(
+                        f"INSERT INTO {CONTROL_SCHEMA}.silver_schema_audit_log "
+                        f"(audit_id, silver_dataset_id, dataset_code, action, "
+                        f" actor, from_status, to_status, diff_summary, ts, notes) "
+                        f"VALUES ($aid, $sid, $code, 'reviewer_notes', $by, "
+                        f"        'DRAFT', $to, $diff, $ts, $notes)",
+                        {
+                            "aid": str(_u.uuid4()),
+                            "sid": sid,
+                            "code": str(selected_dataset_code),
+                            "by": actor,
+                            "to": to_status,
+                            "diff": "human-reviewed before save",
+                            "ts": datetime.now(UTC).replace(tzinfo=None),
+                            "notes": notes[:2000],
+                        },
+                    )
+                except Exception:
+                    pass  # audit failure must never block the save
+
             if silver_save_draft:
-                with _warehouse(readonly=False) as wh:
-                    try:
-                        sid = persist_silver_proposal(
-                            warehouse=wh,
-                            proposal=silver_proposal,
-                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                            auto_submit=False,
-                        )
-                        st.success(f"Saved as DRAFT. silver_dataset_id=`{sid}`")
-                        st.session_state.pop(SILVER_PROPOSAL_KEY, None)
-                    except Exception as exc:
-                        st.error(f"Save failed: {exc}")
+                # Spinner gives the operator immediate visual feedback that
+                # the click registered + the Snowflake INSERT is in flight.
+                # Without it, the action felt "dead" for the 1-3 seconds the
+                # Snowflake call took — operator would click again, which
+                # caused double-persists and the confusing "PR v1 → LIVE v1"
+                # sequence seen earlier.
+                with st.spinner(
+                    f"💾 Saving Silver schema for `{selected_dataset_code}` as DRAFT…",
+                    show_time=True,
+                ):
+                    with _warehouse(readonly=False) as wh:
+                        try:
+                            actor = f"ui:{st.session_state.get('client_id', 'operator')}"
+                            sid = persist_silver_proposal(
+                                warehouse=wh,
+                                proposal=silver_proposal,
+                                actor=actor,
+                                auto_submit=False,
+                            )
+                            _write_silver_review_audit(
+                                wh,
+                                sid,
+                                silver_review_notes,
+                                to_status="DRAFT",
+                                actor=actor,
+                            )
+                        except Exception as exc:
+                            st.error(f"Save failed: {exc}")
+                            sid = None
+                if sid:
+                    st.success(
+                        f"✅ Saved as **DRAFT v1** — silver_dataset_id=`{sid}`.  "
+                        f"Use **✅ Save & Approve → LIVE** to promote DRAFT → LIVE."
+                    )
+                    st.session_state.pop(SILVER_PROPOSAL_KEY, None)
 
             if silver_approve:
-                with _warehouse(readonly=False) as wh:
-                    try:
-                        sid = persist_silver_proposal(
-                            warehouse=wh,
-                            proposal=silver_proposal,
-                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                            auto_submit=True,
-                        )
-                        approve_silver_schema(
-                            warehouse=wh,
-                            silver_dataset_id=sid,
-                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                        )
-                        st.success(
-                            f"🎉 LIVE — Silver schema for `{selected_dataset_code}` is now LIVE."
-                        )
-                        st.session_state.pop(SILVER_PROPOSAL_KEY, None)
-                    except Exception as exc:
-                        st.error(f"Approve failed: {exc}")
-                        st.exception(exc)
+                # Two-step under the hood: persist DRAFT, then approve →
+                # PENDING_REVIEW → LIVE.  Spinner covers BOTH so the operator
+                # doesn't think it's hung between them.
+                with st.spinner(
+                    f"🚀 Saving + promoting Silver schema for `{selected_dataset_code}` → LIVE…",
+                    show_time=True,
+                ):
+                    with _warehouse(readonly=False) as wh:
+                        try:
+                            actor = f"ui:{st.session_state.get('client_id', 'operator')}"
+                            sid = persist_silver_proposal(
+                                warehouse=wh,
+                                proposal=silver_proposal,
+                                actor=actor,
+                                auto_submit=True,
+                            )
+                            approve_silver_schema(
+                                warehouse=wh,
+                                silver_dataset_id=sid,
+                                actor=actor,
+                            )
+                            _write_silver_review_audit(
+                                wh,
+                                sid,
+                                silver_review_notes,
+                                to_status="LIVE",
+                                actor=actor,
+                            )
+                        except Exception as exc:
+                            st.error(f"Approve failed: {exc}")
+                            st.exception(exc)
+                            sid = None
+                if sid:
+                    st.success(
+                        f"🎉 **LIVE v1** — Silver schema for `{selected_dataset_code}` is "
+                        f"now LIVE.  Refresh the Global Medallion grid to see the green pill."
+                    )
+                    st.session_state.pop(SILVER_PROPOSAL_KEY, None)
 
     # ===========================================================================
     # 🥇 GOLD TAB — designable, 3 modes (existing flow, gated on Silver-LIVE)
@@ -3737,14 +3966,25 @@ if _authoring_unlocked:
                 help="Required to enable Propose. Calls Claude Haiku 4.5 against "
                 "the catalog + RAG corpus. Defaults OFF to prevent accidents.",
             )
+            # Phase 22 — R15 idempotency parity with Silver.
+            _gold_propose_locked = bool(st.session_state.get(GOLD_PROPOSAL_KEY))
             if st.button(
-                "🚀 Propose Gold (AI)",
+                "🚀 Propose Gold (AI)"
+                if not _gold_propose_locked
+                else "✓  Proposal ready below — review or discard to re-propose",
                 type="primary",
                 key="gold_ai_propose",
-                disabled=not _gold_ai_confirm,
-                help=None
-                if _gold_ai_confirm
-                else "🔒 Tick the AI-spend confirm box above to enable.",
+                disabled=(not _gold_ai_confirm) or _gold_propose_locked,
+                help=(
+                    "✓ A proposal is already staged below.  Save it as DRAFT, "
+                    "Approve → LIVE, or Discard to enable re-proposing."
+                    if _gold_propose_locked
+                    else (
+                        None
+                        if _gold_ai_confirm
+                        else "🔒 Tick the AI-spend confirm box above to enable."
+                    )
+                ),
             ):
                 with (
                     st.spinner(f"Agent constructing Gold for {selected_dataset_display}..."),
@@ -3944,6 +4184,17 @@ if _authoring_unlocked:
                     )
                 st.dataframe(pd.DataFrame(map_rows), use_container_width=True, hide_index=True)
 
+            # Phase 22 — R3: reviewer notes for Gold (parity with Silver).
+            gold_review_notes = st.text_area(
+                "📝 Reviewer notes  (recorded in audit log)",
+                key=f"gold_review_notes_{selected_dataset_code}",
+                placeholder="e.g. Added `last_updated_at` to support CDC.  "
+                "Mapped `eligibility_status` to canonical CMS value set.",
+                help="Free-text record of what the reviewer changed from the AI "
+                "proposal before saving.  Written to gold_schema_audit_log.notes.",
+                max_chars=2000,
+            )
+
             ga, gb, _ = st.columns([1, 1, 4])
             with ga:
                 gold_save_draft = st.button(
@@ -3956,40 +4207,104 @@ if _authoring_unlocked:
                     key="gold_approve",
                     use_container_width=True,
                 )
+
+            # Phase 22 — helper to write reviewer notes to the Gold audit log.
+            def _write_gold_review_audit(
+                wh, gid: str, notes: str, *, to_status: str, actor: str
+            ) -> None:
+                if not (notes or "").strip():
+                    return
+                import uuid as _u
+                from datetime import UTC, datetime
+
+                try:
+                    wh.execute(
+                        f"INSERT INTO {CONTROL_SCHEMA}.gold_schema_audit_log "
+                        f"(audit_id, gold_dataset_id, dataset_code, action, "
+                        f" actor, from_status, to_status, diff_summary, ts, notes) "
+                        f"VALUES ($aid, $gid, $code, 'reviewer_notes', $by, "
+                        f"        'DRAFT', $to, $diff, $ts, $notes)",
+                        {
+                            "aid": str(_u.uuid4()),
+                            "gid": gid,
+                            "code": str(selected_dataset_code),
+                            "by": actor,
+                            "to": to_status,
+                            "diff": "human-reviewed before save",
+                            "ts": datetime.now(UTC).replace(tzinfo=None),
+                            "notes": notes[:2000],
+                        },
+                    )
+                except Exception:
+                    pass
+
             if gold_save_draft:
-                with _warehouse(readonly=False) as wh:
-                    try:
-                        gid = persist_gold_proposal(
-                            warehouse=wh,
-                            proposal=gold_proposal,
-                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                            auto_submit=False,
-                        )
-                        st.success(f"Saved as DRAFT. gold_dataset_id=`{gid}`")
-                        st.session_state.pop(GOLD_PROPOSAL_KEY, None)
-                    except Exception as exc:
-                        st.error(f"Save failed: {exc}")
+                with st.spinner(
+                    f"💾 Saving Gold schema for `{selected_dataset_code}` as DRAFT…",
+                    show_time=True,
+                ):
+                    with _warehouse(readonly=False) as wh:
+                        try:
+                            actor = f"ui:{st.session_state.get('client_id', 'operator')}"
+                            gid = persist_gold_proposal(
+                                warehouse=wh,
+                                proposal=gold_proposal,
+                                actor=actor,
+                                auto_submit=False,
+                            )
+                            _write_gold_review_audit(
+                                wh,
+                                gid,
+                                gold_review_notes,
+                                to_status="DRAFT",
+                                actor=actor,
+                            )
+                        except Exception as exc:
+                            st.error(f"Save failed: {exc}")
+                            gid = None
+                if gid:
+                    st.success(
+                        f"✅ Saved as **DRAFT v1** — gold_dataset_id=`{gid}`.  "
+                        f"Use **✅ Save & Approve → LIVE** to promote DRAFT → LIVE."
+                    )
+                    st.session_state.pop(GOLD_PROPOSAL_KEY, None)
+
             if gold_approve:
-                with _warehouse(readonly=False) as wh:
-                    try:
-                        gid = persist_gold_proposal(
-                            warehouse=wh,
-                            proposal=gold_proposal,
-                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                            auto_submit=True,
-                        )
-                        approve_gold_schema(
-                            warehouse=wh,
-                            gold_dataset_id=gid,
-                            actor=f"ui:{st.session_state.get('client_id', 'operator')}",
-                        )
-                        st.success(
-                            f"🎉 LIVE — Gold schema for `{selected_dataset_code}` is now LIVE."
-                        )
-                        st.session_state.pop(GOLD_PROPOSAL_KEY, None)
-                    except Exception as exc:
-                        st.error(f"Approve failed: {exc}")
-                        st.exception(exc)
+                with st.spinner(
+                    f"🚀 Saving + promoting Gold schema for `{selected_dataset_code}` → LIVE…",
+                    show_time=True,
+                ):
+                    with _warehouse(readonly=False) as wh:
+                        try:
+                            actor = f"ui:{st.session_state.get('client_id', 'operator')}"
+                            gid = persist_gold_proposal(
+                                warehouse=wh,
+                                proposal=gold_proposal,
+                                actor=actor,
+                                auto_submit=True,
+                            )
+                            approve_gold_schema(
+                                warehouse=wh,
+                                gold_dataset_id=gid,
+                                actor=actor,
+                            )
+                            _write_gold_review_audit(
+                                wh,
+                                gid,
+                                gold_review_notes,
+                                to_status="LIVE",
+                                actor=actor,
+                            )
+                        except Exception as exc:
+                            st.error(f"Approve failed: {exc}")
+                            st.exception(exc)
+                            gid = None
+                if gid:
+                    st.success(
+                        f"🎉 **LIVE v1** — Gold schema for `{selected_dataset_code}` is "
+                        f"now LIVE.  Refresh the Global Medallion grid to see the gold pill."
+                    )
+                    st.session_state.pop(GOLD_PROPOSAL_KEY, None)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -3998,11 +4313,19 @@ if _authoring_unlocked:
 # always be at the end.'
 # ─────────────────────────────────────────────────────────────────────────────
 st.markdown("## 📦 Cloning Center")
+# Phase 22 — green callout when 📦 Clone was clicked on a grid row above.
+if _cloning_banner_text:
+    st.success(_cloning_banner_text, icon="📦")
+else:
+    st.caption(
+        "💡  Tip:  click **📦 Clone** on any row in the Global or Client "
+        "Medallion grids above to jump here with the source dataset pre-"
+        "selected.  Or pick a clone mode manually below."
+    )
 st.caption(
     "Clone-from-template flow.  All clones will buffer locally and apply "
     "via 🚀 Submit — concurrency-checked per source row.  Client → Global "
-    "is forbidden (Global is sacred).  *(Body intentionally blank — "
-    "redesign in progress; mode radio retained as the layout anchor.)*"
+    "is forbidden (Global is sacred)."
 )
-with st.expander("Show / hide cloning modes", expanded=True):
+with st.expander("Show / hide cloning modes", expanded=bool(_cloning_banner_text)):
     _render_cloning_center()
