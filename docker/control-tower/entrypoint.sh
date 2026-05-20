@@ -48,14 +48,24 @@ else
     echo "[entrypoint] WARN: /opt/datalink/pyproject.toml not found — bind-mount may be broken"
 fi
 
-# Phase 22 — ensure runtime deps that aren't baked into the base image but
-# are required by UI features added in Phase 22+.  ``openpyxl`` is needed
-# for pandas to read the xlsx Product Catalogue uploads.  Cheap idempotent
-# install — skipped if already present.
-echo "[entrypoint] ensuring Phase 22 runtime deps (openpyxl) are installed..."
+# Phase 22-23 — ensure runtime deps that aren't baked into the base image
+# but are required by UI features added since Phase 22.  Cheap idempotent
+# checks — skipped per-dep if already present.
+#   openpyxl    : xlsx Product Catalogue upload (Phase 22)
+#   python-docx : .docx spec-doc upload in Client Onboarding (Phase 23)
+#   pypdf       : PDF spec-doc upload in Client Onboarding (Phase 23)
+echo "[entrypoint] ensuring Phase 22-23 runtime deps are installed..."
 python -c "import openpyxl" 2>/dev/null \
     && echo "[entrypoint]   openpyxl already installed" \
     || timeout 30 pip install --no-build-isolation 'openpyxl>=3.1,<4.0' 2>&1 \
+        | sed 's|^|[entrypoint pip] |'
+python -c "import docx" 2>/dev/null \
+    && echo "[entrypoint]   python-docx already installed" \
+    || timeout 30 pip install --no-build-isolation 'python-docx>=1.0,<2.0' 2>&1 \
+        | sed 's|^|[entrypoint pip] |'
+python -c "import pypdf" 2>/dev/null \
+    && echo "[entrypoint]   pypdf already installed" \
+    || timeout 30 pip install --no-build-isolation 'pypdf>=5.0,<7.0' 2>&1 \
         | sed 's|^|[entrypoint pip] |'
 
 # Phase 6 fix: pre-create warehouse.duckdb + CONTROL schema + seed 7
