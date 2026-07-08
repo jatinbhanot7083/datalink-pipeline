@@ -59,7 +59,7 @@ Show DAG list. **Tell the team:**
 9. Click **✅ Approve to LIVE**
 
 **Tell the team:**
-> "Claude Haiku 4.5 just designed a 13-table Data Vault 2.0 Silver schema for Membership in 60 seconds, anchored to our Bronze catalog. Cost: ~$0.02. This is now LIVE in our metadata registry."
+> "Claude Haiku 4.5 just designed a 13-table Data Vault 2.0 Silver schema for Membership in 60 seconds, anchored to our Bronze catalog. Cost: ~$0.02.    is now LIVE in our metadata registry."
 
 ---
 
